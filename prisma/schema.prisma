@@ -1,0 +1,126 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Location {
+  id           String           @id @default(cuid())
+  name         String
+  description  String?
+  address      String
+  rooms        Room[]
+  facilitators Facilitator[]
+  events       ScheduledEvent[]
+}
+
+model Facilitator {
+  id                String           @id @default(cuid())
+  firstname         String
+  lastname          String
+  email             String
+  phone             String
+  bio               String?
+  address           String?
+  profilePictureUrl String?
+  color             String
+  availability      Json
+  notes             String?
+  metadata          Json?
+  isBookable        Boolean
+  isBioDisplayed    Boolean
+  locationId        String
+  location          Location         @relation(fields: [locationId], references: [id])
+  tags              Tag[]            @relation("FacilitatorTags")
+  events            ScheduledEvent[] @relation("EventFacilitators")
+
+  services Service[] @relation("FacilitatorServices")
+}
+
+model Room {
+  id           String           @id @default(cuid())
+  name         String           @unique
+  color        String
+  locationId   String
+  availability Json
+  notes        String?
+  metadata     Json?
+  location     Location         @relation(fields: [locationId], references: [id])
+  events       ScheduledEvent[]
+}
+
+model Client {
+  id        String           @id @default(cuid())
+  firstname String
+  lastname  String
+  email     String
+  phone     String
+  birthdate DateTime
+  address   String
+  notes     String?
+  metadata  Json?
+  events    ScheduledEvent[] @relation("EventClients")
+}
+
+model Tag {
+  id           String           @id @default(cuid())
+  label        String
+  parentId     String?
+  metadata     Json?
+  facilitators Facilitator[]    @relation("FacilitatorTags")
+  events       ScheduledEvent[] @relation("EventTags")
+  services     Service[]        @relation("ServiceTags")
+}
+
+model Service {
+  id                     String           @id @default(cuid())
+  name                   String
+  description            String
+  defaultDurationMinutes Int
+  defaultPrice           Float
+  notes                  String?
+  metadata               Json?
+  serviceCategoryId      String
+  serviceCategory        ServiceCategory  @relation(fields: [serviceCategoryId], references: [id])
+  tags                   Tag[]            @relation("ServiceTags")
+  events                 ScheduledEvent[]
+
+  facilitators Facilitator[] @relation("FacilitatorServices")
+}
+
+model ServiceCategory {
+  id             String           @id @default(cuid())
+  name           String
+  description    String
+  isDisplayed    Boolean
+  isBookable     Boolean
+  services       Service[]
+  ScheduledEvent ScheduledEvent[]
+}
+
+model ScheduledEvent {
+  id            String    @id @default(cuid())
+  startTime     DateTime
+  endTime       DateTime
+  recurrence    String?
+  recurrenceEnd DateTime?
+  color         String
+
+  // Relations
+  roomId            String
+  locationId        String
+  serviceId         String
+  serviceCategoryId String
+
+  room            Room            @relation(fields: [roomId], references: [id])
+  location        Location        @relation(fields: [locationId], references: [id])
+  service         Service         @relation(fields: [serviceId], references: [id])
+  serviceCategory ServiceCategory @relation(fields: [serviceCategoryId], references: [id])
+
+  facilitators Facilitator[] @relation("EventFacilitators")
+  clients      Client[]      @relation("EventClients")
+  tags         Tag[]         @relation("EventTags")
+}
