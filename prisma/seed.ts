@@ -1,5 +1,3 @@
-// prisma/seed.ts
-
 import { PrismaClient } from '@prisma/client';
 import { faker } from '@faker-js/faker/locale/fr';
 
@@ -18,15 +16,6 @@ function fakeAvailability() {
 }
 
 async function main() {
-  console.log("🧹 Clearing old data...");
-  await prisma.scheduledEvent.deleteMany();
-  await prisma.tag.deleteMany();
-  await prisma.service.deleteMany();
-  await prisma.serviceCategory.deleteMany();
-  await prisma.client.deleteMany();
-  await prisma.facilitator.deleteMany();
-  await prisma.room.deleteMany();
-  await prisma.location.deleteMany();
 
   console.log("🌍 Creating locations...");
   const locations = await Promise.all([
@@ -52,8 +41,9 @@ async function main() {
 
   console.log("👩‍🏫 Creating facilitators...");
   const facilitators = await Promise.all(
-    Array.from({ length: 6 }).map(() =>
-      prisma.facilitator.create({
+    Array.from({ length: 6 }).map(() => {
+      const selectedLocations = faker.helpers.arrayElements(locations, faker.number.int({ min: 1, max: 2 }));
+      return prisma.facilitator.create({
         data: {
           firstname: faker.person.firstName(),
           lastname: faker.person.lastName(),
@@ -68,10 +58,12 @@ async function main() {
           metadata: {},
           isBookable: true,
           isBioDisplayed: true,
-          locationId: locations[Math.floor(Math.random() * locations.length)].id,
+          locations: {
+            connect: selectedLocations.map(loc => ({ id: loc.id })),
+          },
         },
-      })
-    )
+      });
+    })
   );
 
   console.log("🎓 Creating clients...");
@@ -133,7 +125,9 @@ async function main() {
   console.log("📅 Creating scheduled events...");
   for (let i = 0; i < 10; i++) {
     const room = faker.helpers.arrayElement(rooms);
-    const location = locations.find(loc => loc.id === room.locationId)!;
+    const associatedLocation = locations.find(loc => loc.id === room.locationId);
+    if (!associatedLocation) continue;
+
     const service = faker.helpers.arrayElement(services);
     const serviceCategory = categories.find(cat => cat.id === service.serviceCategoryId)!;
 
@@ -151,7 +145,7 @@ async function main() {
         recurrence: null,
         color: randomColor(),
         roomId: room.id,
-        locationId: location.id,
+        locationId: associatedLocation.id,
         serviceId: service.id,
         serviceCategoryId: serviceCategory.id,
         facilitators: { connect: facilitatorSubset.map(f => ({ id: f.id })) },

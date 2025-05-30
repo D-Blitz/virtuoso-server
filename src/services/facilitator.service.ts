@@ -8,7 +8,11 @@ export class FacilitatorService {
   }
 
   async getAll() {
-    return prisma.facilitator.findMany();
+    return prisma.facilitator.findMany({
+      include: {
+        locations: true,
+      },
+    });
   }
 
   async update(id: string, data: any) {

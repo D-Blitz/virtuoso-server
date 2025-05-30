@@ -13,7 +13,7 @@ model Location {
   description  String?
   address      String
   rooms        Room[]
-  facilitators Facilitator[]
+  facilitators Facilitator[]    @relation("FacilitatorLocations")
   events       ScheduledEvent[]
 }
 
@@ -32,12 +32,10 @@ model Facilitator {
   metadata          Json?
   isBookable        Boolean
   isBioDisplayed    Boolean
-  locationId        String
-  location          Location         @relation(fields: [locationId], references: [id])
+  locations         Location[]       @relation("FacilitatorLocations")
   tags              Tag[]            @relation("FacilitatorTags")
   events            ScheduledEvent[] @relation("EventFacilitators")
-
-  services Service[] @relation("FacilitatorServices")
+  services          Service[]        @relation("FacilitatorServices")
 }
 
 model Room {
