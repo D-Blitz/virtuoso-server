@@ -151,6 +151,7 @@ async function main() {
         facilitators: { connect: facilitatorSubset.map(f => ({ id: f.id })) },
         clients: { connect: clientSubset.map(c => ({ id: c.id })) },
         tags: { connect: tagSubset.map(t => ({ id: t.id })) },
+        price: 60.0,
       },
     });
   }

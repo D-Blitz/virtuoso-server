@@ -106,6 +106,8 @@ model ScheduledEvent {
   recurrence    String?
   recurrenceEnd DateTime?
   color         String
+  price         Float
+  notes         String? 
 
   // Relations
   roomId            String
