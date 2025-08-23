@@ -12,6 +12,7 @@ import serviceCategoryRoutes from './routes/serviceCategory.routes';
 import scheduledEventRoutes from './routes/scheduledEvent.routes';
 import locationRoutes from './routes/location.routes';
 import contextRoutes from './routes/context.routes';
+import scheduledEventValidationRoutes from './routes/validation/scheduledEventValidation.routes';
 
 dotenv.config();
 
@@ -30,6 +31,7 @@ app.use('/api/service-categories', serviceCategoryRoutes);
 app.use('/api/scheduled-events', scheduledEventRoutes);
 app.use('/api/locations', locationRoutes);
 app.use('/api/context', contextRoutes);
+app.use('/api/validation/scheduled-events', scheduledEventValidationRoutes);
 
 app.listen(PORT, () => {
   console.log(`Server running at http://localhost:${PORT}`);
