@@ -4,13 +4,20 @@ const prisma = new PrismaClient();
 
 export class FacilitatorService {
   async create(data: any) {
-    return prisma.facilitator.create({ data });
+    return prisma.facilitator.create({
+      data,
+      include: {
+        locations: true,
+        tags: true,
+      },
+    });
   }
 
   async getAll() {
     return prisma.facilitator.findMany({
       include: {
         locations: true,
+        tags: true,
       },
     });
   }
@@ -19,6 +26,10 @@ export class FacilitatorService {
     return prisma.facilitator.update({
       where: { id },
       data,
+      include: {
+        locations: true,
+        tags: true,
+      },
     });
   }
 
