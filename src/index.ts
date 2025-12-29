@@ -11,8 +11,11 @@ import clientRoutes from './routes/client.routes';
 import serviceCategoryRoutes from './routes/serviceCategory.routes';
 import scheduledEventRoutes from './routes/scheduledEvent.routes';
 import locationRoutes from './routes/location.routes';
+import termRoutes from './routes/term.routes';
+import enrollmentRoutes from './routes/enrollment.routes';
 import contextRoutes from './routes/context.routes';
 import scheduledEventValidationRoutes from './routes/validation/scheduledEventValidation.routes';
+import enrollmentEngineRoutes from './routes/enrollmentEngine.routes';
 
 dotenv.config();
 
@@ -32,6 +35,10 @@ app.use('/api/scheduled-events', scheduledEventRoutes);
 app.use('/api/locations', locationRoutes);
 app.use('/api/context', contextRoutes);
 app.use('/api/validation/scheduled-events', scheduledEventValidationRoutes);
+app.use('/api/terms', termRoutes);
+app.use('/api/enrollments', enrollmentRoutes);
+app.use('/api/enrollments', enrollmentEngineRoutes);
+
 
 app.listen(PORT, () => {
   console.log(`Server running at http://localhost:${PORT}`);

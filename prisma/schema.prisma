@@ -15,6 +15,9 @@ model Location {
   rooms        Room[]
   facilitators Facilitator[]    @relation("FacilitatorLocations")
   events       ScheduledEvent[]
+  terms        Term[]
+  enrollments  Enrollment[]
+  closures     Closure[]
 }
 
 model Facilitator {
@@ -36,6 +39,7 @@ model Facilitator {
   tags              Tag[]            @relation("FacilitatorTags")
   events            ScheduledEvent[] @relation("EventFacilitators")
   services          Service[]        @relation("FacilitatorServices")
+  enrollments       Enrollment[]
 }
 
 model Room {
@@ -48,6 +52,7 @@ model Room {
   metadata     Json?
   location     Location         @relation(fields: [locationId], references: [id])
   events       ScheduledEvent[]
+  enrollments  Enrollment[]
 }
 
 model Client {
@@ -61,6 +66,7 @@ model Client {
   notes     String?
   metadata  Json?
   events    ScheduledEvent[] @relation("EventClients")
+  enrollments Enrollment[]
 }
 
 model Tag {
@@ -87,6 +93,7 @@ model Service {
   events                 ScheduledEvent[]
 
   facilitators Facilitator[] @relation("FacilitatorServices")
+  enrollments  Enrollment[]
 }
 
 model ServiceCategory {
@@ -123,4 +130,80 @@ model ScheduledEvent {
   facilitators Facilitator[] @relation("EventFacilitators")
   clients      Client[]      @relation("EventClients")
   tags         Tag[]         @relation("EventTags")
+
+  enrollmentId String?
+  enrollment   Enrollment? @relation(fields: [enrollmentId], references: [id])
+}
+
+model Term {
+  id         String   @id @default(cuid())
+  name       String
+  startDate  DateTime
+  endDate    DateTime
+
+  locationId String?
+  location   Location? @relation(fields: [locationId], references: [id])
+
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  enrollments Enrollment[]
+}
+
+model Enrollment {
+  id         String   @id @default(cuid())
+
+  // what was bought
+  serviceId  String
+  service    Service  @relation(fields: [serviceId], references: [id])
+
+  // who
+  clientId   String
+  client     Client   @relation(fields: [clientId], references: [id])
+
+  // where / with whom (optional at v1 if you want)
+  locationId String
+  location   Location @relation(fields: [locationId], references: [id])
+
+  facilitatorId String?
+  facilitator   Facilitator? @relation(fields: [facilitatorId], references: [id])
+
+  roomId String
+  room   Room @relation(fields: [roomId], references: [id])
+
+  // which trimester
+  termId     String
+  term       Term     @relation(fields: [termId], references: [id])
+
+  // recurrence rule (weekly)
+  weekday    Int      // 0..6
+  startTime  String   // "17:00" (easy v1)
+  durationMinutes Int
+
+  // active window
+  startDate  DateTime
+  endDate    DateTime
+
+  // billing snapshot
+  priceCharged Float
+  pricingStrategy String // "TERM_FIXED_PRORATED" etc.
+  status      String     // "DRAFT"|"PAID"|"ACTIVE"|"CANCELED"
+
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  events ScheduledEvent[]
+}
+
+model Closure {
+  id         String   @id @default(cuid())
+  name       String
+  startDate  DateTime
+  endDate    DateTime
+
+  locationId String?
+  location   Location? @relation(fields: [locationId], references: [id])
+
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
 }
