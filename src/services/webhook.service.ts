@@ -1,5 +1,6 @@
 import prisma from '../prisma';
 import type { StripeEvent } from './stripe.service';
+import { EnrollmentInviteCheckoutService } from './enrollmentInviteCheckout.service';
 
 /**
  * Webhook handler. Runs OUTSIDE any request org context — receives global
@@ -8,6 +9,9 @@ import type { StripeEvent } from './stripe.service';
  * Idempotent: every event is stamped in StripeEvent on receipt; replay just
  * returns OK without reapplying state.
  */
+
+const enrollmentCheckout = new EnrollmentInviteCheckoutService();
+
 export class WebhookService {
   async handle(event: StripeEvent): Promise<{ ok: boolean; duplicate: boolean }> {
     // Idempotency: insert by event id. If we've seen it before, bail.
@@ -56,6 +60,8 @@ export class WebhookService {
     const paymentId = meta.paymentId as string | undefined;
     const scheduledEventId = meta.scheduledEventId as string | undefined;
     const submissionId = meta.widgetSubmissionId as string | undefined;
+    const enrollmentInviteId = meta.enrollmentInviteId as string | undefined;
+    const purpose = meta.purpose as string | undefined;
 
     if (!paymentId) {
       console.warn(
@@ -65,11 +71,36 @@ export class WebhookService {
       return;
     }
 
+    // Mark the payment SUCCEEDED in all cases.
     await prisma.payment.update({
       where: { id: paymentId },
       data: { status: 'SUCCEEDED' },
     });
 
+    // Route by purpose:
+    //   ENROLLMENT_BALANCE → activate enrollment (handles event/invite state)
+    //   TRIAL_LESSON (or default) → flip trial event to PAID_TRIAL
+    if (purpose === 'ENROLLMENT_BALANCE' && enrollmentInviteId) {
+      try {
+        const result = await enrollmentCheckout.activateFromPayment({
+          paymentId,
+          enrollmentInviteId,
+        });
+        if (result) {
+          console.log(
+            `[webhook] activated enrollment ${result.enrollmentId} (${result.eventsGenerated} events generated)`,
+          );
+        }
+      } catch (err) {
+        console.error('[webhook] enrollment activation failed:', err);
+        // Payment is still marked SUCCEEDED — admin will see the discrepancy
+        // and can manually intervene. Better than re-throwing and getting
+        // Stripe to retry, because retries would create duplicate enrollments.
+      }
+      return;
+    }
+
+    // Trial lesson path (default)
     if (scheduledEventId) {
       await prisma.scheduledEvent.update({
         where: { id: scheduledEventId },
@@ -90,6 +121,7 @@ export class WebhookService {
     const paymentId = meta.paymentId as string | undefined;
     const scheduledEventId = meta.scheduledEventId as string | undefined;
     const submissionId = meta.widgetSubmissionId as string | undefined;
+    const purpose = meta.purpose as string | undefined;
 
     if (paymentId) {
       await prisma.payment.update({
@@ -97,6 +129,13 @@ export class WebhookService {
         data: { status: 'FAILED' },
       });
     }
+
+    // For ENROLLMENT_BALANCE we don't cancel anything else — the invite is
+    // still PENDING and the student can retry checkout. Don't touch the
+    // ScheduledEvent (the trial already happened).
+    if (purpose === 'ENROLLMENT_BALANCE') return;
+
+    // Trial lesson path
     if (scheduledEventId) {
       await prisma.scheduledEvent.update({
         where: { id: scheduledEventId },

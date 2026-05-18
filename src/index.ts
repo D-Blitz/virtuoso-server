@@ -7,6 +7,7 @@ import { requireUser } from './middleware/auth';
 import { requireMutationRole } from './middleware/role';
 import authRoutes from './routes/auth.routes';
 import publicWidgetRoutes from './routes/publicWidget.routes';
+import publicInviteRoutes from './routes/publicInvite.routes';
 import webhookRoutes from './routes/webhook.routes';
 
 // routes
@@ -67,6 +68,9 @@ app.use('/api/auth', authRoutes);
 
 // Public widget endpoints — no user auth, gated by publishable key + Origin check.
 app.use('/api/public/widgets', publicWidgetRoutes);
+
+// Public invite endpoints — no user auth, gated by single-use opaque token.
+app.use('/api/public/invites', publicInviteRoutes);
 
 // All /api routes below require an authenticated session (dev bypass available).
 // Mutations (POST/PUT/PATCH/DELETE) additionally require OWNER or ADMIN role.
