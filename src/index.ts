@@ -27,6 +27,7 @@ import enrollmentEngineRoutes from './routes/enrollmentEngine.routes';
 import widgetRoutes from './routes/widget.routes';
 import paymentRoutes from './routes/payment.routes';
 import jobsRoutes from './routes/jobs.routes';
+import closureRoutes from './routes/closure.routes';
 
 // jobs
 import { startSlotHoldSweep } from './jobs/sweepSlotHolds';
@@ -93,6 +94,7 @@ app.use('/api/enrollments', enrollmentEngineRoutes);
 app.use('/api/widgets', widgetRoutes);
 app.use('/api/payments', paymentRoutes);
 app.use('/api/jobs', jobsRoutes);
+app.use('/api/closures', closureRoutes);
 
 // Background jobs
 startSlotHoldSweep();
