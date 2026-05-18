@@ -80,13 +80,19 @@ export class StripeService {
     idempotencyKey: string;
   }): Promise<{ id: string; client_secret: string | null }> {
     const stripe = getStripe();
+    // Lock to card-only:
+    //  - keeps the inline Stripe Elements flow predictable (no redirects)
+    //  - avoids the test-mode hang we hit when redirect-based methods
+    //    (Klarna/Bancontact/Link) get picked but the return_url handshake
+    //    can't complete (e.g., localhost / hash-only URLs)
+    //  - we can re-enable APMs later when we have a real return-page route
     const pi = await stripe.paymentIntents.create(
       {
         amount: args.amountCents,
         currency: args.currency.toLowerCase(),
         customer: args.customerId,
         metadata: args.metadata as unknown as Record<string, string>,
-        automatic_payment_methods: { enabled: true },
+        payment_method_types: ['card'],
         description: `${args.metadata.purpose} for submission ${args.metadata.widgetSubmissionId}`,
       },
       { idempotencyKey: args.idempotencyKey },

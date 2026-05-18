@@ -59,7 +59,7 @@ export class PublicInviteController {
     }
   }
 
-  /** Apply the recurring-slot override on the invite (once-only). */
+  /** Apply (or re-apply) the recurring-slot override on the invite. */
   async reschedule(req: Request, res: Response) {
     try {
       const parsed = rescheduleBodySchema.safeParse(req.body);
@@ -82,8 +82,21 @@ export class PublicInviteController {
       const lower = msg.toLowerCase();
       const status =
         lower.includes('introuvable') ? 404 :
-        lower.includes('déjà') || lower.includes('disponible') ? 409 :
+        lower.includes('disponible') ? 409 :
         400;
+      res.status(status).json({ error: msg });
+    }
+  }
+
+  /** Clear any pending override, restoring the trial slot as the recurring slot. */
+  async rescheduleRevert(req: Request, res: Response) {
+    try {
+      await rescheduleService.revert(req.params.token);
+      res.status(204).send();
+    } catch (error: any) {
+      console.error('publicInvite rescheduleRevert error:', error);
+      const msg = error?.message ?? 'Erreur';
+      const status = msg.toLowerCase().includes('introuvable') ? 404 : 400;
       res.status(status).json({ error: msg });
     }
   }

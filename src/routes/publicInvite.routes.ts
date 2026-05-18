@@ -12,5 +12,8 @@ router.get('/:token/reschedule-options', (req, res) =>
   controller.rescheduleOptions(req, res),
 );
 router.post('/:token/reschedule', (req, res) => controller.reschedule(req, res));
+router.delete('/:token/reschedule', (req, res) =>
+  controller.rescheduleRevert(req, res),
+);
 
 export default router;

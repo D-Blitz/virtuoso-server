@@ -215,7 +215,14 @@ export class ScheduledEventRescheduleService {
 
     // Fire-and-forget confirmation email. Don't fail the API call if it bounces.
     const client = event.clients[0];
-    if (client?.email) {
+    if (!client?.email) {
+      console.warn(
+        `[reschedule] event ${event.id} has no client/email — skipping confirmation email`,
+      );
+    } else {
+      console.log(
+        `[reschedule] dispatching confirmation email to ${client.email} (event ${event.id}, new start ${newStartTime.toISOString()})`,
+      );
       void emailService
         .sendTrialReschedule({
           to: client.email,
@@ -225,6 +232,9 @@ export class ScheduledEventRescheduleService {
           previousDateLabel: formatTrialDateLabel(previousStartTime),
           newDateLabel: formatTrialDateLabel(newStartTime),
           locationName: event.location.name,
+        })
+        .then(() => {
+          console.log(`[reschedule] confirmation email sent to ${client.email}`);
         })
         .catch((err) => {
           console.error('[reschedule] confirmation email failed:', err);
