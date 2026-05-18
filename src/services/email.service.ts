@@ -51,6 +51,16 @@ export type TrialConfirmationEmailParams = {
   rescheduleUrl: string;
 };
 
+export type TrialRescheduleEmailParams = {
+  to: string;
+  studentFirstname: string;
+  serviceName: string;
+  facilitatorName: string;
+  previousDateLabel: string;    // e.g. "lundi 19 mai à 14:00"
+  newDateLabel: string;
+  locationName: string;
+};
+
 export class EmailService {
   async sendEnrollmentInvite(params: EnrollmentInviteEmailParams): Promise<void> {
     const subject = `Votre cours du ${params.trialDateLabel} — Inscription au trimestre`;
@@ -170,6 +180,75 @@ export class EmailService {
       console.log('Subject:', subject);
       console.log('Reschedule URL:', params.rescheduleUrl);
       console.log('---------------------------------------');
+      return;
+    }
+
+    const { error } = await r.emails.send({
+      from: defaultFrom(),
+      to: params.to,
+      subject,
+      html,
+      text,
+    });
+    if (error) {
+      throw new Error(`Resend error: ${error.message || JSON.stringify(error)}`);
+    }
+  }
+
+  async sendTrialReschedule(params: TrialRescheduleEmailParams): Promise<void> {
+    const subject = `Cours d'essai reprogrammé : ${params.newDateLabel}`;
+    const html = `
+      <div style="font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;padding:24px;color:#111">
+        <h1 style="margin:0 0 16px 0;font-size:22px">Bonjour ${escape(params.studentFirstname)},</h1>
+        <p style="line-height:1.55;color:#333">
+          Votre cours d&rsquo;essai
+          <strong>${escape(params.serviceName)}</strong> avec
+          <strong>${escape(params.facilitatorName)}</strong> a bien été reprogrammé.
+        </p>
+        <div style="padding:16px;background:#f5f5f5;border-radius:8px;margin:16px 0">
+          <div style="font-size:15px;color:#555">
+            <strong>Nouvelle date :</strong> ${escape(params.newDateLabel)}
+          </div>
+          <div style="font-size:14px;color:#888;margin-top:6px;text-decoration:line-through">
+            Ancienne date : ${escape(params.previousDateLabel)}
+          </div>
+          <div style="font-size:15px;color:#555;margin-top:10px">
+            <strong>Lieu :</strong> ${escape(params.locationName)}
+          </div>
+        </div>
+        <p style="line-height:1.55;color:#333">
+          Cette modification est définitive : un cours d&rsquo;essai ne peut être
+          reprogrammé qu&rsquo;une seule fois en ligne. Pour toute autre demande,
+          contactez l&rsquo;école.
+        </p>
+        <hr style="margin:32px 0;border:none;border-top:1px solid #eee" />
+        <p style="font-size:12px;color:#999">
+          À très vite !
+        </p>
+      </div>
+    `.trim();
+
+    const text = [
+      `Bonjour ${params.studentFirstname},`,
+      ``,
+      `Votre cours d'essai ${params.serviceName} avec ${params.facilitatorName} a bien été reprogrammé.`,
+      ``,
+      `Nouvelle date : ${params.newDateLabel}`,
+      `Ancienne date : ${params.previousDateLabel}`,
+      `Lieu : ${params.locationName}`,
+      ``,
+      `Cette modification est définitive : un cours d'essai ne peut être reprogrammé qu'une seule fois en ligne.`,
+      `Pour toute autre demande, contactez l'école.`,
+    ].join('\n');
+
+    const r = getResend();
+    if (!r) {
+      console.log('--- [email-stub] trial-reschedule ---');
+      console.log('To:', params.to);
+      console.log('Subject:', subject);
+      console.log('Previous:', params.previousDateLabel);
+      console.log('New:', params.newDateLabel);
+      console.log('-------------------------------------');
       return;
     }
 

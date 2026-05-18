@@ -1,10 +1,27 @@
 import prisma from '../prisma';
 import { RescheduleOptionsService } from './rescheduleOptions.service';
+import { EmailService } from './email.service';
 
 const RESCHEDULE_CUTOFF_HOURS = 48;
 const OPTIONS_WINDOW_DAYS = 30;
 
 const options = new RescheduleOptionsService();
+const emailService = new EmailService();
+
+function formatTrialDateLabel(d: Date): string {
+  const date = d.toLocaleDateString('fr-FR', {
+    weekday: 'long',
+    day: 'numeric',
+    month: 'long',
+  });
+  const time = d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+  return `${date} à ${time}`;
+}
+
+function appendNote(existing: string | null | undefined, line: string): string {
+  const prev = (existing ?? '').trim();
+  return prev.length === 0 ? line : `${prev}\n${line}`;
+}
 
 export type TrialRescheduleSummary = {
   token: { value: string; consumed: boolean };
@@ -118,6 +135,12 @@ export class ScheduledEventRescheduleService {
   /**
    * Apply the reschedule. Re-validates everything server-side — token alone
    * is not authorization to bypass the 48h / once-only rules.
+   *
+   * Side effects:
+   *   - appends an audit line to `ScheduledEvent.notes` recording the previous
+   *     start/end and the reschedule timestamp (never overwrites prior notes);
+   *   - fire-and-forget confirmation email to the student (failures logged
+   *     but never thrown — the booking is already updated).
    */
   async apply(token: string, newStartTime: Date): Promise<void> {
     const tokenRow = await prisma.scheduledEventRescheduleToken.findFirst({
@@ -125,8 +148,13 @@ export class ScheduledEventRescheduleService {
       include: {
         scheduledEvent: {
           include: {
-            facilitators: { take: 1, select: { id: true } },
-            service: { select: { defaultDurationMinutes: true } },
+            facilitators: {
+              take: 1,
+              select: { id: true, firstname: true, lastname: true },
+            },
+            service: { select: { name: true, defaultDurationMinutes: true } },
+            location: { select: { name: true } },
+            clients: { take: 1, select: { email: true, firstname: true } },
           },
         },
       },
@@ -164,6 +192,10 @@ export class ScheduledEventRescheduleService {
     });
     if (conflict) throw new Error('Ce créneau vient d’être pris');
 
+    const previousStartTime = event.startTime;
+    const noteLine = `Reprogrammé le ${now.toLocaleString('fr-FR')} — créneau initial : ${formatTrialDateLabel(previousStartTime)} (par le client via lien email)`;
+    const nextNotes = appendNote(event.notes, noteLine);
+
     await prisma.$transaction(async (tx) => {
       await tx.scheduledEvent.update({
         where: { id: event.id },
@@ -171,7 +203,8 @@ export class ScheduledEventRescheduleService {
           startTime: newStartTime,
           endTime: newEndTime,
           rescheduleCount: { increment: 1 },
-          originalStartTime: event.originalStartTime ?? event.startTime,
+          originalStartTime: event.originalStartTime ?? previousStartTime,
+          notes: nextNotes,
         },
       });
       await tx.scheduledEventRescheduleToken.update({
@@ -179,5 +212,23 @@ export class ScheduledEventRescheduleService {
         data: { consumedAt: new Date() },
       });
     });
+
+    // Fire-and-forget confirmation email. Don't fail the API call if it bounces.
+    const client = event.clients[0];
+    if (client?.email) {
+      void emailService
+        .sendTrialReschedule({
+          to: client.email,
+          studentFirstname: client.firstname,
+          serviceName: event.service.name,
+          facilitatorName: `${facilitator.firstname} ${facilitator.lastname}`,
+          previousDateLabel: formatTrialDateLabel(previousStartTime),
+          newDateLabel: formatTrialDateLabel(newStartTime),
+          locationName: event.location.name,
+        })
+        .catch((err) => {
+          console.error('[reschedule] confirmation email failed:', err);
+        });
+    }
   }
 }
