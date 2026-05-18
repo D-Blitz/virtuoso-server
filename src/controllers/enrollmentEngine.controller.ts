@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
-import { PrismaClient } from '@prisma/client';
+import prisma from '../prisma';
+import { getOrganizationId } from '../auth/context';
 
 // services
 import { EnrollmentQuoteService } from '../services/enrollment/enrollmentQuote.service';
@@ -8,7 +9,6 @@ import { EnrollmentQuoteService } from '../services/enrollment/enrollmentQuote.s
 import { generateWeeklyOccurrences } from '../domain/recurrence/weeklyRecurrence.utils';
 import { isInAnyClosure } from '../domain/recurrence/closures.utils';
 
-const prisma = new PrismaClient();
 const quoteService = new EnrollmentQuoteService();
 
 export class EnrollmentEngineController {
@@ -139,10 +139,12 @@ export class EnrollmentEngineController {
         return;
       }
 
+      const organizationId = getOrganizationId()!;
       const createdEvents = await prisma.$transaction(
         filteredOccurrences.map((o) =>
           prisma.scheduledEvent.create({
             data: {
+              organizationId,
               startTime: o.startTime,
               endTime: o.endTime,
               recurrence: null,

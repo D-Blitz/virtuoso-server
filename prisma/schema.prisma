@@ -7,6 +7,49 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+model Organization {
+  id        String   @id @default(cuid())
+  slug      String   @unique
+  name      String
+  locale    String   @default("fr-FR")
+  timezone  String   @default("Europe/Paris")
+  currency  String   @default("EUR")
+  createdAt DateTime @default(now())
+
+  users             User[]
+  locations         Location[]
+  facilitators      Facilitator[]
+  rooms             Room[]
+  clients           Client[]
+  tags              Tag[]
+  services          Service[]
+  serviceCategories ServiceCategory[]
+  scheduledEvents   ScheduledEvent[]
+  terms             Term[]
+  enrollments       Enrollment[]
+  closures          Closure[]
+  widgets           BookingWidget[]
+  slotHolds         SlotHold[]
+  payments          Payment[]
+  widgetSubmissions WidgetSubmission[]
+  enrollmentInvites EnrollmentInvite[]
+}
+
+model User {
+  id             String       @id @default(cuid())
+  email          String
+  passwordHash   String?
+  role           String // OWNER | ADMIN | STAFF | FACILITATOR
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  facilitatorId  String?      @unique
+  facilitator    Facilitator? @relation(fields: [facilitatorId], references: [id])
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@unique([organizationId, email])
+}
+
 model Location {
   id           String           @id @default(cuid())
   name         String
@@ -18,6 +61,9 @@ model Location {
   terms        Term[]
   enrollments  Enrollment[]
   closures     Closure[]
+
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
 }
 
 model Facilitator {
@@ -40,11 +86,22 @@ model Facilitator {
   events            ScheduledEvent[] @relation("EventFacilitators")
   services          Service[]        @relation("FacilitatorServices")
   enrollments       Enrollment[]
+  user              User?
+  slotHolds         SlotHold[]
+
+  // Recommender scoring (consumed by the booking widget's recommender service)
+  ageScores      Json     @default("[]") // [{min:number, max:number, score:number}]
+  levelScores    Json     @default("{}") // {BEGINNER:number, INTERMEDIATE:number, ADVANCED:number}
+  languages      String[] @default([]) // BCP-47 codes (e.g. "fr-FR", "en-US")
+  priorityWeight Float    @default(1.0)
+
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
 }
 
 model Room {
   id           String           @id @default(cuid())
-  name         String           @unique
+  name         String
   color        String
   locationId   String
   availability Json
@@ -53,20 +110,30 @@ model Room {
   location     Location         @relation(fields: [locationId], references: [id])
   events       ScheduledEvent[]
   enrollments  Enrollment[]
+
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  @@unique([organizationId, name])
 }
 
 model Client {
-  id        String           @id @default(cuid())
-  firstname String
-  lastname  String
-  email     String
-  phone     String
-  birthdate DateTime
-  address   String
-  notes     String?
-  metadata  Json?
-  events    ScheduledEvent[] @relation("EventClients")
-  enrollments Enrollment[]
+  id          String           @id @default(cuid())
+  firstname   String
+  lastname    String
+  email       String
+  phone       String
+  birthdate   DateTime
+  address     String
+  notes       String?
+  metadata    Json?
+  events            ScheduledEvent[] @relation("EventClients")
+  enrollments       Enrollment[]
+  payments          Payment[]
+  enrollmentInvites EnrollmentInvite[]
+
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
 }
 
 model Tag {
@@ -77,6 +144,9 @@ model Tag {
   facilitators Facilitator[]    @relation("FacilitatorTags")
   events       ScheduledEvent[] @relation("EventTags")
   services     Service[]        @relation("ServiceTags")
+
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
 }
 
 model Service {
@@ -94,6 +164,16 @@ model Service {
 
   facilitators Facilitator[] @relation("FacilitatorServices")
   enrollments  Enrollment[]
+
+  // Booking mode — drives the widget flow + post-booking behavior:
+  //   LESSON   - trial-then-trimester (PAID_TRIAL → enrollment invite email
+  //              → second form with trial credit applied)
+  //   ONE_OFF  - direct purchase, no trial concept, no enrollment invite
+  //              (room rentals, concert tickets, masterclasses, etc.)
+  bookingMode String @default("LESSON")
+
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
 }
 
 model ServiceCategory {
@@ -104,6 +184,9 @@ model ServiceCategory {
   isBookable     Boolean
   services       Service[]
   ScheduledEvent ScheduledEvent[]
+
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
 }
 
 model ScheduledEvent {
@@ -114,7 +197,19 @@ model ScheduledEvent {
   recurrenceEnd DateTime?
   color         String
   price         Float
-  notes         String? 
+  notes         String?
+
+  // Lifecycle status:
+  //   SCHEDULED                     - regular admin-created event
+  //   PENDING_PAYMENT               - created via widget, awaiting payment
+  //   PAID_TRIAL                    - trial paid, ready to happen
+  //   AWAITING_ENROLLMENT_DECISION  - trial done, waiting on enrollment (PR 6)
+  //   CONVERTED_TO_ENROLLMENT       - trial converted (PR 6)
+  //   LAPSED                        - invite expired without conversion (PR 6)
+  //   CANCELED                      - admin-cancelled
+  status            String    @default("SCHEDULED")
+  rescheduleCount   Int       @default(0)
+  originalStartTime DateTime?
 
   // Relations
   roomId            String
@@ -133,33 +228,43 @@ model ScheduledEvent {
 
   enrollmentId String?
   enrollment   Enrollment? @relation(fields: [enrollmentId], references: [id])
+
+  payments          Payment[]
+  widgetSubmissions WidgetSubmission[]
+  enrollmentInvites EnrollmentInvite[]
+
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
 }
 
 model Term {
-  id         String   @id @default(cuid())
-  name       String
-  startDate  DateTime
-  endDate    DateTime
+  id        String   @id @default(cuid())
+  name      String
+  startDate DateTime
+  endDate   DateTime
 
   locationId String?
   location   Location? @relation(fields: [locationId], references: [id])
 
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   enrollments Enrollment[]
+
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
 }
 
 model Enrollment {
-  id         String   @id @default(cuid())
+  id String @id @default(cuid())
 
   // what was bought
-  serviceId  String
-  service    Service  @relation(fields: [serviceId], references: [id])
+  serviceId String
+  service   Service @relation(fields: [serviceId], references: [id])
 
   // who
-  clientId   String
-  client     Client   @relation(fields: [clientId], references: [id])
+  clientId String
+  client   Client @relation(fields: [clientId], references: [id])
 
   // where / with whom (optional at v1 if you want)
   locationId String
@@ -169,41 +274,211 @@ model Enrollment {
   facilitator   Facilitator? @relation(fields: [facilitatorId], references: [id])
 
   roomId String
-  room   Room @relation(fields: [roomId], references: [id])
+  room   Room   @relation(fields: [roomId], references: [id])
 
   // which trimester
-  termId     String
-  term       Term     @relation(fields: [termId], references: [id])
+  termId String
+  term   Term   @relation(fields: [termId], references: [id])
 
   // recurrence rule (weekly)
-  weekday    Int      // 0..6
-  startTime  String   // "17:00" (easy v1)
+  weekday         Int // 0..6
+  startTime       String // "17:00" (easy v1)
   durationMinutes Int
 
   // active window
-  startDate  DateTime
-  endDate    DateTime
+  startDate DateTime
+  endDate   DateTime
 
   // billing snapshot
-  priceCharged Float
+  priceCharged    Float
   pricingStrategy String // "TERM_FIXED_PRORATED" etc.
-  status      String     // "DRAFT"|"PAID"|"ACTIVE"|"CANCELED"
+  status          String // "DRAFT"|"PAID"|"ACTIVE"|"CANCELED"
 
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   events ScheduledEvent[]
+
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
 }
 
 model Closure {
-  id         String   @id @default(cuid())
-  name       String
-  startDate  DateTime
-  endDate    DateTime
+  id        String   @id @default(cuid())
+  name      String
+  startDate DateTime
+  endDate   DateTime
 
   locationId String?
   location   Location? @relation(fields: [locationId], references: [id])
 
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+}
+
+// =========================================================================
+// Booking widget — configurable embeddable widget per school.
+// =========================================================================
+model BookingWidget {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  // Human-readable URL part — public widget URL = /widget/<slug>
+  slug           String
+  publishableKey String   @unique
+  allowedOrigins String[] @default([])
+
+  isPublished Boolean @default(false)
+
+  // Services this widget exposes (empty = all org services).
+  serviceIds String[] @default([])
+  // If set, the widget is scoped to a single location.
+  locationId String?
+
+  // Theme + layout + copy + recommenderWeights.
+  draftConfig     Json
+  publishedConfig Json?
+
+  submissions WidgetSubmission[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([organizationId, slug])
+}
+
+// =========================================================================
+// Soft-hold on a candidate booking slot.
+// =========================================================================
+model SlotHold {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  facilitatorId String
+  facilitator   Facilitator @relation(fields: [facilitatorId], references: [id])
+
+  startTime DateTime
+  endTime   DateTime
+
+  sessionId String
+
+  expiresAt  DateTime
+  consumedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([facilitatorId, startTime])
+  @@index([expiresAt])
+  @@index([organizationId])
+}
+
+// =========================================================================
+// WidgetSubmission — denormalized record of a user's booking submission.
+// Created at the moment the user clicks "pay for trial lesson".
+// =========================================================================
+model WidgetSubmission {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  widgetId String
+  widget   BookingWidget @relation(fields: [widgetId], references: [id])
+
+  // Full payload of what the user submitted (for audit).
+  payload Json
+
+  status        String // PENDING | CONFIRMED | REJECTED
+  ip            String?
+  userAgent     String?
+  acceptedCgvAt DateTime?
+  cgvVersion    String?
+
+  resultingScheduledEventId String?
+  resultingScheduledEvent   ScheduledEvent? @relation(fields: [resultingScheduledEventId], references: [id])
+
+  submittedAt DateTime @default(now())
+
+  @@index([widgetId])
+  @@index([organizationId])
+}
+
+// =========================================================================
+// Payment — one row per Stripe PaymentIntent we create.
+// Mirrors Stripe state via webhooks; the source of truth is Stripe.
+// =========================================================================
+model Payment {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  clientId String
+  client   Client @relation(fields: [clientId], references: [id])
+
+  amountCents Int
+  currency    String @default("EUR")
+
+  stripePaymentIntentId String  @unique
+  stripeCustomerId      String?
+
+  status  String @default("PENDING") // PENDING | SUCCEEDED | FAILED | REFUNDED
+  purpose String // TRIAL_LESSON | ENROLLMENT_BALANCE (extend in PR 6)
+
+  relatedScheduledEventId String?
+  relatedScheduledEvent   ScheduledEvent? @relation(fields: [relatedScheduledEventId], references: [id])
+  relatedEnrollmentId     String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([organizationId])
+  @@index([clientId])
+}
+
+// =========================================================================
+// StripeEvent — idempotency log for webhook deliveries.
+// NOT tenant-scoped (Stripe events arrive globally; we route by metadata).
+// =========================================================================
+model StripeEvent {
+  id          String    @id // Stripe event id is globally unique
+  type        String
+  payload     Json
+  processedAt DateTime?
+  receivedAt  DateTime  @default(now())
+}
+
+// =========================================================================
+// EnrollmentInvite — single-use token sent by email after a trial lesson
+// (LESSON bookingMode only). Lets the student open the "second form" to
+// optionally change slot, see the balance with trial credit applied, and
+// pay for the full trimester. Consumed when the balance payment succeeds.
+// =========================================================================
+model EnrollmentInvite {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  scheduledEventId String
+  scheduledEvent   ScheduledEvent @relation(fields: [scheduledEventId], references: [id])
+
+  clientId String
+  client   Client @relation(fields: [clientId], references: [id])
+
+  // Opaque random token used in the email link. Single-use.
+  token String @unique
+
+  // PENDING | CONSUMED | EXPIRED | CANCELED
+  status String @default("PENDING")
+
+  expiresAt   DateTime
+  sentAt      DateTime?
+  consumedAt  DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@index([organizationId])
+  @@index([scheduledEventId])
+  @@index([expiresAt])
 }

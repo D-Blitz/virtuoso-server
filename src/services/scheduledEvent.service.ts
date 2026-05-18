@@ -1,50 +1,51 @@
-import { PrismaClient } from '@prisma/client';
-
-const prisma = new PrismaClient();
+import prisma from '../prisma';
+import { getOrganizationId } from '../auth/context';
 
 export class ScheduledEventService {
-    async create(data: any) {
-        if (!data.serviceId) throw new Error('Missing serviceId');
-    
-        const service = await prisma.service.findUniqueOrThrow({
-          where: { id: data.serviceId },
-          select: { serviceCategoryId: true },
-        });
-    
-        return prisma.scheduledEvent.create({
-          data: {
-            color: data.color,
-            price: data.price,
-            notes: data.notes,
-            recurrence: data.recurrence || undefined,
-            startTime: data.startTime,
-            endTime: data.endTime,
-            room: { connect: { id: data.roomId } },
-            location: { connect: { id: data.locationId } },
-            service: { connect: { id: data.serviceId } },
-            serviceCategory: { connect: { id: service.serviceCategoryId } },
-            clients: {
-              connect: data.clientIds?.map((id: string) => ({ id })) || [],
-            },
-            facilitators: {
-              connect: data.facilitatorIds?.map((id: string) => ({ id })) || [],
-            },
-            tags: {
-              connect: data.tagIds?.map((id: string) => ({ id })) || [],
-            },
-          },
-          include: {
-            clients: true,
-            facilitators: true,
-            room: true,
-            tags: true,
-            service: true,
-            location: true,
-            serviceCategory: true,
-          },
-        });
-      }
-      
+  async create(data: any) {
+    if (!data.serviceId) throw new Error('Missing serviceId');
+    const organizationId = getOrganizationId()!;
+
+    const service = await prisma.service.findUniqueOrThrow({
+      where: { id: data.serviceId },
+      select: { serviceCategoryId: true },
+    });
+
+    return prisma.scheduledEvent.create({
+      data: {
+        organizationId,
+        color: data.color,
+        price: data.price,
+        notes: data.notes,
+        recurrence: data.recurrence || undefined,
+        startTime: data.startTime,
+        endTime: data.endTime,
+        roomId: data.roomId,
+        locationId: data.locationId,
+        serviceId: data.serviceId,
+        serviceCategoryId: service.serviceCategoryId,
+        clients: {
+          connect: data.clientIds?.map((id: string) => ({ id })) || [],
+        },
+        facilitators: {
+          connect: data.facilitatorIds?.map((id: string) => ({ id })) || [],
+        },
+        tags: {
+          connect: data.tagIds?.map((id: string) => ({ id })) || [],
+        },
+      },
+      include: {
+        clients: true,
+        facilitators: true,
+        room: true,
+        tags: true,
+        service: true,
+        location: true,
+        serviceCategory: true,
+      },
+    });
+  }
+
   async getAll() {
     return prisma.scheduledEvent.findMany({
       include: {
@@ -80,10 +81,10 @@ export class ScheduledEventService {
         where: { id },
         data: {
           ...rest,
-          room: { connect: { id: roomId } },
-          location: { connect: { id: locationId } },
-          service: { connect: { id: serviceId } },
-          serviceCategory: { connect: { id: service.serviceCategoryId } },
+          roomId,
+          locationId,
+          serviceId,
+          serviceCategoryId: service.serviceCategoryId,
           clients: {
             set: clientIds?.map((id: string) => ({ id })) || [],
           },

@@ -3,6 +3,8 @@ import { faker } from '@faker-js/faker/locale/fr';
 
 const prisma = new PrismaClient();
 
+const DEFAULT_ORG_ID = 'clxorg000000000000000001';
+
 function randomColor() {
   return `#${Math.floor(Math.random() * 16777215).toString(16).padStart(6, '0')}`;
 }
@@ -17,10 +19,21 @@ function fakeAvailability() {
 
 async function main() {
 
+  console.log("🏢 Ensuring default organization...");
+  const org = await prisma.organization.upsert({
+    where: { id: DEFAULT_ORG_ID },
+    update: {},
+    create: {
+      id: DEFAULT_ORG_ID,
+      slug: 'artcetera',
+      name: 'Art & Cetera',
+    },
+  });
+
   console.log("🌍 Creating locations...");
   const locations = await Promise.all([
-    prisma.location.create({ data: { name: 'Nice Conservatory', description: 'Côte d’Azur campus', address: faker.location.streetAddress() } }),
-    prisma.location.create({ data: { name: 'Paris Music Studio', description: 'Central artistic hub', address: faker.location.streetAddress() } }),
+    prisma.location.create({ data: { name: 'Nice Conservatory', description: 'Côte d’Azur campus', address: faker.location.streetAddress(), organizationId: org.id } }),
+    prisma.location.create({ data: { name: 'Paris Music Studio', description: 'Central artistic hub', address: faker.location.streetAddress(), organizationId: org.id } }),
   ]);
 
   console.log("🚪 Creating rooms...");
@@ -34,6 +47,7 @@ async function main() {
           notes: faker.lorem.sentence(),
           metadata: {},
           locationId: locations[i % locations.length].id,
+          organizationId: org.id,
         },
       })
     )
@@ -58,6 +72,7 @@ async function main() {
           metadata: {},
           isBookable: true,
           isBioDisplayed: true,
+          organizationId: org.id,
           locations: {
             connect: selectedLocations.map(loc => ({ id: loc.id })),
           },
@@ -79,6 +94,7 @@ async function main() {
           address: faker.location.streetAddress(),
           notes: faker.lorem.sentence(),
           metadata: {},
+          organizationId: org.id,
         },
       })
     )
@@ -86,14 +102,14 @@ async function main() {
 
   console.log("📚 Creating service categories...");
   const categories = await Promise.all([
-    prisma.serviceCategory.create({ data: { name: "Cours", description: "Toutes nos formations", isDisplayed: true, isBookable: true } }),
-    prisma.serviceCategory.create({ data: { name: "Location", description: "Locations de salles", isDisplayed: true, isBookable: false } }),
+    prisma.serviceCategory.create({ data: { name: "Cours", description: "Toutes nos formations", isDisplayed: true, isBookable: true, organizationId: org.id } }),
+    prisma.serviceCategory.create({ data: { name: "Location", description: "Locations de salles", isDisplayed: true, isBookable: false, organizationId: org.id } }),
   ]);
 
   console.log("🏷 Creating tags...");
   const tags = await Promise.all(
     ["Piano", "Guitare", "Chant", "Batterie", "Violon"].map(label =>
-      prisma.tag.create({ data: { label, metadata: {} } })
+      prisma.tag.create({ data: { label, metadata: {}, organizationId: org.id } })
     )
   );
 
@@ -109,6 +125,7 @@ async function main() {
           notes: faker.lorem.sentence(),
           metadata: {},
           serviceCategoryId: categories[i % categories.length].id,
+          organizationId: org.id,
           tags: {
             connect: [tags[i % tags.length]].map(tag => ({ id: tag.id })),
           },
@@ -148,6 +165,7 @@ async function main() {
         locationId: associatedLocation.id,
         serviceId: service.id,
         serviceCategoryId: serviceCategory.id,
+        organizationId: org.id,
         facilitators: { connect: facilitatorSubset.map(f => ({ id: f.id })) },
         clients: { connect: clientSubset.map(c => ({ id: c.id })) },
         tags: { connect: tagSubset.map(t => ({ id: t.id })) },
