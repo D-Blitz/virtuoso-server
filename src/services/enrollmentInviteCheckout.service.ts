@@ -467,6 +467,21 @@ export class EnrollmentInviteCheckoutService {
         },
       });
 
+      // If the student rescheduled the recurring slot on the second form, stamp
+      // each materialized event so admins see the audit trail on the calendar.
+      const enrollmentNote = invite.rescheduledAt
+        ? `Créneau choisi par le client lors de l'inscription (différent du cours d'essai du ${event.startTime.toLocaleString(
+            'fr-FR',
+            {
+              weekday: 'long',
+              day: 'numeric',
+              month: 'long',
+              hour: '2-digit',
+              minute: '2-digit',
+            },
+          )})`
+        : null;
+
       if (newEvents.length > 0) {
         // Bulk-create using createMany doesn't support nested connects, so
         // we map to a relations-friendly shape and create one at a time.
@@ -479,6 +494,7 @@ export class EnrollmentInviteCheckoutService {
               color: ev.color,
               price: ev.price,
               status: 'SCHEDULED',
+              notes: enrollmentNote,
               roomId: ev.roomId ?? event.roomId,
               locationId: ev.locationId,
               serviceId: ev.serviceId,
