@@ -23,6 +23,9 @@ export type InviteSummary = {
     createdAt: string;
     expired: boolean;
     consumed: boolean;
+    rescheduled: boolean;
+    overrideWeekday: number | null;
+    overrideStartTime: string | null;
   };
   client: {
     id: string;
@@ -132,6 +135,9 @@ export class EnrollmentInviteCheckoutService {
         createdAt: invite.createdAt.toISOString(),
         expired,
         consumed,
+        rescheduled: !!invite.rescheduledAt,
+        overrideWeekday: invite.overrideWeekday,
+        overrideStartTime: invite.overrideStartTime,
       },
       client: invite.client,
       trial: {
