@@ -41,6 +41,16 @@ export type EnrollmentInviteEmailParams = {
   expiresAtLabel: string;  // e.g. "31 mai 2026"
 };
 
+export type TrialConfirmationEmailParams = {
+  to: string;
+  studentFirstname: string;
+  serviceName: string;
+  facilitatorName: string;
+  trialDateLabel: string;       // e.g. "lundi 19 mai à 14:00"
+  locationName: string;
+  rescheduleUrl: string;
+};
+
 export class EmailService {
   async sendEnrollmentInvite(params: EnrollmentInviteEmailParams): Promise<void> {
     const subject = `Votre cours du ${params.trialDateLabel} — Inscription au trimestre`;
@@ -94,6 +104,72 @@ export class EmailService {
       console.log('Subject:', subject);
       console.log('URL:', params.inviteUrl);
       console.log('--------------------------------------');
+      return;
+    }
+
+    const { error } = await r.emails.send({
+      from: defaultFrom(),
+      to: params.to,
+      subject,
+      html,
+      text,
+    });
+    if (error) {
+      throw new Error(`Resend error: ${error.message || JSON.stringify(error)}`);
+    }
+  }
+
+  async sendTrialConfirmation(params: TrialConfirmationEmailParams): Promise<void> {
+    const subject = `Confirmation : votre cours d'essai du ${params.trialDateLabel}`;
+    const html = `
+      <div style="font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;padding:24px;color:#111">
+        <h1 style="margin:0 0 16px 0;font-size:22px">Bonjour ${escape(params.studentFirstname)},</h1>
+        <p style="line-height:1.55;color:#333">
+          Votre cours d&rsquo;essai
+          <strong>${escape(params.serviceName)}</strong> avec
+          <strong>${escape(params.facilitatorName)}</strong> est confirmé.
+        </p>
+        <div style="padding:16px;background:#f5f5f5;border-radius:8px;margin:16px 0">
+          <div style="font-size:15px;color:#555"><strong>Date :</strong> ${escape(params.trialDateLabel)}</div>
+          <div style="font-size:15px;color:#555;margin-top:6px"><strong>Lieu :</strong> ${escape(params.locationName)}</div>
+        </div>
+        <p style="line-height:1.55;color:#333">
+          Un imprévu ? Vous pouvez décaler votre cours une fois, jusqu&rsquo;à
+          48 h avant la séance.
+        </p>
+        <p style="margin:32px 0">
+          <a href="${params.rescheduleUrl}"
+             style="background:#111;color:#fff;text-decoration:none;padding:12px 22px;border-radius:8px;font-weight:600;display:inline-block">
+            Modifier mon créneau
+          </a>
+        </p>
+        <hr style="margin:32px 0;border:none;border-top:1px solid #eee" />
+        <p style="font-size:12px;color:#999">
+          À très vite !
+        </p>
+      </div>
+    `.trim();
+
+    const text = [
+      `Bonjour ${params.studentFirstname},`,
+      ``,
+      `Votre cours d'essai ${params.serviceName} avec ${params.facilitatorName} est confirmé.`,
+      `Date : ${params.trialDateLabel}`,
+      `Lieu : ${params.locationName}`,
+      ``,
+      `Un imprévu ? Vous pouvez décaler votre cours une fois, jusqu'à 48 h avant la séance :`,
+      params.rescheduleUrl,
+      ``,
+      `À très vite !`,
+    ].join('\n');
+
+    const r = getResend();
+    if (!r) {
+      console.log('--- [email-stub] trial-confirmation ---');
+      console.log('To:', params.to);
+      console.log('Subject:', subject);
+      console.log('Reschedule URL:', params.rescheduleUrl);
+      console.log('---------------------------------------');
       return;
     }
 

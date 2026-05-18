@@ -8,5 +8,9 @@ const controller = new PublicInviteController();
 // The opaque single-use token is the access credential.
 router.get('/:token', (req, res) => controller.get(req, res));
 router.post('/:token/checkout', (req, res) => controller.checkout(req, res));
+router.get('/:token/reschedule-options', (req, res) =>
+  controller.rescheduleOptions(req, res),
+);
+router.post('/:token/reschedule', (req, res) => controller.reschedule(req, res));
 
 export default router;

@@ -1,6 +1,8 @@
 import prisma from '../prisma';
 import type { StripeEvent } from './stripe.service';
 import { EnrollmentInviteCheckoutService } from './enrollmentInviteCheckout.service';
+import { EmailService } from './email.service';
+import { generateOpaqueToken } from '../auth/tokens';
 
 /**
  * Webhook handler. Runs OUTSIDE any request org context — receives global
@@ -11,6 +13,79 @@ import { EnrollmentInviteCheckoutService } from './enrollmentInviteCheckout.serv
  */
 
 const enrollmentCheckout = new EnrollmentInviteCheckoutService();
+const emailService = new EmailService();
+
+function getWidgetBaseUrl(): string {
+  return (
+    process.env.WIDGET_PUBLIC_URL ??
+    process.env.ADMIN_ORIGINS?.split(',')[0]?.trim() ??
+    'http://localhost:3000'
+  );
+}
+
+function formatTrialDateLabel(d: Date): string {
+  const date = d.toLocaleDateString('fr-FR', {
+    weekday: 'long',
+    day: 'numeric',
+    month: 'long',
+  });
+  const time = d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+  return `${date} à ${time}`;
+}
+
+/**
+ * After a trial-lesson payment succeeds, generate a reschedule token + send
+ * the confirmation email. Failures here don't fail the webhook — the
+ * confirmation is best-effort, the booking is already valid.
+ */
+async function sendTrialConfirmationAsync(scheduledEventId: string): Promise<void> {
+  try {
+    const event = await prisma.scheduledEvent.findFirst({
+      where: { id: scheduledEventId },
+      include: {
+        facilitators: {
+          take: 1,
+          select: { firstname: true, lastname: true },
+        },
+        clients: {
+          take: 1,
+          select: { firstname: true, email: true },
+        },
+        service: { select: { name: true } },
+        location: { select: { name: true } },
+      },
+    });
+    if (!event) return;
+    const client = event.clients[0];
+    if (!client) return;
+    const facilitator = event.facilitators[0];
+
+    const token = generateOpaqueToken();
+    await prisma.scheduledEventRescheduleToken.create({
+      data: {
+        organizationId: event.organizationId,
+        scheduledEventId: event.id,
+        token,
+      },
+    });
+
+    const rescheduleUrl = `${getWidgetBaseUrl()}/widget/reschedule/${token}`;
+
+    await emailService.sendTrialConfirmation({
+      to: client.email,
+      studentFirstname: client.firstname,
+      serviceName: event.service.name,
+      facilitatorName: facilitator
+        ? `${facilitator.firstname} ${facilitator.lastname}`
+        : '',
+      trialDateLabel: formatTrialDateLabel(event.startTime),
+      locationName: event.location.name,
+      rescheduleUrl,
+    });
+  } catch (err) {
+    console.error('[webhook] trial confirmation email failed:', err);
+  }
+}
 
 export class WebhookService {
   async handle(event: StripeEvent): Promise<{ ok: boolean; duplicate: boolean }> {
@@ -106,6 +181,8 @@ export class WebhookService {
         where: { id: scheduledEventId },
         data: { status: 'PAID_TRIAL' },
       });
+      // Fire-and-forget: confirmation email with reschedule link.
+      void sendTrialConfirmationAsync(scheduledEventId);
     }
 
     if (submissionId) {

@@ -176,11 +176,14 @@ export class EnrollmentInviteCheckoutService {
       };
     }
 
-    // Recurring slot derived from the trial's start time + service duration.
-    const weekday = event.startTime.getDay();
-    const startTime = event.startTime
-      .toTimeString()
-      .slice(0, 5); // "HH:MM"
+    // Recurring slot — use invite override if the student picked a new
+    // weekday/time on the second form; otherwise derive from the trial.
+    const weekday =
+      invite.overrideWeekday !== null
+        ? invite.overrideWeekday
+        : event.startTime.getDay();
+    const startTime =
+      invite.overrideStartTime ?? event.startTime.toTimeString().slice(0, 5);
     const durationMinutes = event.service.defaultDurationMinutes;
 
     // Start from the day after the trial so we don't double-book the trial slot.
@@ -380,8 +383,14 @@ export class EnrollmentInviteCheckoutService {
       );
     }
 
-    const weekday = event.startTime.getDay();
-    const startTimeStr = event.startTime.toTimeString().slice(0, 5);
+    // Honor the per-invite override if the student picked a new recurring
+    // slot on the second form. Otherwise fall back to the trial's weekday/time.
+    const weekday =
+      invite.overrideWeekday !== null
+        ? invite.overrideWeekday
+        : event.startTime.getDay();
+    const startTimeStr =
+      invite.overrideStartTime ?? event.startTime.toTimeString().slice(0, 5);
     const durationMinutes = event.service.defaultDurationMinutes;
 
     const enrollmentStart = new Date(event.endTime);

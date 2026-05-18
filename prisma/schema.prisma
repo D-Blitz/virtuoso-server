@@ -33,6 +33,7 @@ model Organization {
   payments          Payment[]
   widgetSubmissions WidgetSubmission[]
   enrollmentInvites EnrollmentInvite[]
+  rescheduleTokens  ScheduledEventRescheduleToken[]
 }
 
 model User {
@@ -232,6 +233,7 @@ model ScheduledEvent {
   payments          Payment[]
   widgetSubmissions WidgetSubmission[]
   enrollmentInvites EnrollmentInvite[]
+  rescheduleTokens  ScheduledEventRescheduleToken[]
 
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id])
@@ -473,6 +475,13 @@ model EnrollmentInvite {
   // PENDING | CONSUMED | EXPIRED | CANCELED
   status String @default("PENDING")
 
+  // Per-invite override of the recurring slot picked at enrollment time.
+  // If set, both the quote (getByToken) and activation use these instead of
+  // deriving from the trial event. Once-only — UI prevents re-edit.
+  overrideWeekday   Int?
+  overrideStartTime String?
+  rescheduledAt     DateTime?
+
   expiresAt   DateTime
   sentAt      DateTime?
   consumedAt  DateTime?
@@ -481,4 +490,27 @@ model EnrollmentInvite {
   @@index([organizationId])
   @@index([scheduledEventId])
   @@index([expiresAt])
+}
+
+// =========================================================================
+// ScheduledEventRescheduleToken — single-use opaque token, sent in the
+// trial-confirmation email. Lets the student open the reschedule page for
+// one specific event. Server-side rules (≤1 reschedule, ≥48h before) are
+// enforced on apply — the token alone is not authorization to reschedule
+// past those windows.
+// =========================================================================
+model ScheduledEventRescheduleToken {
+  id               String   @id @default(cuid())
+  organizationId   String
+  organization     Organization @relation(fields: [organizationId], references: [id])
+
+  scheduledEventId String
+  scheduledEvent   ScheduledEvent @relation(fields: [scheduledEventId], references: [id])
+
+  token       String   @unique
+  consumedAt  DateTime?
+  createdAt   DateTime @default(now())
+
+  @@index([organizationId])
+  @@index([scheduledEventId])
 }
