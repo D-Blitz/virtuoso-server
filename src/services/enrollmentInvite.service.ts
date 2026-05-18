@@ -1,8 +1,10 @@
 import prisma from '../prisma';
 import { generateOpaqueToken } from '../auth/tokens';
 import { EmailService } from './email.service';
+import { EnrollmentQuoteService } from './enrollment/enrollmentQuote.service';
 
 const INVITE_TTL_DAYS = 14;
+const quoteService = new EnrollmentQuoteService();
 
 function getWidgetBaseUrl(): string {
   // Where the second-form widget lives (PR 6d). Defaults to local Next dev.
@@ -41,6 +43,9 @@ export type InviteCycleStats = {
   sent: number;
   lapsed: number;
   sendErrors: number;
+  /** Trials we didn't bother inviting because the balance would be ≤ 0
+   *  (trial credit already covers the remaining lessons). Marked LAPSED. */
+  zeroBalanceSkipped: number;
 };
 
 export class EnrollmentInviteService {
@@ -70,17 +75,31 @@ export class EnrollmentInviteService {
 
   /**
    * For every AWAITING_ENROLLMENT_DECISION event that has no PENDING invite:
-   * create one and send the email. Per-event try/catch so one failure
-   * doesn't block the rest.
+   *   - compute the projected balance (pricePerSession × remainingLessons − trialCredit)
+   *   - if balance ≤ 0, mark the event LAPSED and skip — no point inviting the
+   *     student to "pay" when they actually owe nothing
+   *   - else, create an EnrollmentInvite and send the email
+   * Per-event try/catch so one failure doesn't block the rest.
    */
-  async sendPendingInvites(): Promise<{ sent: number; errors: number }> {
+  async sendPendingInvites(): Promise<{
+    sent: number;
+    errors: number;
+    zeroBalanceSkipped: number;
+  }> {
     const events = await prisma.scheduledEvent.findMany({
       where: {
         status: 'AWAITING_ENROLLMENT_DECISION',
         enrollmentInvites: { none: { status: 'PENDING' } },
       },
       include: {
-        service: { select: { name: true, defaultPrice: true } },
+        service: {
+          select: {
+            id: true,
+            name: true,
+            defaultPrice: true,
+            defaultDurationMinutes: true,
+          },
+        },
         facilitators: {
           take: 1,
           select: { firstname: true, lastname: true },
@@ -99,6 +118,9 @@ export class EnrollmentInviteService {
 
     let sent = 0;
     let errors = 0;
+    let zeroBalanceSkipped = 0;
+
+    const now = new Date();
 
     for (const event of events) {
       const client = event.clients[0];
@@ -106,6 +128,67 @@ export class EnrollmentInviteService {
         // No client attached — skip (shouldn't happen via the widget flow).
         continue;
       }
+
+      const trialPayment = event.payments[0];
+
+      // ----- balance gate -----
+      // Look up the active term for this location, compute remaining lessons,
+      // and skip-with-LAPSED if balance ≤ 0.
+      const term = await prisma.term.findFirst({
+        where: {
+          OR: [{ locationId: event.locationId }, { locationId: null }],
+          startDate: { lte: now },
+          endDate: { gte: now },
+        },
+        orderBy: { startDate: 'desc' },
+      });
+
+      if (!term) {
+        // No active term — can't compute balance. Leave the event AWAITING so
+        // a future cron tick (after admin sets up a term) can pick it up.
+        continue;
+      }
+
+      const weekday = event.startTime.getDay();
+      const startTimeStr = event.startTime.toTimeString().slice(0, 5);
+      const enrollmentStart = new Date(event.endTime);
+      enrollmentStart.setDate(enrollmentStart.getDate() + 1);
+
+      const quote = quoteService.quote({
+        service: {
+          id: event.service.id,
+          name: event.service.name,
+          defaultPrice: event.service.defaultPrice,
+          defaultDurationMinutes: event.service.defaultDurationMinutes,
+        },
+        term: {
+          id: term.id,
+          name: term.name,
+          startDate: term.startDate,
+          endDate: term.endDate,
+        },
+        startDate: enrollmentStart,
+        weekday,
+        startTime: startTimeStr,
+        durationMinutes: event.service.defaultDurationMinutes,
+      });
+
+      const totalCents = Math.round(
+        event.service.defaultPrice * quote.lessons.remaining * 100,
+      );
+      const trialCreditCents = trialPayment?.amountCents ?? 0;
+      const balanceCents = Math.max(0, totalCents - trialCreditCents);
+
+      if (balanceCents <= 0) {
+        // Trial credit already covers the rest of the term — no second form.
+        await prisma.scheduledEvent.update({
+          where: { id: event.id },
+          data: { status: 'LAPSED' },
+        });
+        zeroBalanceSkipped++;
+        continue;
+      }
+      // ----- end balance gate -----
 
       const token = generateOpaqueToken();
       const expiresAt = new Date(
@@ -123,7 +206,6 @@ export class EnrollmentInviteService {
       });
 
       const facilitator = event.facilitators[0];
-      const trialPayment = event.payments[0];
       const inviteUrl = `${getWidgetBaseUrl()}/widget/enroll/${token}`;
 
       try {
@@ -156,7 +238,7 @@ export class EnrollmentInviteService {
       }
     }
 
-    return { sent, errors };
+    return { sent, errors, zeroBalanceSkipped };
   }
 
   /**
@@ -194,9 +276,15 @@ export class EnrollmentInviteService {
    */
   async runFullCycle(): Promise<InviteCycleStats> {
     const advanced = await this.advanceTrialStatuses();
-    const { sent, errors } = await this.sendPendingInvites();
+    const { sent, errors, zeroBalanceSkipped } = await this.sendPendingInvites();
     const lapsed = await this.lapseExpiredInvites();
-    return { advanced, sent, lapsed, sendErrors: errors };
+    return {
+      advanced,
+      sent,
+      lapsed,
+      sendErrors: errors,
+      zeroBalanceSkipped,
+    };
   }
 
   /**

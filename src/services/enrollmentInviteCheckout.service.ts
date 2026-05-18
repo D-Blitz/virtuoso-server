@@ -206,7 +206,12 @@ export class EnrollmentInviteCheckoutService {
       durationMinutes,
     });
 
-    const totalCents = Math.round(quoteResult.price.prorated * 100);
+    // Pricing model for invite checkout (per the school's business rule):
+    // the student pays for the remaining lessons of the term in one shot —
+    // pricePerSession × remainingLessons. Trial credit is then deducted.
+    const totalCents = Math.round(
+      event.service.defaultPrice * quoteResult.lessons.remaining * 100,
+    );
     const trialCreditCents = trialPayment?.amountCents ?? 0;
     const balanceCents = Math.max(0, totalCents - trialCreditCents);
 
