@@ -14,9 +14,20 @@ export class ScheduledEventController {
     }
   }
 
-  async getAll(_req: Request, res: Response) {
+  async getAll(req: Request, res: Response) {
     try {
-      const events = await scheduledEventService.getAll();
+      const from =
+        typeof req.query.from === 'string' &&
+        !Number.isNaN(Date.parse(req.query.from))
+          ? new Date(req.query.from)
+          : undefined;
+      const to =
+        typeof req.query.to === 'string' &&
+        !Number.isNaN(Date.parse(req.query.to))
+          ? new Date(req.query.to)
+          : undefined;
+
+      const events = await scheduledEventService.getAll({ from, to });
       res.json(events);
     } catch (error) {
       console.error(error);

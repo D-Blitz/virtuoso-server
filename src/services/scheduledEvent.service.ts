@@ -1,6 +1,19 @@
 import prisma from '../prisma';
 import { getOrganizationId } from '../auth/context';
 
+/**
+ * Default window when the caller doesn't pass from/to. Bounded so we never
+ * return "all events ever". The full audit (docs/PERF_AUDIT.md) recommends
+ * the admin pass an explicit window for everything except smoke-tests.
+ */
+const DEFAULT_LOOKBACK_DAYS = 30;
+const DEFAULT_LOOKAHEAD_DAYS = 90;
+
+export type ListEventsFilters = {
+  from?: Date;
+  to?: Date;
+};
+
 export class ScheduledEventService {
   async create(data: any) {
     if (!data.serviceId) throw new Error('Missing serviceId');
@@ -46,8 +59,50 @@ export class ScheduledEventService {
     });
   }
 
-  async getAll() {
+  /**
+   * List events overlapping a date window.
+   *
+   * "Overlap" means: the event happens (or its recurrence series could
+   * generate an occurrence) inside [from, to]. Concretely we keep an event
+   * row if either:
+   *   - it's a single event (`recurrence` null) with startTime <= to AND
+   *     endTime >= from
+   *   - it's a recurring series whose first occurrence is on/before `to`
+   *     AND whose recurrenceEnd (if set) is on/after `from`
+   *
+   * Caller is still responsible for expanding the series into concrete
+   * occurrences via `generateRecurringInstancesInRange` on the frontend.
+   *
+   * If from/to aren't supplied, defaults to [now-30d, now+90d].
+   */
+  async getAll(filters: ListEventsFilters = {}) {
+    const now = new Date();
+    const from =
+      filters.from ??
+      new Date(now.getTime() - DEFAULT_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
+    const to =
+      filters.to ??
+      new Date(now.getTime() + DEFAULT_LOOKAHEAD_DAYS * 24 * 60 * 60 * 1000);
+
     return prisma.scheduledEvent.findMany({
+      where: {
+        // Single events overlap the window OR recurring series overlap it.
+        OR: [
+          {
+            recurrence: null,
+            startTime: { lte: to },
+            endTime: { gte: from },
+          },
+          {
+            recurrence: { not: null },
+            startTime: { lte: to },
+            OR: [
+              { recurrenceEnd: null },
+              { recurrenceEnd: { gte: from } },
+            ],
+          },
+        ],
+      },
       include: {
         clients: true,
         facilitators: true,
@@ -57,6 +112,7 @@ export class ScheduledEventService {
         location: true,
         serviceCategory: true,
       },
+      orderBy: { startTime: 'asc' },
     });
   }
 
