@@ -15,7 +15,43 @@ const TENANT_SCOPED_MODELS = new Set<string>([
   'Closure',
 ]);
 
-const base = new PrismaClient();
+/**
+ * Slow-query logging.
+ *
+ * Threshold (ms) is configurable via `SLOW_QUERY_MS` env var. Default
+ * is 250ms in production, 500ms in development (chattier `prisma migrate`
+ * runs and DDL would otherwise spam the log). Set to 0 to disable.
+ *
+ * Implemented via Prisma's `query` event emitter (cheap — no extension
+ * middleware in the hot path). Each slow query logs duration + the
+ * query text (params are interpolated by Prisma for the event payload).
+ */
+const slowQueryThresholdMs = (() => {
+  const raw = process.env.SLOW_QUERY_MS;
+  if (raw !== undefined) {
+    const n = Number.parseInt(raw, 10);
+    return Number.isFinite(n) && n >= 0 ? n : 250;
+  }
+  return process.env.NODE_ENV === 'production' ? 250 : 500;
+})();
+
+const base =
+  slowQueryThresholdMs > 0
+    ? new PrismaClient({ log: [{ emit: 'event', level: 'query' }] })
+    : new PrismaClient();
+
+if (slowQueryThresholdMs > 0) {
+  // The `query` event type isn't in the static PrismaClient signature
+  // without the matching `log` option in scope — cast to attach.
+  (base as any).$on('query', (e: { duration: number; query: string; params: string }) => {
+    if (e.duration >= slowQueryThresholdMs) {
+      console.warn(
+        `[prisma:slow] ${e.duration}ms — ${e.query}${e.params ? ` | params: ${e.params}` : ''}`,
+      );
+    }
+  });
+  console.log(`[prisma] slow-query logging enabled (≥${slowQueryThresholdMs}ms)`);
+}
 
 const prisma = base.$extends({
   name: 'orgScope',
