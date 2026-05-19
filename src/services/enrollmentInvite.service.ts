@@ -126,6 +126,7 @@ export class EnrollmentInviteService {
       const client = event.clients[0];
       if (!client) {
         // No client attached — skip (shouldn't happen via the widget flow).
+        console.warn(`[invites] skip event ${event.id}: no client attached`);
         continue;
       }
 
@@ -146,6 +147,9 @@ export class EnrollmentInviteService {
       if (!term) {
         // No active term — can't compute balance. Leave the event AWAITING so
         // a future cron tick (after admin sets up a term) can pick it up.
+        console.warn(
+          `[invites] skip event ${event.id}: no active term covers ${now.toISOString()} for location ${event.locationId}`,
+        );
         continue;
       }
 
@@ -285,6 +289,159 @@ export class EnrollmentInviteService {
       sendErrors: errors,
       zeroBalanceSkipped,
     };
+  }
+
+  /**
+   * Diagnostic: for every event that could plausibly be in-flight in the
+   * invite pipeline, return a row explaining what the next cron cycle would
+   * do with it. Used when the school wonders "why didn't X get the email?"
+   *
+   * Covers events with status in (PAID_TRIAL, AWAITING_ENROLLMENT_DECISION)
+   * plus any PENDING invite, regardless of event status.
+   */
+  async diagnose(): Promise<{
+    now: string;
+    events: Array<{
+      id: string;
+      status: string;
+      startTime: string;
+      endTime: string;
+      serviceName: string;
+      bookingMode: string | null;
+      clientEmail: string | null;
+      hasActiveTerm: boolean;
+      pendingInviteCount: number;
+      balanceCents: number | null;
+      nextAction: string;
+    }>;
+  }> {
+    const now = new Date();
+    const events = await prisma.scheduledEvent.findMany({
+      where: {
+        OR: [
+          { status: 'PAID_TRIAL' },
+          { status: 'AWAITING_ENROLLMENT_DECISION' },
+          { enrollmentInvites: { some: { status: 'PENDING' } } },
+        ],
+      },
+      include: {
+        service: {
+          select: {
+            id: true,
+            name: true,
+            defaultPrice: true,
+            defaultDurationMinutes: true,
+            bookingMode: true,
+          },
+        },
+        clients: { take: 1, select: { email: true } },
+        payments: {
+          where: { status: 'SUCCEEDED', purpose: 'TRIAL_LESSON' },
+          take: 1,
+          select: { amountCents: true },
+        },
+        enrollmentInvites: {
+          where: { status: 'PENDING' },
+          select: { id: true },
+        },
+      },
+      orderBy: { startTime: 'desc' },
+      take: 50,
+    });
+
+    const rows = [] as Awaited<ReturnType<typeof this.diagnose>>['events'];
+
+    for (const event of events) {
+      const client = event.clients[0];
+      const pendingInviteCount = event.enrollmentInvites.length;
+
+      const term = await prisma.term.findFirst({
+        where: {
+          OR: [{ locationId: event.locationId }, { locationId: null }],
+          startDate: { lte: now },
+          endDate: { gte: now },
+        },
+        orderBy: { startDate: 'desc' },
+      });
+
+      let balanceCents: number | null = null;
+      if (term && event.service) {
+        const weekday = event.startTime.getDay();
+        const startTimeStr = event.startTime.toTimeString().slice(0, 5);
+        const enrollmentStart = new Date(event.endTime);
+        enrollmentStart.setDate(enrollmentStart.getDate() + 1);
+        try {
+          const quote = quoteService.quote({
+            service: {
+              id: event.service.id,
+              name: event.service.name,
+              defaultPrice: event.service.defaultPrice,
+              defaultDurationMinutes: event.service.defaultDurationMinutes,
+            },
+            term: {
+              id: term.id,
+              name: term.name,
+              startDate: term.startDate,
+              endDate: term.endDate,
+            },
+            startDate: enrollmentStart,
+            weekday,
+            startTime: startTimeStr,
+            durationMinutes: event.service.defaultDurationMinutes,
+          });
+          const totalCents = Math.round(
+            event.service.defaultPrice * quote.lessons.remaining * 100,
+          );
+          const trialCreditCents = event.payments[0]?.amountCents ?? 0;
+          balanceCents = Math.max(0, totalCents - trialCreditCents);
+        } catch {
+          balanceCents = null;
+        }
+      }
+
+      // Reason narrative
+      let nextAction = '';
+      if (event.status === 'PAID_TRIAL') {
+        if (event.endTime >= now) {
+          nextAction = `Will advance once endTime (${event.endTime.toISOString()}) passes.`;
+        } else if (event.service?.bookingMode !== 'LESSON') {
+          nextAction = `BLOCKED: service.bookingMode is "${event.service?.bookingMode ?? 'null'}", cron only advances LESSON.`;
+        } else {
+          nextAction = 'Will advance to AWAITING_ENROLLMENT_DECISION on next cycle.';
+        }
+      } else if (event.status === 'AWAITING_ENROLLMENT_DECISION') {
+        if (pendingInviteCount > 0) {
+          nextAction = `Already has ${pendingInviteCount} PENDING invite(s) — nothing to do.`;
+        } else if (!client) {
+          nextAction = 'BLOCKED: no client attached to event.';
+        } else if (!term) {
+          nextAction = 'BLOCKED: no active term covers today for this location.';
+        } else if (balanceCents !== null && balanceCents <= 0) {
+          nextAction = `Will be marked LAPSED — trial credit already covers the balance (${balanceCents}¢).`;
+        } else {
+          nextAction = `Will send invite to ${client.email} on next cycle.`;
+        }
+      } else {
+        // pending invite path
+        nextAction = `Event status is ${event.status}; invite present.`;
+      }
+
+      rows.push({
+        id: event.id,
+        status: event.status,
+        startTime: event.startTime.toISOString(),
+        endTime: event.endTime.toISOString(),
+        serviceName: event.service?.name ?? '—',
+        bookingMode: event.service?.bookingMode ?? null,
+        clientEmail: client?.email ?? null,
+        hasActiveTerm: !!term,
+        pendingInviteCount,
+        balanceCents,
+        nextAction,
+      });
+    }
+
+    return { now: now.toISOString(), events: rows };
   }
 
   /**

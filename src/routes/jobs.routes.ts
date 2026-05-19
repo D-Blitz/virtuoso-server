@@ -5,6 +5,9 @@ const router = Router();
 const controller = new JobsController();
 
 router.post('/run-invite-cycle', (req, res) => controller.runInviteCycle(req, res));
+router.get('/diagnose-invites', (req, res) =>
+  controller.diagnoseInvites(req, res),
+);
 router.post('/enrollment-invites/:id/resend', (req, res) =>
   controller.resendInvite(req, res),
 );

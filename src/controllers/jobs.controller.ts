@@ -29,4 +29,14 @@ export class JobsController {
       res.status(status).json({ error: msg });
     }
   }
+
+  async diagnoseInvites(_req: Request, res: Response) {
+    try {
+      const report = await inviteService.diagnose();
+      res.json(report);
+    } catch (error) {
+      console.error('diagnoseInvites error:', error);
+      res.status(500).json({ error: 'Failed to diagnose invites' });
+    }
+  }
 }
