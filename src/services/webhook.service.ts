@@ -33,6 +33,146 @@ function formatTrialDateLabel(d: Date): string {
   return `${date} à ${time}`;
 }
 
+function formatRecurringSlotLabel(weekday: number, time: string, minutes: number): string {
+  const days = ['dimanches', 'lundis', 'mardis', 'mercredis', 'jeudis', 'vendredis', 'samedis'];
+  const dayLabel = days[weekday] ?? '—';
+  return `tous les ${dayLabel} à ${time} (${minutes} min)`;
+}
+
+function formatLessonLabel(d: Date): string {
+  const date = d.toLocaleDateString('fr-FR', {
+    weekday: 'long',
+    day: 'numeric',
+    month: 'long',
+  });
+  const time = d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+  return `${date} à ${time}`;
+}
+
+function formatEurosLabel(amountCents: number, currency: string): string {
+  const value = (amountCents / 100).toFixed(2).replace('.', ',');
+  return `${value} ${currency === 'EUR' ? '€' : currency}`;
+}
+
+/**
+ * After an enrollment is activated, send the student confirmation (with
+ * full schedule + .ics) and a lighter notification to the assigned teacher.
+ * Failures are logged but never thrown — the enrollment is already valid.
+ */
+async function sendEnrollmentConfirmationsAsync(
+  enrollmentId: string,
+  paymentId: string,
+): Promise<void> {
+  try {
+    const enrollment = await prisma.enrollment.findFirst({
+      where: { id: enrollmentId },
+      include: {
+        client: { select: { firstname: true, lastname: true, email: true } },
+        service: { select: { name: true } },
+        location: { select: { name: true } },
+        term: { select: { name: true } },
+        facilitator: { select: { firstname: true, lastname: true, email: true } },
+        events: {
+          select: { id: true, startTime: true, endTime: true },
+          orderBy: { startTime: 'asc' },
+        },
+      },
+    });
+    if (!enrollment) {
+      console.warn(`[webhook] enrollment ${enrollmentId} missing — skipping confirmations`);
+      return;
+    }
+    if (enrollment.events.length === 0) {
+      console.warn(`[webhook] enrollment ${enrollmentId} has no events — skipping confirmations`);
+      return;
+    }
+
+    const payment = await prisma.payment.findFirst({
+      where: { id: paymentId },
+      select: { amountCents: true, currency: true },
+    });
+    const totalCents = payment?.amountCents ?? 0;
+    const currency = payment?.currency ?? 'EUR';
+
+    const first = enrollment.events[0];
+    const last = enrollment.events[enrollment.events.length - 1];
+
+    const facilitatorName = enrollment.facilitator
+      ? `${enrollment.facilitator.firstname} ${enrollment.facilitator.lastname}`
+      : '—';
+
+    const slotLabel = formatRecurringSlotLabel(
+      enrollment.weekday,
+      enrollment.startTime,
+      enrollment.durationMinutes,
+    );
+
+    // Student confirmation (with ICS + admin BCC if configured)
+    console.log(
+      `[webhook] dispatching enrollment confirmation to ${enrollment.client.email} (enrollment ${enrollment.id})`,
+    );
+    void emailService
+      .sendEnrollmentConfirmation({
+        to: enrollment.client.email,
+        studentFirstname: enrollment.client.firstname,
+        serviceName: enrollment.service.name,
+        facilitatorName,
+        termName: enrollment.term.name,
+        recurringSlotLabel: slotLabel,
+        locationName: enrollment.location.name,
+        totalPaidLabel: formatEurosLabel(totalCents, currency),
+        lessonCount: enrollment.events.length,
+        firstLessonLabel: formatLessonLabel(first.startTime),
+        lastLessonLabel: formatLessonLabel(last.startTime),
+        lessons: enrollment.events.map((e) => ({
+          id: e.id,
+          startTime: e.startTime,
+          endTime: e.endTime,
+        })),
+      })
+      .then(() => {
+        console.log(`[webhook] enrollment confirmation sent to ${enrollment.client.email}`);
+      })
+      .catch((err) => {
+        console.error('[webhook] enrollment confirmation email failed:', err);
+      });
+
+    // Teacher notification (lighter, no ICS)
+    if (enrollment.facilitator?.email) {
+      console.log(
+        `[webhook] dispatching teacher notification to ${enrollment.facilitator.email}`,
+      );
+      void emailService
+        .sendTeacherNewStudent({
+          to: enrollment.facilitator.email,
+          teacherFirstname: enrollment.facilitator.firstname,
+          studentName: `${enrollment.client.firstname} ${enrollment.client.lastname}`.trim(),
+          studentEmail: enrollment.client.email,
+          serviceName: enrollment.service.name,
+          recurringSlotLabel: slotLabel,
+          locationName: enrollment.location.name,
+          firstLessonLabel: formatLessonLabel(first.startTime),
+          lessonCount: enrollment.events.length,
+          termName: enrollment.term.name,
+        })
+        .then(() => {
+          console.log(
+            `[webhook] teacher notification sent to ${enrollment.facilitator!.email}`,
+          );
+        })
+        .catch((err) => {
+          console.error('[webhook] teacher notification email failed:', err);
+        });
+    } else {
+      console.warn(
+        `[webhook] enrollment ${enrollment.id} has no facilitator email — skipping teacher notification`,
+      );
+    }
+  } catch (err) {
+    console.error('[webhook] enrollment confirmations setup failed:', err);
+  }
+}
+
 /**
  * After a trial-lesson payment succeeds, generate a reschedule token + send
  * the confirmation email. Failures here don't fail the webhook — the
@@ -165,6 +305,9 @@ export class WebhookService {
           console.log(
             `[webhook] activated enrollment ${result.enrollmentId} (${result.eventsGenerated} events generated)`,
           );
+          // Fire-and-forget: student confirmation (with ICS + admin BCC)
+          // + teacher notification.
+          void sendEnrollmentConfirmationsAsync(result.enrollmentId, paymentId);
         }
       } catch (err) {
         console.error('[webhook] enrollment activation failed:', err);

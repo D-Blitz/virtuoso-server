@@ -6,6 +6,7 @@
  * setting up an account.
  */
 import { Resend } from 'resend';
+import { buildIcsCalendar } from './ics';
 
 let resendClient: Resend | null = null;
 let initialized = false;
@@ -28,6 +29,16 @@ function defaultFrom(): string {
   return (
     process.env.EMAIL_FROM ?? 'Art & Cetera <onboarding@resend.dev>'
   );
+}
+
+/**
+ * Optional admin BCC for transactional confirmations — set ADMIN_BCC_EMAIL
+ * to receive a copy of every student-facing confirmation. Returns `undefined`
+ * when unset so we can spread it directly without sending an empty array.
+ */
+function adminBcc(): string | undefined {
+  const e = process.env.ADMIN_BCC_EMAIL?.trim();
+  return e && e.length > 0 ? e : undefined;
 }
 
 export type EnrollmentInviteEmailParams = {
@@ -59,6 +70,41 @@ export type TrialRescheduleEmailParams = {
   previousDateLabel: string;    // e.g. "lundi 19 mai à 14:00"
   newDateLabel: string;
   locationName: string;
+};
+
+export type EnrollmentLesson = {
+  /** Used as the ICS UID. */
+  id: string;
+  startTime: Date;
+  endTime: Date;
+};
+
+export type EnrollmentConfirmationEmailParams = {
+  to: string;
+  studentFirstname: string;
+  serviceName: string;
+  facilitatorName: string;
+  termName: string;
+  recurringSlotLabel: string;       // e.g. "tous les lundis à 14:00 (60 min)"
+  locationName: string;
+  totalPaidLabel: string;           // e.g. "270,00 €"
+  lessonCount: number;
+  firstLessonLabel: string;         // e.g. "lundi 26 mai à 14:00"
+  lastLessonLabel: string;
+  lessons: EnrollmentLesson[];      // for both the body list and the .ics file
+};
+
+export type TeacherNewStudentEmailParams = {
+  to: string;
+  teacherFirstname: string;
+  studentName: string;
+  studentEmail: string;
+  serviceName: string;
+  recurringSlotLabel: string;
+  locationName: string;
+  firstLessonLabel: string;
+  lessonCount: number;
+  termName: string;
 };
 
 export class EmailService {
@@ -249,6 +295,240 @@ export class EmailService {
       console.log('Previous:', params.previousDateLabel);
       console.log('New:', params.newDateLabel);
       console.log('-------------------------------------');
+      return;
+    }
+
+    const { error } = await r.emails.send({
+      from: defaultFrom(),
+      to: params.to,
+      subject,
+      html,
+      text,
+    });
+    if (error) {
+      throw new Error(`Resend error: ${error.message || JSON.stringify(error)}`);
+    }
+  }
+
+  /**
+   * Student-facing confirmation after a paid trimester enrollment activation.
+   * Includes the full lesson schedule and an .ics attachment so the student
+   * can one-click add the term to their calendar. BCCs ADMIN_BCC_EMAIL if set.
+   */
+  async sendEnrollmentConfirmation(
+    params: EnrollmentConfirmationEmailParams,
+  ): Promise<void> {
+    const subject = `Inscription confirmée — ${params.serviceName} (${params.termName})`;
+
+    const scheduleHtml = params.lessons
+      .map((l) => {
+        const date = l.startTime.toLocaleDateString('fr-FR', {
+          weekday: 'long',
+          day: 'numeric',
+          month: 'long',
+        });
+        const time = l.startTime.toLocaleTimeString('fr-FR', {
+          hour: '2-digit',
+          minute: '2-digit',
+        });
+        return `<li style="text-transform:capitalize">${escape(date)} · ${escape(time)}</li>`;
+      })
+      .join('');
+
+    const html = `
+      <div style="font-family:system-ui,sans-serif;max-width:600px;margin:0 auto;padding:24px;color:#111">
+        <h1 style="margin:0 0 16px 0;font-size:22px">Bonjour ${escape(params.studentFirstname)},</h1>
+        <p style="line-height:1.55;color:#333">
+          Votre inscription au <strong>${escape(params.termName)}</strong> est confirmée.
+          Bienvenue (ou bon retour) chez Art &amp; Cetera !
+        </p>
+
+        <div style="padding:16px;background:#f5f5f5;border-radius:8px;margin:20px 0">
+          <div style="font-size:15px;color:#333;margin-bottom:6px">
+            <strong>Cours :</strong> ${escape(params.serviceName)}
+          </div>
+          <div style="font-size:15px;color:#333;margin-bottom:6px">
+            <strong>Enseignant·e :</strong> ${escape(params.facilitatorName)}
+          </div>
+          <div style="font-size:15px;color:#333;margin-bottom:6px">
+            <strong>Créneau :</strong> ${escape(params.recurringSlotLabel)}
+          </div>
+          <div style="font-size:15px;color:#333;margin-bottom:6px">
+            <strong>Lieu :</strong> ${escape(params.locationName)}
+          </div>
+          <div style="font-size:15px;color:#333;margin-bottom:6px">
+            <strong>Premier cours :</strong> ${escape(params.firstLessonLabel)}
+          </div>
+          <div style="font-size:15px;color:#333">
+            <strong>Total réglé :</strong> ${escape(params.totalPaidLabel)}
+            (${params.lessonCount} séance${params.lessonCount > 1 ? 's' : ''})
+          </div>
+        </div>
+
+        <h2 style="font-size:16px;margin:24px 0 8px 0;color:#111">
+          Calendrier complet
+        </h2>
+        <ul style="line-height:1.7;color:#444;padding-left:20px;margin:0 0 8px 0;font-size:14px">
+          ${scheduleHtml}
+        </ul>
+        <p style="font-size:13px;color:#666;margin:8px 0 24px 0">
+          Un fichier <strong>.ics</strong> est joint à cet email — ouvrez-le
+          pour ajouter toutes les séances à votre calendrier en un clic.
+        </p>
+
+        <p style="line-height:1.55;color:#333">
+          Pour toute modification après inscription (changement de créneau,
+          absence, etc.), contactez directement l&rsquo;école — les changements
+          en ligne ne sont plus possibles à ce stade.
+        </p>
+
+        <hr style="margin:32px 0;border:none;border-top:1px solid #eee" />
+        <p style="font-size:12px;color:#999">
+          À bientôt en cours !
+        </p>
+      </div>
+    `.trim();
+
+    const text = [
+      `Bonjour ${params.studentFirstname},`,
+      ``,
+      `Votre inscription au ${params.termName} est confirmée.`,
+      ``,
+      `Cours : ${params.serviceName}`,
+      `Enseignant·e : ${params.facilitatorName}`,
+      `Créneau : ${params.recurringSlotLabel}`,
+      `Lieu : ${params.locationName}`,
+      `Premier cours : ${params.firstLessonLabel}`,
+      `Total réglé : ${params.totalPaidLabel} (${params.lessonCount} séance${params.lessonCount > 1 ? 's' : ''})`,
+      ``,
+      `Calendrier :`,
+      ...params.lessons.map((l) => {
+        const date = l.startTime.toLocaleDateString('fr-FR', {
+          weekday: 'long',
+          day: 'numeric',
+          month: 'long',
+        });
+        const time = l.startTime.toLocaleTimeString('fr-FR', {
+          hour: '2-digit',
+          minute: '2-digit',
+        });
+        return `  - ${date} · ${time}`;
+      }),
+      ``,
+      `Un fichier .ics est joint pour ajouter le trimestre à votre calendrier en un clic.`,
+      ``,
+      `Pour toute modification après inscription, contactez l'école.`,
+    ].join('\n');
+
+    const icsContent = buildIcsCalendar({
+      prodId: '-//Art & Cetera//Enrollment//FR',
+      calendarName: `${params.serviceName} — ${params.termName}`,
+      events: params.lessons.map((l) => ({
+        id: l.id,
+        startTime: l.startTime,
+        endTime: l.endTime,
+        summary: `${params.serviceName} avec ${params.facilitatorName}`,
+        location: params.locationName,
+        description: `Cours régulier — inscription confirmée au ${params.termName}.`,
+      })),
+    });
+    const icsBase64 = Buffer.from(icsContent, 'utf-8').toString('base64');
+    const icsFilename = `art-cetera-${params.termName.replace(/\s+/g, '-').toLowerCase()}.ics`;
+    const bcc = adminBcc();
+
+    const r = getResend();
+    if (!r) {
+      console.log('--- [email-stub] enrollment-confirmation ---');
+      console.log('To:', params.to);
+      if (bcc) console.log('BCC:', bcc);
+      console.log('Subject:', subject);
+      console.log('Lessons:', params.lessons.length);
+      console.log('ICS bytes:', icsContent.length);
+      console.log('--------------------------------------------');
+      return;
+    }
+
+    const { error } = await r.emails.send({
+      from: defaultFrom(),
+      to: params.to,
+      ...(bcc ? { bcc } : {}),
+      subject,
+      html,
+      text,
+      attachments: [
+        {
+          filename: icsFilename,
+          content: icsBase64,
+        },
+      ],
+    });
+    if (error) {
+      throw new Error(`Resend error: ${error.message || JSON.stringify(error)}`);
+    }
+  }
+
+  /**
+   * Teacher-facing notification when a new student joins one of their
+   * recurring slots. Lighter than the student email — no .ics, no full
+   * schedule, just the key facts.
+   */
+  async sendTeacherNewStudent(params: TeacherNewStudentEmailParams): Promise<void> {
+    const subject = `Nouvel·le élève : ${params.studentName} — ${params.serviceName}`;
+    const html = `
+      <div style="font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;padding:24px;color:#111">
+        <h1 style="margin:0 0 16px 0;font-size:20px">
+          Bonjour ${escape(params.teacherFirstname)},
+        </h1>
+        <p style="line-height:1.55;color:#333">
+          Un·e nouvel·le élève vient de s&rsquo;inscrire à l&rsquo;un de vos
+          créneaux pour le <strong>${escape(params.termName)}</strong>.
+        </p>
+        <div style="padding:16px;background:#f5f5f5;border-radius:8px;margin:16px 0">
+          <div style="font-size:15px;color:#333;margin-bottom:6px">
+            <strong>Élève :</strong> ${escape(params.studentName)}
+            (<a href="mailto:${escape(params.studentEmail)}" style="color:#7c3aed">${escape(params.studentEmail)}</a>)
+          </div>
+          <div style="font-size:15px;color:#333;margin-bottom:6px">
+            <strong>Cours :</strong> ${escape(params.serviceName)}
+          </div>
+          <div style="font-size:15px;color:#333;margin-bottom:6px">
+            <strong>Créneau :</strong> ${escape(params.recurringSlotLabel)}
+          </div>
+          <div style="font-size:15px;color:#333;margin-bottom:6px">
+            <strong>Lieu :</strong> ${escape(params.locationName)}
+          </div>
+          <div style="font-size:15px;color:#333">
+            <strong>Premier cours :</strong> ${escape(params.firstLessonLabel)}
+            (${params.lessonCount} séance${params.lessonCount > 1 ? 's' : ''} au total)
+          </div>
+        </div>
+        <p style="line-height:1.55;color:#333;font-size:14px">
+          Les séances sont déjà ajoutées à votre planning Art &amp; Cetera.
+        </p>
+      </div>
+    `.trim();
+
+    const text = [
+      `Bonjour ${params.teacherFirstname},`,
+      ``,
+      `Un·e nouvel·le élève vient de s'inscrire à l'un de vos créneaux pour le ${params.termName}.`,
+      ``,
+      `Élève : ${params.studentName} (${params.studentEmail})`,
+      `Cours : ${params.serviceName}`,
+      `Créneau : ${params.recurringSlotLabel}`,
+      `Lieu : ${params.locationName}`,
+      `Premier cours : ${params.firstLessonLabel} (${params.lessonCount} séance${params.lessonCount > 1 ? 's' : ''} au total)`,
+      ``,
+      `Les séances sont déjà ajoutées à votre planning Art & Cetera.`,
+    ].join('\n');
+
+    const r = getResend();
+    if (!r) {
+      console.log('--- [email-stub] teacher-new-student ---');
+      console.log('To:', params.to);
+      console.log('Subject:', subject);
+      console.log('Student:', params.studentName, '<', params.studentEmail, '>');
+      console.log('----------------------------------------');
       return;
     }
 
