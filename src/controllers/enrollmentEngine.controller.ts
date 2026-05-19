@@ -147,8 +147,6 @@ export class EnrollmentEngineController {
               organizationId,
               startTime: o.startTime,
               endTime: o.endTime,
-              recurrence: null,
-              recurrenceEnd: null,
               color: '#8b5cf6',
               price: 0,
               notes: null,

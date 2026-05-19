@@ -175,7 +175,6 @@ export class TrialBookingService {
         organizationId: input.organizationId,
         startTime: input.startTime,
         endTime: input.endTime,
-        recurrence: null,
         color: '#7c3aed',
         price: service.defaultPrice,
         notes: 'Trial booking via widget — awaiting payment confirmation.',

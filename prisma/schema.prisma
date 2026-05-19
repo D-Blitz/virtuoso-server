@@ -198,14 +198,12 @@ model ServiceCategory {
 }
 
 model ScheduledEvent {
-  id            String    @id @default(cuid())
-  startTime     DateTime
-  endTime       DateTime
-  recurrence    String?
-  recurrenceEnd DateTime?
-  color         String
-  price         Float
-  notes         String?
+  id        String   @id @default(cuid())
+  startTime DateTime
+  endTime   DateTime
+  color     String
+  price     Float
+  notes     String?
 
   // Lifecycle status:
   //   SCHEDULED                     - regular admin-created event
