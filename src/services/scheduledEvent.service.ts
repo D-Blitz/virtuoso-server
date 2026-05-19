@@ -266,20 +266,79 @@ export class ScheduledEventService {
         });
       }
 
+      // CRITICAL: time-of-day propagation, NOT full datetime overwrite.
+      //
+      // If we blindly applied `sharedScalarPatch.startTime` and `.endTime`
+      // to every sibling, every occurrence would collapse to the single
+      // datetime the user edited — visually deleting the whole series
+      // except for one date. Instead:
+      //
+      //   - Extract the time-of-day (HH:mm:ss) from the new startTime.
+      //   - Compute the new duration from new endTime − startTime.
+      //   - For each sibling: keep its existing DATE, apply the new
+      //     time-of-day, and set endTime = newStartTime + duration.
+      //
+      // Net effect: "move all my Monday lessons to 15:00" works; weekday
+      // and date changes are silently ignored on ALL scope (per design:
+      // changing the series pattern requires a separate flow).
+      const newStartFromPatch =
+        typeof sharedScalarPatch.startTime === 'string' ||
+        sharedScalarPatch.startTime instanceof Date
+          ? new Date(sharedScalarPatch.startTime as string | Date)
+          : null;
+      const newEndFromPatch =
+        typeof sharedScalarPatch.endTime === 'string' ||
+        sharedScalarPatch.endTime instanceof Date
+          ? new Date(sharedScalarPatch.endTime as string | Date)
+          : null;
+
+      const newDurationMs =
+        newStartFromPatch && newEndFromPatch
+          ? newEndFromPatch.getTime() - newStartFromPatch.getTime()
+          : null;
+
+      // Strip startTime/endTime from the patch we apply to siblings —
+      // they're recomputed per-sibling below.
+      const {
+        startTime: _patchStart,
+        endTime: _patchEnd,
+        ...siblingScalarPatch
+      } = sharedScalarPatch as any;
+
       return await prisma.$transaction(async (tx) => {
-        // Update every attached occurrence with the new scalar+relation shape.
-        // Because relations require `set:` semantics, we still loop one-by-one.
         const siblings = await tx.scheduledEvent.findMany({
           where: { seriesId } as any,
-          select: { id: true },
+          select: { id: true, startTime: true, endTime: true },
         });
+
         let last: any = null;
         for (const sib of siblings) {
+          let nextStart = sib.startTime;
+          let nextEnd = sib.endTime;
+          if (newStartFromPatch && newDurationMs !== null) {
+            // Preserve sibling's date; overwrite hours/minutes/seconds.
+            const composed = new Date(sib.startTime);
+            composed.setHours(
+              newStartFromPatch.getHours(),
+              newStartFromPatch.getMinutes(),
+              newStartFromPatch.getSeconds(),
+              newStartFromPatch.getMilliseconds(),
+            );
+            nextStart = composed;
+            nextEnd = new Date(composed.getTime() + newDurationMs);
+          }
+
           last = await tx.scheduledEvent.update({
             where: { id: sib.id },
-            data: { ...sharedScalarPatch, ...relationPatch },
+            data: {
+              ...siblingScalarPatch,
+              startTime: nextStart,
+              endTime: nextEnd,
+              ...relationPatch,
+            },
           });
         }
+
         // Sync the series defaults so future occurrences (e.g. if we ever
         // extend the series) would inherit consistently.
         await (tx as any).recurrenceSeries.update({

@@ -159,7 +159,6 @@ async function main() {
       data: {
         startTime: start,
         endTime: end,
-        recurrence: null,
         color: randomColor(),
         roomId: room.id,
         locationId: associatedLocation.id,
