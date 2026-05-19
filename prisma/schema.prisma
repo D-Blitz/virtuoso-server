@@ -98,6 +98,9 @@ model Facilitator {
 
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id])
+
+  // Hot path: every facilitator list, recommender.
+  @@index([organizationId])
 }
 
 model Room {
@@ -119,22 +122,25 @@ model Room {
 }
 
 model Client {
-  id          String           @id @default(cuid())
-  firstname   String
-  lastname    String
-  email       String
-  phone       String
-  birthdate   DateTime
-  address     String
-  notes       String?
-  metadata    Json?
-  events            ScheduledEvent[] @relation("EventClients")
+  id                String             @id @default(cuid())
+  firstname         String
+  lastname          String
+  email             String
+  phone             String
+  birthdate         DateTime
+  address           String
+  notes             String?
+  metadata          Json?
+  events            ScheduledEvent[]   @relation("EventClients")
   enrollments       Enrollment[]
   payments          Payment[]
   enrollmentInvites EnrollmentInvite[]
 
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id])
+
+  // Hot path: client list, search, pickers.
+  @@index([organizationId])
 }
 
 model Tag {
@@ -237,6 +243,12 @@ model ScheduledEvent {
 
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id])
+
+  // Performance indexes — see docs/PERF_AUDIT.md
+  @@index([organizationId, startTime]) // calendar range, reports
+  @@index([status, endTime]) // invite cron's PAID_TRIAL→AWAITING advance
+  @@index([locationId, startTime]) // per-location calendar, slot options
+  @@index([enrollmentId]) // enrollment → events lookup
 }
 
 model Term {
@@ -255,6 +267,10 @@ model Term {
 
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id])
+
+  // Active-term lookups hit on every checkout / cron tick.
+  @@index([locationId, startDate])
+  @@index([organizationId, startDate])
 }
 
 model Enrollment {
@@ -303,6 +319,11 @@ model Enrollment {
 
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id])
+
+  // Active-subscribers list, per-client + per-term lookups.
+  @@index([organizationId, status])
+  @@index([clientId])
+  @@index([termId])
 }
 
 model Closure {
@@ -319,6 +340,10 @@ model Closure {
 
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id])
+
+  // Slot-availability checks scan closures by location + date window.
+  @@index([locationId, startDate])
+  @@index([startDate, endDate])
 }
 
 // =========================================================================
@@ -438,6 +463,8 @@ model Payment {
 
   @@index([organizationId])
   @@index([clientId])
+  // Payments dashboard sorts/filters by createdAt within an org.
+  @@index([organizationId, createdAt])
 }
 
 // =========================================================================
@@ -482,10 +509,10 @@ model EnrollmentInvite {
   overrideStartTime String?
   rescheduledAt     DateTime?
 
-  expiresAt   DateTime
-  sentAt      DateTime?
-  consumedAt  DateTime?
-  createdAt   DateTime  @default(now())
+  expiresAt  DateTime
+  sentAt     DateTime?
+  consumedAt DateTime?
+  createdAt  DateTime  @default(now())
 
   @@index([organizationId])
   @@index([scheduledEventId])
@@ -500,16 +527,16 @@ model EnrollmentInvite {
 // past those windows.
 // =========================================================================
 model ScheduledEventRescheduleToken {
-  id               String   @id @default(cuid())
-  organizationId   String
-  organization     Organization @relation(fields: [organizationId], references: [id])
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
 
   scheduledEventId String
   scheduledEvent   ScheduledEvent @relation(fields: [scheduledEventId], references: [id])
 
-  token       String   @unique
-  consumedAt  DateTime?
-  createdAt   DateTime @default(now())
+  token      String    @unique
+  consumedAt DateTime?
+  createdAt  DateTime  @default(now())
 
   @@index([organizationId])
   @@index([scheduledEventId])
