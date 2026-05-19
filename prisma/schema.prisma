@@ -34,6 +34,7 @@ model Organization {
   widgetSubmissions WidgetSubmission[]
   enrollmentInvites EnrollmentInvite[]
   rescheduleTokens  ScheduledEventRescheduleToken[]
+  recurrenceSeries  RecurrenceSeries[]
 }
 
 model User {
@@ -236,6 +237,12 @@ model ScheduledEvent {
   enrollmentId String?
   enrollment   Enrollment? @relation(fields: [enrollmentId], references: [id])
 
+  // Recurrence series this occurrence belongs to (null = standalone event).
+  // Detaching a single occurrence (THIS-scope edit) nulls this column.
+  // See docs/RECURRENCE_DESIGN.md.
+  seriesId String?
+  series   RecurrenceSeries? @relation("SeriesOccurrences", fields: [seriesId], references: [id], onDelete: SetNull)
+
   payments          Payment[]
   widgetSubmissions WidgetSubmission[]
   enrollmentInvites EnrollmentInvite[]
@@ -249,6 +256,46 @@ model ScheduledEvent {
   @@index([status, endTime]) // invite cron's PAID_TRIAL→AWAITING advance
   @@index([locationId, startTime]) // per-location calendar, slot options
   @@index([enrollmentId]) // enrollment → events lookup
+  @@index([seriesId]) // series → occurrences fan-out
+}
+
+// =========================================================================
+// RecurrenceSeries — parent row for a group of recurring ScheduledEvents.
+// Materialization is eager: every occurrence is a real ScheduledEvent row
+// referencing the series via `seriesId`. Detaching (per-occurrence edits)
+// nulls the row's seriesId; the series rule itself is immutable except
+// for status. See docs/RECURRENCE_DESIGN.md.
+// =========================================================================
+model RecurrenceSeries {
+  id String @id @default(cuid())
+
+  // Rule
+  frequency String // WEEKLY | BIWEEKLY | MONTHLY | BIMONTHLY | TRIMESTRAL | SEMIANNUAL | YEARLY
+  startDate DateTime // first occurrence start (datetime; time-of-day preserved across steps)
+  endDate   DateTime // inclusive last possible occurrence boundary
+
+  // Audit / soft-delete prep
+  status String @default("ACTIVE") // ACTIVE | CANCELED
+
+  // Defaults captured at series creation. Per-occurrence edits don't reach
+  // back into these — they're just the starting state each materialized row
+  // inherited.
+  defaultColor      String
+  defaultPrice      Float
+  defaultNotes      String?
+  defaultRoomId     String
+  defaultLocationId String
+  defaultServiceId  String
+
+  occurrences ScheduledEvent[] @relation("SeriesOccurrences")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId, startDate])
 }
 
 model Term {
