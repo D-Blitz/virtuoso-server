@@ -21,12 +21,13 @@ async function runCycle(): Promise<void> {
     if (
       stats.advanced ||
       stats.sent ||
+      stats.retried ||
       stats.lapsed ||
       stats.sendErrors ||
       stats.zeroBalanceSkipped
     ) {
       console.log(
-        `[invites] cycle: advanced=${stats.advanced} sent=${stats.sent} lapsed=${stats.lapsed} zeroBalanceSkipped=${stats.zeroBalanceSkipped} sendErrors=${stats.sendErrors}`,
+        `[invites] cycle: advanced=${stats.advanced} sent=${stats.sent} retried=${stats.retried} lapsed=${stats.lapsed} zeroBalanceSkipped=${stats.zeroBalanceSkipped} sendErrors=${stats.sendErrors}`,
       );
     }
   } catch (err) {

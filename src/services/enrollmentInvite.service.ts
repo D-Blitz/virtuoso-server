@@ -41,6 +41,8 @@ const emailService = new EmailService();
 export type InviteCycleStats = {
   advanced: number;
   sent: number;
+  /** Re-attempted sends for PENDING invites whose original send threw. */
+  retried: number;
   lapsed: number;
   sendErrors: number;
   /** Trials we didn't bother inviting because the balance would be ≤ 0
@@ -71,6 +73,73 @@ export class EnrollmentInviteService {
       data: { status: 'AWAITING_ENROLLMENT_DECISION' },
     });
     return result.count;
+  }
+
+  /**
+   * Retry any PENDING invite whose `sentAt` is null — the row was created
+   * but the previous send attempt threw (Resend down, network blip, etc.).
+   * Without this the cron would silently never retry, because the
+   * "needs invite" finder treats any PENDING invite (even unsent) as
+   * "already taken care of".
+   */
+  async retryUnsentInvites(): Promise<{ sent: number; errors: number }> {
+    const unsent = await prisma.enrollmentInvite.findMany({
+      where: { status: 'PENDING', sentAt: null },
+      include: {
+        client: { select: { firstname: true, email: true } },
+        scheduledEvent: {
+          select: {
+            startTime: true,
+            service: { select: { name: true } },
+            facilitators: {
+              take: 1,
+              select: { firstname: true, lastname: true },
+            },
+            payments: {
+              where: { status: 'SUCCEEDED', purpose: 'TRIAL_LESSON' },
+              take: 1,
+              select: { amountCents: true, currency: true },
+            },
+          },
+        },
+      },
+    });
+
+    let sent = 0;
+    let errors = 0;
+    for (const invite of unsent) {
+      const facilitator = invite.scheduledEvent.facilitators[0];
+      const trialPayment = invite.scheduledEvent.payments[0];
+      const inviteUrl = `${getWidgetBaseUrl()}/widget/enroll/${invite.token}`;
+      try {
+        console.log(
+          `[invites] retrying unsent invite ${invite.id} to ${invite.client.email}`,
+        );
+        await emailService.sendEnrollmentInvite({
+          to: invite.client.email,
+          studentFirstname: invite.client.firstname,
+          serviceName: invite.scheduledEvent.service.name,
+          facilitatorName: facilitator
+            ? `${facilitator.firstname} ${facilitator.lastname}`
+            : '',
+          trialDateLabel: formatDateLabel(invite.scheduledEvent.startTime),
+          inviteUrl,
+          trialPaidAmount: trialPayment
+            ? `${(trialPayment.amountCents / 100).toFixed(2)} ${trialPayment.currency}`
+            : '',
+          expiresAtLabel: formatExpiresLabel(invite.expiresAt),
+        });
+        await prisma.enrollmentInvite.update({
+          where: { id: invite.id },
+          data: { sentAt: new Date() },
+        });
+        sent++;
+      } catch (err) {
+        console.error(`[invites] retry failed for invite ${invite.id}:`, err);
+        errors++;
+      }
+    }
+    return { sent, errors };
   }
 
   /**
@@ -280,13 +349,17 @@ export class EnrollmentInviteService {
    */
   async runFullCycle(): Promise<InviteCycleStats> {
     const advanced = await this.advanceTrialStatuses();
+    // Retry first, so any rows the previous tick failed on get another
+    // attempt before we consider creating brand-new ones.
+    const retryResult = await this.retryUnsentInvites();
     const { sent, errors, zeroBalanceSkipped } = await this.sendPendingInvites();
     const lapsed = await this.lapseExpiredInvites();
     return {
       advanced,
-      sent,
+      sent: sent + retryResult.sent,
+      retried: retryResult.sent,
       lapsed,
-      sendErrors: errors,
+      sendErrors: errors + retryResult.errors,
       zeroBalanceSkipped,
     };
   }
@@ -311,6 +384,13 @@ export class EnrollmentInviteService {
       clientEmail: string | null;
       hasActiveTerm: boolean;
       pendingInviteCount: number;
+      pendingInvites: Array<{
+        id: string;
+        createdAt: string;
+        sentAt: string | null;
+        expiresAt: string;
+        emailDelivered: boolean;
+      }>;
       balanceCents: number | null;
       nextAction: string;
     }>;
@@ -342,7 +422,13 @@ export class EnrollmentInviteService {
         },
         enrollmentInvites: {
           where: { status: 'PENDING' },
-          select: { id: true },
+          select: {
+            id: true,
+            createdAt: true,
+            sentAt: true,
+            expiresAt: true,
+          },
+          orderBy: { createdAt: 'desc' },
         },
       },
       orderBy: { startTime: 'desc' },
@@ -354,6 +440,7 @@ export class EnrollmentInviteService {
     for (const event of events) {
       const client = event.clients[0];
       const pendingInviteCount = event.enrollmentInvites.length;
+      const unsentInvite = event.enrollmentInvites.find((i) => i.sentAt === null);
 
       const term = await prisma.term.findFirst({
         where: {
@@ -410,8 +497,10 @@ export class EnrollmentInviteService {
           nextAction = 'Will advance to AWAITING_ENROLLMENT_DECISION on next cycle.';
         }
       } else if (event.status === 'AWAITING_ENROLLMENT_DECISION') {
-        if (pendingInviteCount > 0) {
-          nextAction = `Already has ${pendingInviteCount} PENDING invite(s) — nothing to do.`;
+        if (unsentInvite) {
+          nextAction = `Invite ${unsentInvite.id} was CREATED at ${unsentInvite.createdAt.toISOString()} but the email never went out (sentAt is null). Next cycle will retry. You can also POST /api/jobs/enrollment-invites/${unsentInvite.id}/resend.`;
+        } else if (pendingInviteCount > 0) {
+          nextAction = `Already has ${pendingInviteCount} PENDING invite(s), email already sent — nothing to do.`;
         } else if (!client) {
           nextAction = 'BLOCKED: no client attached to event.';
         } else if (!term) {
@@ -436,6 +525,13 @@ export class EnrollmentInviteService {
         clientEmail: client?.email ?? null,
         hasActiveTerm: !!term,
         pendingInviteCount,
+        pendingInvites: event.enrollmentInvites.map((i) => ({
+          id: i.id,
+          createdAt: i.createdAt.toISOString(),
+          sentAt: i.sentAt ? i.sentAt.toISOString() : null,
+          expiresAt: i.expiresAt.toISOString(),
+          emailDelivered: i.sentAt !== null,
+        })),
         balanceCents,
         nextAction,
       });
