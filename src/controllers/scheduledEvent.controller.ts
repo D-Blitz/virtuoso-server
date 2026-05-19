@@ -3,14 +3,29 @@ import { ScheduledEventService } from '../services/scheduledEvent.service';
 
 const scheduledEventService = new ScheduledEventService();
 
+function parseScope(req: Request): 'THIS' | 'ALL' {
+  const raw =
+    typeof req.query.scope === 'string' ? req.query.scope.toUpperCase() : '';
+  return raw === 'ALL' ? 'ALL' : 'THIS';
+}
+
 export class ScheduledEventController {
   async create(req: Request, res: Response) {
     try {
-      const event = await scheduledEventService.create(req.body);
-      res.status(201).json(event);
-    } catch (error) {
+      const events = await scheduledEventService.create(req.body);
+      res.status(201).json(events);
+    } catch (error: any) {
       console.error(error);
-      res.status(500).json({ error: 'Failed to create event' });
+      const msg = error?.message ?? 'Failed to create event';
+      const lower = msg.toLowerCase();
+      const status =
+        lower.includes('invalid') ||
+        lower.includes('must be') ||
+        lower.includes('cap') ||
+        lower.includes('missing')
+          ? 400
+          : 500;
+      res.status(status).json({ error: msg });
     }
   }
 
@@ -38,7 +53,11 @@ export class ScheduledEventController {
   async update(req: Request, res: Response) {
     const { id } = req.params;
     try {
-      const updated = await scheduledEventService.update(id, req.body);
+      const updated = await scheduledEventService.update(
+        id,
+        req.body,
+        parseScope(req),
+      );
       res.json(updated);
     } catch (error) {
       console.error(error);
@@ -49,7 +68,7 @@ export class ScheduledEventController {
   async remove(req: Request, res: Response) {
     const { id } = req.params;
     try {
-      await scheduledEventService.delete(id);
+      await scheduledEventService.delete(id, parseScope(req));
       res.status(204).send();
     } catch (error) {
       console.error(error);

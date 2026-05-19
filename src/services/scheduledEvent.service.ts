@@ -192,7 +192,17 @@ export class ScheduledEventService {
     });
   }
 
-  async update(id: string, data: any) {
+  /**
+   * Update with a mutation scope:
+   *   - 'THIS' (default): updates this row only. If the row was attached
+   *     to a series (`seriesId != null`), this is also a DETACH: the row
+   *     becomes a standalone event and stops being affected by future
+   *     ALL-scope edits on that series.
+   *   - 'ALL': updates every occurrence still attached to the same series
+   *     plus the series's own default columns. Already-detached rows
+   *     (seriesId = null) are NOT affected — they've left the series.
+   */
+  async update(id: string, data: any, scope: 'THIS' | 'ALL' = 'THIS') {
     try {
       const {
         clientIds,
@@ -201,6 +211,8 @@ export class ScheduledEventService {
         roomId,
         locationId,
         serviceId,
+        // `recurrence` is a create-only field; ignore it on update.
+        recurrence: _ignored,
         ...rest
       } = data;
 
@@ -209,24 +221,79 @@ export class ScheduledEventService {
         select: { serviceCategoryId: true },
       });
 
-      return await prisma.scheduledEvent.update({
-        where: { id },
-        data: {
-          ...rest,
-          roomId,
-          locationId,
-          serviceId,
-          serviceCategoryId: service.serviceCategoryId,
-          clients: {
-            set: clientIds?.map((id: string) => ({ id })) || [],
-          },
-          facilitators: {
-            set: facilitatorIds?.map((id: string) => ({ id })) || [],
-          },
-          tags: {
-            set: tagIds?.map((id: string) => ({ id })) || [],
-          },
+      const sharedScalarPatch = {
+        ...rest,
+        roomId,
+        locationId,
+        serviceId,
+        serviceCategoryId: service.serviceCategoryId,
+      };
+
+      const relationPatch = {
+        clients: { set: clientIds?.map((id: string) => ({ id })) || [] },
+        facilitators: {
+          set: facilitatorIds?.map((id: string) => ({ id })) || [],
         },
+        tags: { set: tagIds?.map((id: string) => ({ id })) || [] },
+      };
+
+      if (scope === 'THIS') {
+        // Detach this occurrence from its series (no-op if seriesId is
+        // already null) and apply the patch.
+        return await prisma.scheduledEvent.update({
+          where: { id },
+          data: {
+            ...sharedScalarPatch,
+            ...relationPatch,
+            seriesId: null,
+          } as any,
+        });
+      }
+
+      // scope === 'ALL': look up the series, fan out to siblings, update
+      // the series defaults to reflect the new shape.
+      const target = await prisma.scheduledEvent.findUniqueOrThrow({
+        where: { id },
+        select: { seriesId: true, startTime: true, endTime: true } as any,
+      });
+      const seriesId = (target as any).seriesId as string | null;
+
+      if (!seriesId) {
+        // No series — ALL collapses to THIS.
+        return await prisma.scheduledEvent.update({
+          where: { id },
+          data: { ...sharedScalarPatch, ...relationPatch } as any,
+        });
+      }
+
+      return await prisma.$transaction(async (tx) => {
+        // Update every attached occurrence with the new scalar+relation shape.
+        // Because relations require `set:` semantics, we still loop one-by-one.
+        const siblings = await tx.scheduledEvent.findMany({
+          where: { seriesId } as any,
+          select: { id: true },
+        });
+        let last: any = null;
+        for (const sib of siblings) {
+          last = await tx.scheduledEvent.update({
+            where: { id: sib.id },
+            data: { ...sharedScalarPatch, ...relationPatch },
+          });
+        }
+        // Sync the series defaults so future occurrences (e.g. if we ever
+        // extend the series) would inherit consistently.
+        await (tx as any).recurrenceSeries.update({
+          where: { id: seriesId },
+          data: {
+            defaultColor: rest.color ?? undefined,
+            defaultPrice: rest.price ?? undefined,
+            defaultNotes: rest.notes ?? null,
+            defaultRoomId: roomId,
+            defaultLocationId: locationId,
+            defaultServiceId: serviceId,
+          },
+        });
+        return last;
       });
     } catch (error) {
       console.error('Prisma Update Error:', error);
@@ -234,9 +301,35 @@ export class ScheduledEventService {
     }
   }
 
-  async delete(id: string) {
-    return prisma.scheduledEvent.delete({
+  /**
+   * Delete with a mutation scope:
+   *   - 'THIS' (default): delete this row only.
+   *   - 'ALL': delete every occurrence still attached to the same series,
+   *     and mark the series CANCELED. Already-detached rows are not
+   *     touched — they've left the series.
+   */
+  async delete(id: string, scope: 'THIS' | 'ALL' = 'THIS') {
+    if (scope === 'THIS') {
+      return prisma.scheduledEvent.delete({ where: { id } });
+    }
+
+    const target = await prisma.scheduledEvent.findUniqueOrThrow({
       where: { id },
+      select: { seriesId: true } as any,
+    });
+    const seriesId = (target as any).seriesId as string | null;
+
+    if (!seriesId) {
+      // Standalone event — ALL collapses to THIS.
+      return prisma.scheduledEvent.delete({ where: { id } });
+    }
+
+    return prisma.$transaction(async (tx) => {
+      await tx.scheduledEvent.deleteMany({ where: { seriesId } as any });
+      await (tx as any).recurrenceSeries.update({
+        where: { id: seriesId },
+        data: { status: 'CANCELED' },
+      });
     });
   }
 }
