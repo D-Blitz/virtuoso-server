@@ -2,6 +2,18 @@ import prisma from '../prisma';
 import { StripeService } from './stripe.service';
 import { EnrollmentQuoteService } from './enrollment/enrollmentQuote.service';
 import { EnrollmentEventGeneratorService } from './enrollment/enrollmentGenerator.service';
+import { auditLog } from './audit/audit.service';
+import {
+  snapshotScheduledEvent,
+  snapshotEnrollment,
+} from './audit/snapshots';
+
+/** System actor for webhook-driven enrollment activation. */
+const ACTIVATION_ACTOR = {
+  id: null,
+  email: 'system:webhook:enrollment-activation',
+  role: 'SYSTEM',
+};
 
 /**
  * Handles the post-trial "second form" flow:
@@ -411,6 +423,10 @@ export class EnrollmentInviteCheckoutService {
     });
     if (!payment) throw new Error(`[activate] payment ${args.paymentId} missing`);
 
+    // Snapshot the trial event BEFORE the transaction so the audit log
+    // shows the proper before-state (CONVERTED_TO_ENROLLMENT).
+    const trialBefore = event;
+
     // Build the Enrollment + flip event status + mark invite + generate events
     // as a single transaction to keep the world consistent.
     const result = await prisma.$transaction(async (tx) => {
@@ -439,7 +455,7 @@ export class EnrollmentInviteCheckoutService {
         data: { status: 'CONSUMED', consumedAt: new Date() },
       });
 
-      await tx.scheduledEvent.update({
+      const trialAfter = await tx.scheduledEvent.update({
         where: { id: event.id },
         data: { status: 'CONVERTED_TO_ENROLLMENT', enrollmentId: enrollment.id },
       });
@@ -482,11 +498,12 @@ export class EnrollmentInviteCheckoutService {
           )})`
         : null;
 
+      const createdEventRows: any[] = [];
       if (newEvents.length > 0) {
         // Bulk-create using createMany doesn't support nested connects, so
         // we map to a relations-friendly shape and create one at a time.
         for (const ev of newEvents) {
-          await tx.scheduledEvent.create({
+          const row = await tx.scheduledEvent.create({
             data: {
               organizationId: invite.organizationId,
               startTime: ev.startTime,
@@ -508,12 +525,47 @@ export class EnrollmentInviteCheckoutService {
               },
             },
           });
+          createdEventRows.push(row);
         }
       }
 
-      return { enrollmentId: enrollment.id, eventsGenerated: newEvents.length };
+      return {
+        enrollment,
+        trialAfter,
+        createdEventRows,
+        eventsGenerated: newEvents.length,
+      };
     });
 
-    return result;
+    // Audit log: system actor, fire-and-forget.
+    void auditLog.record({
+      action: 'CREATE',
+      entityType: 'Enrollment',
+      entityId: result.enrollment.id,
+      after: snapshotEnrollment(result.enrollment),
+      actor: ACTIVATION_ACTOR,
+    });
+    void auditLog.record({
+      action: 'UPDATE',
+      entityType: 'ScheduledEvent',
+      entityId: trialBefore.id,
+      before: snapshotScheduledEvent(trialBefore),
+      after: snapshotScheduledEvent(result.trialAfter),
+      actor: ACTIVATION_ACTOR,
+    });
+    for (const row of result.createdEventRows) {
+      void auditLog.record({
+        action: 'CREATE',
+        entityType: 'ScheduledEvent',
+        entityId: row.id,
+        after: snapshotScheduledEvent(row),
+        actor: ACTIVATION_ACTOR,
+      });
+    }
+
+    return {
+      enrollmentId: result.enrollment.id,
+      eventsGenerated: result.eventsGenerated,
+    };
   }
 }

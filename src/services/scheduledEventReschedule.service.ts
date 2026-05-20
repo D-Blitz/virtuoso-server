@@ -1,6 +1,15 @@
 import prisma from '../prisma';
 import { RescheduleOptionsService } from './rescheduleOptions.service';
 import { EmailService } from './email.service';
+import { auditLog } from './audit/audit.service';
+import { snapshotScheduledEvent } from './audit/snapshots';
+
+/** Public-reschedule actor — token-driven (the client), not a logged-in user. */
+const PUBLIC_RESCHEDULE_ACTOR = {
+  id: null,
+  email: 'system:public-reschedule',
+  role: 'SYSTEM',
+};
 
 const RESCHEDULE_CUTOFF_HOURS = 48;
 const OPTIONS_WINDOW_DAYS = 30;
@@ -196,8 +205,8 @@ export class ScheduledEventRescheduleService {
     const noteLine = `Reprogrammé le ${now.toLocaleString('fr-FR')} — créneau initial : ${formatTrialDateLabel(previousStartTime)} (par le client via lien email)`;
     const nextNotes = appendNote(event.notes, noteLine);
 
-    await prisma.$transaction(async (tx) => {
-      await tx.scheduledEvent.update({
+    const reschedResult = await prisma.$transaction(async (tx) => {
+      const updated = await tx.scheduledEvent.update({
         where: { id: event.id },
         data: {
           startTime: newStartTime,
@@ -211,6 +220,16 @@ export class ScheduledEventRescheduleService {
         where: { id: tokenRow.id },
         data: { consumedAt: new Date() },
       });
+      return updated;
+    });
+
+    void auditLog.record({
+      action: 'UPDATE',
+      entityType: 'ScheduledEvent',
+      entityId: event.id,
+      before: snapshotScheduledEvent(event),
+      after: snapshotScheduledEvent(reschedResult),
+      actor: PUBLIC_RESCHEDULE_ACTOR,
     });
 
     // Fire-and-forget confirmation email. Don't fail the API call if it bounces.

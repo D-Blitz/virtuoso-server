@@ -2,6 +2,15 @@ import prisma from '../prisma';
 import { generateOpaqueToken } from '../auth/tokens';
 import { EmailService } from './email.service';
 import { EnrollmentQuoteService } from './enrollment/enrollmentQuote.service';
+import { auditLog } from './audit/audit.service';
+import { snapshotScheduledEvent } from './audit/snapshots';
+
+/** Convention: system actor for cron-driven mutations. See AUDIT_LOG_DESIGN.md. */
+const CRON_ACTOR = {
+  id: null,
+  email: 'system:invite-cron',
+  role: 'SYSTEM',
+};
 
 const INVITE_TTL_DAYS = 14;
 const quoteService = new EnrollmentQuoteService();
@@ -58,13 +67,14 @@ export class EnrollmentInviteService {
    */
   async advanceTrialStatuses(): Promise<number> {
     // Prisma `updateMany` doesn't filter through relations — find + update.
+    // Fetch FULL rows (not just ids) so we can write proper before-snapshots
+    // to the audit log when the status flips.
     const events = await prisma.scheduledEvent.findMany({
       where: {
         status: 'PAID_TRIAL',
         endTime: { lt: new Date() },
         service: { bookingMode: 'LESSON' },
       },
-      select: { id: true },
     });
     if (events.length === 0) return 0;
 
@@ -72,6 +82,22 @@ export class EnrollmentInviteService {
       where: { id: { in: events.map((e) => e.id) } },
       data: { status: 'AWAITING_ENROLLMENT_DECISION' },
     });
+
+    // One audit entry per advanced event, with system actor.
+    for (const before of events) {
+      void auditLog.record({
+        action: 'UPDATE',
+        entityType: 'ScheduledEvent',
+        entityId: before.id,
+        before: snapshotScheduledEvent(before),
+        after: snapshotScheduledEvent({
+          ...before,
+          status: 'AWAITING_ENROLLMENT_DECISION',
+        }),
+        actor: CRON_ACTOR,
+      });
+    }
+
     return result.count;
   }
 
@@ -254,9 +280,17 @@ export class EnrollmentInviteService {
 
       if (balanceCents <= 0) {
         // Trial credit already covers the rest of the term — no second form.
-        await prisma.scheduledEvent.update({
+        const updated = await prisma.scheduledEvent.update({
           where: { id: event.id },
           data: { status: 'LAPSED' },
+        });
+        void auditLog.record({
+          action: 'UPDATE',
+          entityType: 'ScheduledEvent',
+          entityId: event.id,
+          before: snapshotScheduledEvent(event),
+          after: snapshotScheduledEvent(updated),
+          actor: CRON_ACTOR,
         });
         zeroBalanceSkipped++;
         continue;
@@ -332,6 +366,13 @@ export class EnrollmentInviteService {
     });
 
     const eventIds = expired.map((e) => e.scheduledEventId);
+    // Fetch full rows before the bulk update so we can audit the LAPSE.
+    const lapsing = await prisma.scheduledEvent.findMany({
+      where: {
+        id: { in: eventIds },
+        status: 'AWAITING_ENROLLMENT_DECISION',
+      },
+    });
     await prisma.scheduledEvent.updateMany({
       where: {
         id: { in: eventIds },
@@ -339,6 +380,16 @@ export class EnrollmentInviteService {
       },
       data: { status: 'LAPSED' },
     });
+    for (const before of lapsing) {
+      void auditLog.record({
+        action: 'UPDATE',
+        entityType: 'ScheduledEvent',
+        entityId: before.id,
+        before: snapshotScheduledEvent(before),
+        after: snapshotScheduledEvent({ ...before, status: 'LAPSED' }),
+        actor: CRON_ACTOR,
+      });
+    }
 
     return expired.length;
   }

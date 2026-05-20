@@ -3,6 +3,17 @@ import type { StripeEvent } from './stripe.service';
 import { EnrollmentInviteCheckoutService } from './enrollmentInviteCheckout.service';
 import { EmailService } from './email.service';
 import { generateOpaqueToken } from '../auth/tokens';
+import { auditLog } from './audit/audit.service';
+import { snapshotScheduledEvent } from './audit/snapshots';
+
+/** System actor for webhook-driven mutations. See AUDIT_LOG_DESIGN.md. */
+function webhookActor(eventType: string) {
+  return {
+    id: null,
+    email: `system:webhook:${eventType}`,
+    role: 'SYSTEM',
+  };
+}
 
 /**
  * Webhook handler. Runs OUTSIDE any request org context — receives global
@@ -320,10 +331,23 @@ export class WebhookService {
 
     // Trial lesson path (default)
     if (scheduledEventId) {
-      await prisma.scheduledEvent.update({
+      const before = await prisma.scheduledEvent.findUnique({
+        where: { id: scheduledEventId },
+      });
+      const updated = await prisma.scheduledEvent.update({
         where: { id: scheduledEventId },
         data: { status: 'PAID_TRIAL' },
       });
+      if (before) {
+        void auditLog.record({
+          action: 'UPDATE',
+          entityType: 'ScheduledEvent',
+          entityId: scheduledEventId,
+          before: snapshotScheduledEvent(before),
+          after: snapshotScheduledEvent(updated),
+          actor: webhookActor('payment_succeeded'),
+        });
+      }
       // Fire-and-forget: confirmation email with reschedule link.
       void sendTrialConfirmationAsync(scheduledEventId);
     }
@@ -357,10 +381,23 @@ export class WebhookService {
 
     // Trial lesson path
     if (scheduledEventId) {
-      await prisma.scheduledEvent.update({
+      const before = await prisma.scheduledEvent.findUnique({
+        where: { id: scheduledEventId },
+      });
+      const updated = await prisma.scheduledEvent.update({
         where: { id: scheduledEventId },
         data: { status: 'CANCELED' },
       });
+      if (before) {
+        void auditLog.record({
+          action: 'UPDATE',
+          entityType: 'ScheduledEvent',
+          entityId: scheduledEventId,
+          before: snapshotScheduledEvent(before),
+          after: snapshotScheduledEvent(updated),
+          actor: webhookActor('payment_failed'),
+        });
+      }
     }
     if (submissionId) {
       await prisma.widgetSubmission.update({
