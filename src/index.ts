@@ -29,6 +29,7 @@ import widgetRoutes from './routes/widget.routes';
 import paymentRoutes from './routes/payment.routes';
 import jobsRoutes from './routes/jobs.routes';
 import closureRoutes from './routes/closure.routes';
+import auditLogRoutes from './routes/auditLog.routes';
 
 // jobs
 import { startSlotHoldSweep } from './jobs/sweepSlotHolds';
@@ -99,6 +100,7 @@ app.use('/api/widgets', widgetRoutes);
 app.use('/api/payments', paymentRoutes);
 app.use('/api/jobs', jobsRoutes);
 app.use('/api/closures', closureRoutes);
+app.use('/api/audit-log', auditLogRoutes);
 
 // Background jobs
 startSlotHoldSweep();
