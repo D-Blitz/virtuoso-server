@@ -35,6 +35,7 @@ model Organization {
   enrollmentInvites EnrollmentInvite[]
   rescheduleTokens  ScheduledEventRescheduleToken[]
   recurrenceSeries  RecurrenceSeries[]
+  auditLogEntries   AuditLogEntry[]
 }
 
 model User {
@@ -585,4 +586,43 @@ model ScheduledEventRescheduleToken {
 
   @@index([organizationId])
   @@index([scheduledEventId])
+}
+
+// =========================================================================
+// AuditLogEntry — one row per meaningful mutation on whitelisted models.
+// Foundation for the trash bin + scoped undo (Phase 0.5 / 5.1) and for
+// investigation tools ("who deleted X?"). Writes are fire-and-forget at
+// the call site; a failed audit write must never fail the user's action.
+// See docs/AUDIT_LOG_DESIGN.md.
+// =========================================================================
+model AuditLogEntry {
+  id String @id @default(cuid())
+
+  // Who — denormalized so the entry survives the user record being
+  // deleted (e.g. former staff). actorId can be null for system /
+  // cron / webhook actions; the convention there is to set
+  // actorEmail = "system:<job-name>".
+  actorId    String?
+  actorEmail String?
+  actorRole  String?
+
+  // What
+  action     String // CREATE | UPDATE | DELETE
+  entityType String // ScheduledEvent | Facilitator | ...
+  entityId   String
+
+  // State snapshots — JSON of the entity's scalar fields only. Relations
+  // are NOT serialized (would balloon size + drift over time). Use the
+  // entity-history endpoint to walk forward through changes if needed.
+  before Json? // null for CREATE
+  after  Json? // null for DELETE
+
+  createdAt DateTime @default(now())
+
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId, createdAt]) // recent activity feed
+  @@index([entityType, entityId]) // per-entity history
+  @@index([actorId]) // "what did this user do?"
 }
