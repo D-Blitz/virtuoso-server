@@ -5,6 +5,11 @@ import {
   isFrequency,
   type Frequency,
 } from './recurrence/recurrence';
+import { auditLog } from './audit/audit.service';
+import {
+  snapshotScheduledEvent,
+  snapshotRecurrenceSeries,
+} from './audit/snapshots';
 
 /**
  * Default window when the caller doesn't pass from/to. Bounded so we never
@@ -98,6 +103,12 @@ export class ScheduledEventService {
         },
         include: FULL_EVENT_INCLUDE,
       });
+      void auditLog.record({
+        action: 'CREATE',
+        entityType: 'ScheduledEvent',
+        entityId: created.id,
+        after: snapshotScheduledEvent(created),
+      });
       return [created];
     }
 
@@ -120,7 +131,7 @@ export class ScheduledEventService {
       durationMs,
     });
 
-    return prisma.$transaction(async (tx) => {
+    const result = await prisma.$transaction(async (tx) => {
       // `as any` here is a temporary scaffold: the new RecurrenceSeries model
       // and ScheduledEvent.seriesId field exist in schema.prisma but the
       // generated Prisma client may not have caught up on the developer's
@@ -144,7 +155,7 @@ export class ScheduledEventService {
       // createMany doesn't support nested connects on many-to-many, so we
       // create each occurrence individually. N writes per series; bounded
       // by MAX_OCCURRENCES (500) in the generator.
-      const created: unknown[] = [];
+      const created: any[] = [];
       for (const occ of occurrences) {
         const row = await tx.scheduledEvent.create({
           data: {
@@ -160,8 +171,27 @@ export class ScheduledEventService {
         });
         created.push(row);
       }
-      return created;
+      return { series, created };
     });
+
+    // Audit AFTER the transaction so a transient audit failure can't
+    // poison the user's data. One CREATE per row + one for the series.
+    void auditLog.record({
+      action: 'CREATE',
+      entityType: 'RecurrenceSeries',
+      entityId: result.series.id,
+      after: snapshotRecurrenceSeries(result.series),
+    });
+    for (const row of result.created) {
+      void auditLog.record({
+        action: 'CREATE',
+        entityType: 'ScheduledEvent',
+        entityId: row.id,
+        after: snapshotScheduledEvent(row),
+      });
+    }
+
+    return result.created;
   }
 
   /**
@@ -237,12 +267,14 @@ export class ScheduledEventService {
       };
 
       // Up-front lookup — we need the target's seriesId regardless of scope
-      // to decide between promote / THIS / ALL paths.
+      // to decide between promote / THIS / ALL paths. Pull all scalar
+      // fields here too so we have a before-snapshot for the audit log
+      // without an extra round-trip.
       const target = await prisma.scheduledEvent.findUniqueOrThrow({
         where: { id },
-        select: { seriesId: true, startTime: true, endTime: true } as any,
       });
       const targetSeriesId = (target as any).seriesId as string | null;
+      const targetBefore = snapshotScheduledEvent(target);
 
       // PROMOTE-TO-SERIES path: the user edited a standalone event and
       // added a recurrence rule. Create the series, attach the target as
@@ -307,7 +339,7 @@ export class ScheduledEventService {
         );
         const tagConnects = (tagIds ?? []).map((tid: string) => ({ id: tid }));
 
-        return await prisma.$transaction(async (tx) => {
+        const result = await prisma.$transaction(async (tx) => {
           const series = await (tx as any).recurrenceSeries.create({
             data: {
               organizationId,
@@ -335,9 +367,10 @@ export class ScheduledEventService {
           });
 
           // Materialize occurrences[1..N-1]; occurrences[0] IS the target.
+          const extras: any[] = [];
           for (let i = 1; i < occurrences.length; i++) {
             const occ = occurrences[i];
-            await tx.scheduledEvent.create({
+            const row = await tx.scheduledEvent.create({
               data: {
                 ...occurrencePayload,
                 startTime: occ.startTime,
@@ -348,16 +381,43 @@ export class ScheduledEventService {
                 tags: { connect: tagConnects },
               } as any,
             });
+            extras.push(row);
           }
 
-          return updated;
+          return { series, updated, extras };
         });
+
+        // Audit: series CREATE, target UPDATE (gained seriesId + edits),
+        // each extra occurrence CREATE.
+        void auditLog.record({
+          action: 'CREATE',
+          entityType: 'RecurrenceSeries',
+          entityId: result.series.id,
+          after: snapshotRecurrenceSeries(result.series),
+        });
+        void auditLog.record({
+          action: 'UPDATE',
+          entityType: 'ScheduledEvent',
+          entityId: id,
+          before: targetBefore,
+          after: snapshotScheduledEvent(result.updated),
+        });
+        for (const row of result.extras) {
+          void auditLog.record({
+            action: 'CREATE',
+            entityType: 'ScheduledEvent',
+            entityId: row.id,
+            after: snapshotScheduledEvent(row),
+          });
+        }
+
+        return result.updated;
       }
 
       if (scope === 'THIS') {
         // Detach this occurrence from its series (no-op if seriesId is
         // already null) and apply the patch.
-        return await prisma.scheduledEvent.update({
+        const updated = await prisma.scheduledEvent.update({
           where: { id },
           data: {
             ...sharedScalarPatch,
@@ -365,6 +425,14 @@ export class ScheduledEventService {
             seriesId: null,
           } as any,
         });
+        void auditLog.record({
+          action: 'UPDATE',
+          entityType: 'ScheduledEvent',
+          entityId: id,
+          before: targetBefore,
+          after: snapshotScheduledEvent(updated),
+        });
+        return updated;
       }
 
       // scope === 'ALL': fan out to siblings, update series defaults.
@@ -372,10 +440,18 @@ export class ScheduledEventService {
 
       if (!seriesId) {
         // No series — ALL collapses to THIS.
-        return await prisma.scheduledEvent.update({
+        const updated = await prisma.scheduledEvent.update({
           where: { id },
           data: { ...sharedScalarPatch, ...relationPatch } as any,
         });
+        void auditLog.record({
+          action: 'UPDATE',
+          entityType: 'ScheduledEvent',
+          entityId: id,
+          before: targetBefore,
+          after: snapshotScheduledEvent(updated),
+        });
+        return updated;
       }
 
       // CRITICAL: time-of-day propagation, NOT full datetime overwrite.
@@ -417,19 +493,24 @@ export class ScheduledEventService {
         ...siblingScalarPatch
       } = sharedScalarPatch as any;
 
-      return await prisma.$transaction(async (tx) => {
+      const allScopeResult = await prisma.$transaction(async (tx) => {
+        // Need full scalars for the audit before-snapshot; fetch them all.
         const siblings = await tx.scheduledEvent.findMany({
           where: { seriesId } as any,
-          select: { id: true, startTime: true, endTime: true },
         });
 
+        const seriesBefore = await (tx as any).recurrenceSeries.findUnique({
+          where: { id: seriesId },
+        });
+
+        const pairs: Array<{ before: any; after: any }> = [];
         let last: any = null;
         for (const sib of siblings) {
-          let nextStart = sib.startTime;
-          let nextEnd = sib.endTime;
+          let nextStart = (sib as any).startTime;
+          let nextEnd = (sib as any).endTime;
           if (newStartFromPatch && newDurationMs !== null) {
             // Preserve sibling's date; overwrite hours/minutes/seconds.
-            const composed = new Date(sib.startTime);
+            const composed = new Date((sib as any).startTime);
             composed.setHours(
               newStartFromPatch.getHours(),
               newStartFromPatch.getMinutes(),
@@ -440,8 +521,8 @@ export class ScheduledEventService {
             nextEnd = new Date(composed.getTime() + newDurationMs);
           }
 
-          last = await tx.scheduledEvent.update({
-            where: { id: sib.id },
+          const updated = await tx.scheduledEvent.update({
+            where: { id: (sib as any).id },
             data: {
               ...siblingScalarPatch,
               startTime: nextStart,
@@ -449,11 +530,13 @@ export class ScheduledEventService {
               ...relationPatch,
             },
           });
+          pairs.push({ before: sib, after: updated });
+          last = updated;
         }
 
         // Sync the series defaults so future occurrences (e.g. if we ever
         // extend the series) would inherit consistently.
-        await (tx as any).recurrenceSeries.update({
+        const seriesAfter = await (tx as any).recurrenceSeries.update({
           where: { id: seriesId },
           data: {
             defaultColor: rest.color ?? undefined,
@@ -464,8 +547,27 @@ export class ScheduledEventService {
             defaultServiceId: serviceId,
           },
         });
-        return last;
+        return { last, pairs, seriesBefore, seriesAfter };
       });
+
+      // Audit every sibling UPDATE + the series UPDATE.
+      for (const { before, after } of allScopeResult.pairs) {
+        void auditLog.record({
+          action: 'UPDATE',
+          entityType: 'ScheduledEvent',
+          entityId: before.id,
+          before: snapshotScheduledEvent(before),
+          after: snapshotScheduledEvent(after),
+        });
+      }
+      void auditLog.record({
+        action: 'UPDATE',
+        entityType: 'RecurrenceSeries',
+        entityId: seriesId,
+        before: snapshotRecurrenceSeries(allScopeResult.seriesBefore),
+        after: snapshotRecurrenceSeries(allScopeResult.seriesAfter),
+      });
+      return allScopeResult.last;
     } catch (error) {
       console.error('Prisma Update Error:', error);
       throw error;
@@ -481,26 +583,66 @@ export class ScheduledEventService {
    */
   async delete(id: string, scope: 'THIS' | 'ALL' = 'THIS') {
     if (scope === 'THIS') {
-      return prisma.scheduledEvent.delete({ where: { id } });
+      const before = await prisma.scheduledEvent.findUniqueOrThrow({
+        where: { id },
+      });
+      await prisma.scheduledEvent.delete({ where: { id } });
+      void auditLog.record({
+        action: 'DELETE',
+        entityType: 'ScheduledEvent',
+        entityId: id,
+        before: snapshotScheduledEvent(before),
+      });
+      return;
     }
 
     const target = await prisma.scheduledEvent.findUniqueOrThrow({
       where: { id },
-      select: { seriesId: true } as any,
     });
     const seriesId = (target as any).seriesId as string | null;
 
     if (!seriesId) {
       // Standalone event — ALL collapses to THIS.
-      return prisma.scheduledEvent.delete({ where: { id } });
+      await prisma.scheduledEvent.delete({ where: { id } });
+      void auditLog.record({
+        action: 'DELETE',
+        entityType: 'ScheduledEvent',
+        entityId: id,
+        before: snapshotScheduledEvent(target),
+      });
+      return;
     }
 
-    return prisma.$transaction(async (tx) => {
+    const deleteResult = await prisma.$transaction(async (tx) => {
+      // Snapshot every sibling BEFORE deletion so we can audit each.
+      const siblings = await tx.scheduledEvent.findMany({
+        where: { seriesId } as any,
+      });
+      const seriesBefore = await (tx as any).recurrenceSeries.findUnique({
+        where: { id: seriesId },
+      });
       await tx.scheduledEvent.deleteMany({ where: { seriesId } as any });
-      await (tx as any).recurrenceSeries.update({
+      const seriesAfter = await (tx as any).recurrenceSeries.update({
         where: { id: seriesId },
         data: { status: 'CANCELED' },
       });
+      return { siblings, seriesBefore, seriesAfter };
+    });
+
+    for (const sib of deleteResult.siblings) {
+      void auditLog.record({
+        action: 'DELETE',
+        entityType: 'ScheduledEvent',
+        entityId: (sib as any).id,
+        before: snapshotScheduledEvent(sib),
+      });
+    }
+    void auditLog.record({
+      action: 'UPDATE',
+      entityType: 'RecurrenceSeries',
+      entityId: seriesId,
+      before: snapshotRecurrenceSeries(deleteResult.seriesBefore),
+      after: snapshotRecurrenceSeries(deleteResult.seriesAfter),
     });
   }
 }
