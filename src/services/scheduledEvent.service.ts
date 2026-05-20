@@ -211,8 +211,7 @@ export class ScheduledEventService {
         roomId,
         locationId,
         serviceId,
-        // `recurrence` is a create-only field; ignore it on update.
-        recurrence: _ignored,
+        recurrence: recurrenceInput,
         ...rest
       } = data;
 
@@ -237,6 +236,124 @@ export class ScheduledEventService {
         tags: { set: tagIds?.map((id: string) => ({ id })) || [] },
       };
 
+      // Up-front lookup — we need the target's seriesId regardless of scope
+      // to decide between promote / THIS / ALL paths.
+      const target = await prisma.scheduledEvent.findUniqueOrThrow({
+        where: { id },
+        select: { seriesId: true, startTime: true, endTime: true } as any,
+      });
+      const targetSeriesId = (target as any).seriesId as string | null;
+
+      // PROMOTE-TO-SERIES path: the user edited a standalone event and
+      // added a recurrence rule. Create the series, attach the target as
+      // its first occurrence, and materialize the extra occurrences.
+      // Scope is irrelevant here — promotion is its own operation.
+      const hasRecurrenceInput =
+        recurrenceInput &&
+        typeof recurrenceInput === 'object' &&
+        recurrenceInput.frequency &&
+        recurrenceInput.endDate;
+
+      if (hasRecurrenceInput && !targetSeriesId) {
+        if (!isFrequency(recurrenceInput.frequency)) {
+          throw new Error(
+            `Invalid recurrence.frequency: ${recurrenceInput.frequency}`,
+          );
+        }
+        const recEndDate = new Date(recurrenceInput.endDate);
+        if (Number.isNaN(recEndDate.getTime())) {
+          throw new Error('Invalid recurrence.endDate');
+        }
+
+        // The "first occurrence" inherits the new (possibly edited) start /
+        // end from the patch. Fall back to existing values if not present.
+        const newStart = sharedScalarPatch.startTime
+          ? new Date(sharedScalarPatch.startTime)
+          : (target as any).startTime;
+        const newEnd = sharedScalarPatch.endTime
+          ? new Date(sharedScalarPatch.endTime)
+          : (target as any).endTime;
+        const durationMs = newEnd.getTime() - newStart.getTime();
+        if (durationMs <= 0) {
+          throw new Error('endTime must be after startTime');
+        }
+        if (recEndDate.getTime() < newStart.getTime()) {
+          throw new Error('recurrence.endDate must be on or after startTime');
+        }
+
+        const occurrences = generateOccurrences({
+          frequency: recurrenceInput.frequency,
+          startDate: newStart,
+          endDate: recEndDate,
+          durationMs,
+        });
+
+        const organizationId = getOrganizationId()!;
+        const occurrencePayload = {
+          organizationId,
+          color: rest.color,
+          price: rest.price,
+          notes: rest.notes ?? null,
+          roomId,
+          locationId,
+          serviceId,
+          serviceCategoryId: service.serviceCategoryId,
+        };
+        const clientConnects = (clientIds ?? []).map((cid: string) => ({
+          id: cid,
+        }));
+        const facilitatorConnects = (facilitatorIds ?? []).map(
+          (fid: string) => ({ id: fid }),
+        );
+        const tagConnects = (tagIds ?? []).map((tid: string) => ({ id: tid }));
+
+        return await prisma.$transaction(async (tx) => {
+          const series = await (tx as any).recurrenceSeries.create({
+            data: {
+              organizationId,
+              frequency: recurrenceInput.frequency,
+              startDate: newStart,
+              endDate: recEndDate,
+              defaultColor: rest.color ?? '#999999',
+              defaultPrice: rest.price ?? 0,
+              defaultNotes: rest.notes ?? null,
+              defaultRoomId: roomId,
+              defaultLocationId: locationId,
+              defaultServiceId: serviceId,
+            },
+          });
+
+          // Update the target row with the patch + attach it to the new
+          // series. Becomes occurrences[0] of the new series.
+          const updated = await tx.scheduledEvent.update({
+            where: { id },
+            data: {
+              ...sharedScalarPatch,
+              ...relationPatch,
+              seriesId: series.id,
+            } as any,
+          });
+
+          // Materialize occurrences[1..N-1]; occurrences[0] IS the target.
+          for (let i = 1; i < occurrences.length; i++) {
+            const occ = occurrences[i];
+            await tx.scheduledEvent.create({
+              data: {
+                ...occurrencePayload,
+                startTime: occ.startTime,
+                endTime: occ.endTime,
+                seriesId: series.id,
+                clients: { connect: clientConnects },
+                facilitators: { connect: facilitatorConnects },
+                tags: { connect: tagConnects },
+              } as any,
+            });
+          }
+
+          return updated;
+        });
+      }
+
       if (scope === 'THIS') {
         // Detach this occurrence from its series (no-op if seriesId is
         // already null) and apply the patch.
@@ -250,13 +367,8 @@ export class ScheduledEventService {
         });
       }
 
-      // scope === 'ALL': look up the series, fan out to siblings, update
-      // the series defaults to reflect the new shape.
-      const target = await prisma.scheduledEvent.findUniqueOrThrow({
-        where: { id },
-        select: { seriesId: true, startTime: true, endTime: true } as any,
-      });
-      const seriesId = (target as any).seriesId as string | null;
+      // scope === 'ALL': fan out to siblings, update series defaults.
+      const seriesId = targetSeriesId;
 
       if (!seriesId) {
         // No series — ALL collapses to THIS.
