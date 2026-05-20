@@ -215,16 +215,6 @@ export class ScheduledEventService {
         ...rest
       } = data;
 
-      // Diagnostic — logs on every event update. Easy to grep for
-      // "[evt:update]" in the server stdout. Helps confirm whether
-      // promote-to-series fires when the admin adds recurrence to an
-      // existing event. Remove (or downgrade to debug-level) once the
-      // recurrence flows are battle-tested.
-      console.log(
-        `[evt:update] id=${id} scope=${scope} hasRecurrence=${!!recurrenceInput} ` +
-          `frequency=${recurrenceInput?.frequency ?? '-'} endDate=${recurrenceInput?.endDate ?? '-'}`,
-      );
-
       const service = await prisma.service.findUniqueOrThrow({
         where: { id: serviceId },
         select: { serviceCategoryId: true },
@@ -265,7 +255,6 @@ export class ScheduledEventService {
         recurrenceInput.endDate;
 
       if (hasRecurrenceInput && !targetSeriesId) {
-        console.log(`[evt:update] entering PROMOTE-TO-SERIES path for event ${id}`);
         if (!isFrequency(recurrenceInput.frequency)) {
           throw new Error(
             `Invalid recurrence.frequency: ${recurrenceInput.frequency}`,
@@ -361,9 +350,6 @@ export class ScheduledEventService {
             });
           }
 
-          console.log(
-            `[evt:update] promoted event ${id} to series ${series.id} with ${occurrences.length} occurrence(s)`,
-          );
           return updated;
         });
       }
