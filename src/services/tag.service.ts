@@ -1,8 +1,17 @@
 import prisma from '../prisma';
+import { auditLog } from './audit/audit.service';
+import { snapshotTag } from './audit/snapshots';
 
 export class TagService {
   async create(data: any) {
-    return prisma.tag.create({ data });
+    const created = await prisma.tag.create({ data });
+    void auditLog.record({
+      action: 'CREATE',
+      entityType: 'Tag',
+      entityId: created.id,
+      after: snapshotTag(created),
+    });
+    return created;
   }
 
   async getAll() {
@@ -10,15 +19,27 @@ export class TagService {
   }
 
   async update(id: string, data: any) {
-    return prisma.tag.update({
-      where: { id },
-      data,
+    const before = await prisma.tag.findUniqueOrThrow({ where: { id } });
+    const updated = await prisma.tag.update({ where: { id }, data });
+    void auditLog.record({
+      action: 'UPDATE',
+      entityType: 'Tag',
+      entityId: id,
+      before: snapshotTag(before),
+      after: snapshotTag(updated),
     });
+    return updated;
   }
 
   async delete(id: string) {
-    return prisma.tag.delete({
-      where: { id },
+    const before = await prisma.tag.findUniqueOrThrow({ where: { id } });
+    const deleted = await prisma.tag.delete({ where: { id } });
+    void auditLog.record({
+      action: 'DELETE',
+      entityType: 'Tag',
+      entityId: id,
+      before: snapshotTag(before),
     });
+    return deleted;
   }
 }

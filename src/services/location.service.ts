@@ -1,8 +1,17 @@
 import prisma from '../prisma';
+import { auditLog } from './audit/audit.service';
+import { snapshotLocation } from './audit/snapshots';
 
 export class LocationService {
   async create(data: any) {
-    return prisma.location.create({ data });
+    const created = await prisma.location.create({ data });
+    void auditLog.record({
+      action: 'CREATE',
+      entityType: 'Location',
+      entityId: created.id,
+      after: snapshotLocation(created),
+    });
+    return created;
   }
 
   async getAll() {
@@ -10,15 +19,27 @@ export class LocationService {
   }
 
   async update(id: string, data: any) {
-    return prisma.location.update({
-      where: { id },
-      data,
+    const before = await prisma.location.findUniqueOrThrow({ where: { id } });
+    const updated = await prisma.location.update({ where: { id }, data });
+    void auditLog.record({
+      action: 'UPDATE',
+      entityType: 'Location',
+      entityId: id,
+      before: snapshotLocation(before),
+      after: snapshotLocation(updated),
     });
+    return updated;
   }
 
   async delete(id: string) {
-    return prisma.location.delete({
-      where: { id },
+    const before = await prisma.location.findUniqueOrThrow({ where: { id } });
+    const deleted = await prisma.location.delete({ where: { id } });
+    void auditLog.record({
+      action: 'DELETE',
+      entityType: 'Location',
+      entityId: id,
+      before: snapshotLocation(before),
     });
+    return deleted;
   }
 }
