@@ -1,6 +1,7 @@
 import prisma from '../prisma';
 import { auditLog } from './audit/audit.service';
 import { snapshotClosure } from './audit/snapshots';
+import { softDelete } from './trash/softDelete';
 
 export class ClosureService {
   async create(data: any) {
@@ -42,14 +43,13 @@ export class ClosureService {
   }
 
   async delete(id: string) {
-    const before = await prisma.closure.findUniqueOrThrow({ where: { id } });
-    const deleted = await prisma.closure.delete({ where: { id } });
+    const before = await softDelete<any>('closure', id);
     void auditLog.record({
       action: 'DELETE',
       entityType: 'Closure',
       entityId: id,
       before: snapshotClosure(before),
     });
-    return deleted;
+    return before;
   }
 }

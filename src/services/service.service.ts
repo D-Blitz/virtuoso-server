@@ -1,6 +1,7 @@
 import prisma from '../prisma';
 import { auditLog } from './audit/audit.service';
 import { snapshotService } from './audit/snapshots';
+import { softDelete } from './trash/softDelete';
 
 const SERVICE_INCLUDE = {
   facilitators: true,
@@ -45,14 +46,13 @@ export class ServiceService {
   }
 
   async delete(id: string) {
-    const before = await prisma.service.findUniqueOrThrow({ where: { id } });
-    const deleted = await prisma.service.delete({ where: { id } });
+    const before = await softDelete<any>('service', id);
     void auditLog.record({
       action: 'DELETE',
       entityType: 'Service',
       entityId: id,
       before: snapshotService(before),
     });
-    return deleted;
+    return before;
   }
 }

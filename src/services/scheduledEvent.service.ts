@@ -1,5 +1,5 @@
 import prisma from '../prisma';
-import { getOrganizationId } from '../auth/context';
+import { getOrganizationId, getContext } from '../auth/context';
 import {
   generateOccurrences,
   isFrequency,
@@ -10,6 +10,7 @@ import {
   snapshotScheduledEvent,
   snapshotRecurrenceSeries,
 } from './audit/snapshots';
+import { softDelete } from './trash/softDelete';
 
 /**
  * Default window when the caller doesn't pass from/to. Bounded so we never
@@ -583,10 +584,8 @@ export class ScheduledEventService {
    */
   async delete(id: string, scope: 'THIS' | 'ALL' = 'THIS') {
     if (scope === 'THIS') {
-      const before = await prisma.scheduledEvent.findUniqueOrThrow({
-        where: { id },
-      });
-      await prisma.scheduledEvent.delete({ where: { id } });
+      // Soft-delete via the trash bin (Phase 0.5).
+      const before = await softDelete<any>('scheduledEvent', id);
       void auditLog.record({
         action: 'DELETE',
         entityType: 'ScheduledEvent',
@@ -603,28 +602,42 @@ export class ScheduledEventService {
 
     if (!seriesId) {
       // Standalone event — ALL collapses to THIS.
-      await prisma.scheduledEvent.delete({ where: { id } });
+      const before = await softDelete<any>('scheduledEvent', id);
       void auditLog.record({
         action: 'DELETE',
         entityType: 'ScheduledEvent',
         entityId: id,
-        before: snapshotScheduledEvent(target),
+        before: snapshotScheduledEvent(before),
       });
       return;
     }
 
+    // ALL-scope on a series: soft-delete every still-attached occurrence
+    // AND the series row itself (so restore can pull both back as one).
+    // CANCELED status is also set on the series for backward-compat with
+    // any reporting that filters by status.
+    const ctx = getContext();
+    const deletedAt = new Date();
+    const deletedById = ctx?.userId ?? null;
+
     const deleteResult = await prisma.$transaction(async (tx) => {
-      // Snapshot every sibling BEFORE deletion so we can audit each.
+      // Snapshot every sibling BEFORE the soft-delete so we can audit.
       const siblings = await tx.scheduledEvent.findMany({
         where: { seriesId } as any,
       });
       const seriesBefore = await (tx as any).recurrenceSeries.findUnique({
         where: { id: seriesId },
       });
-      await tx.scheduledEvent.deleteMany({ where: { seriesId } as any });
+      // Soft-delete (updateMany bypasses the default deletedAt:null scope
+      // because we're explicitly writing to deletedAt; the extension's
+      // scopeWhere only adds deletedAt:null when caller doesn't mention it).
+      await tx.scheduledEvent.updateMany({
+        where: { seriesId } as any,
+        data: { deletedAt, deletedById } as any,
+      });
       const seriesAfter = await (tx as any).recurrenceSeries.update({
         where: { id: seriesId },
-        data: { status: 'CANCELED' },
+        data: { status: 'CANCELED', deletedAt, deletedById },
       });
       return { siblings, seriesBefore, seriesAfter };
     });

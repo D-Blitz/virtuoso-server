@@ -1,6 +1,7 @@
 import prisma from '../prisma';
 import { auditLog } from './audit/audit.service';
 import { snapshotFacilitator } from './audit/snapshots';
+import { softDelete } from './trash/softDelete';
 
 export class FacilitatorService {
   async create(data: any) {
@@ -52,14 +53,16 @@ export class FacilitatorService {
   }
 
   async delete(id: string) {
-    const before = await prisma.facilitator.findUniqueOrThrow({ where: { id } });
-    const deleted = await prisma.facilitator.delete({ where: { id } });
+    // Soft-delete via the trash bin (Phase 0.5). Audit log still records
+    // a DELETE entry — that's the user-facing semantic, even though the
+    // mechanism is an UPDATE setting deletedAt.
+    const before = await softDelete<any>('facilitator', id);
     void auditLog.record({
       action: 'DELETE',
       entityType: 'Facilitator',
       entityId: id,
       before: snapshotFacilitator(before),
     });
-    return deleted;
+    return before;
   }
 }
