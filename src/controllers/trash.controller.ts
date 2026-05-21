@@ -173,12 +173,25 @@ export class TrashController {
       }
       const msg = err?.message ?? 'Failed to purge';
       const lower = msg.toLowerCase();
-      const status = lower.includes('no trashed')
-        ? 404
-        : lower.includes('paiement') || lower.includes('anonymiser')
-          ? 409
-          : 500;
-      res.status(status).json({ error: msg });
+      if (lower.includes('no trashed')) {
+        res.status(404).json({
+          summary: 'Cet élément n’est plus dans la corbeille.',
+          error: msg,
+        });
+        return;
+      }
+      if (lower.includes('paiement') || lower.includes('anonymiser')) {
+        res.status(409).json({
+          summary:
+            'Cet intervenant a des paiements liés et ne peut pas être supprimé définitivement.',
+          error: msg,
+        });
+        return;
+      }
+      res.status(500).json({
+        summary: 'La suppression définitive a échoué.',
+        error: msg,
+      });
     }
   }
 

@@ -32,9 +32,15 @@ export function sendError(
   if (err instanceof Prisma.PrismaClientKnownRequestError) {
     switch (err.code) {
       case 'P2025':
-        res
-          .status(404)
-          .json({ error: err.message || 'Élément introuvable ou déjà supprimé.' });
+        // Summary: short, plain-French headline for non-dev users.
+        // Error: the detailed technical line a developer would grep
+        // for. Both go in the body; the admin renders summary as the
+        // primary message and error as a "details" expander.
+        res.status(404).json({
+          summary: 'Cet élément est introuvable ou a déjà été supprimé.',
+          error: err.message || 'Élément introuvable ou déjà supprimé.',
+          code: err.code,
+        });
         return;
       case 'P2003': {
         // P2003 fires on hard-deletes (and updates that violate FKs)
@@ -49,30 +55,36 @@ export function sendError(
           (typeof meta.field_name === 'string' && meta.field_name) ||
           (typeof meta.constraint === 'string' && meta.constraint) ||
           '';
-        const what = describeBlockingReference(constraint);
-        const detail = what
-          ? ` ${what}`
+        const ref = describeBlockingReference(constraint);
+        const detailSuffix = ref.detail
+          ? ` ${ref.detail}`
           : constraint
             ? ` (contrainte : ${constraint})`
             : '';
         res.status(409).json({
+          summary:
+            ref.summary ??
+            'Cet élément ne peut pas être supprimé car il est lié à d’autres données.',
           error:
-            `Suppression bloquée — cet élément est encore référencé.${detail}`,
+            `Suppression bloquée — cet élément est encore référencé.${detailSuffix}`,
           code: err.code,
         });
         return;
       }
       case 'P2002':
         res.status(409).json({
+          summary: 'Une autre entrée utilise déjà cette valeur.',
           error:
             'Conflit d’unicité — un élément avec cette valeur existe déjà.',
           code: err.code,
         });
         return;
       default:
-        res
-          .status(400)
-          .json({ error: err.message || fallbackMessage, code: err.code });
+        res.status(400).json({
+          summary: 'La requête a été refusée par la base de données.',
+          error: err.message || fallbackMessage,
+          code: err.code,
+        });
         return;
     }
   }
@@ -82,49 +94,95 @@ export function sendError(
   // what hid the "client delete 500" root cause for so long.
   const msg =
     err instanceof Error && err.message ? err.message : fallbackMessage;
-  res.status(500).json({ error: msg });
+  res.status(500).json({
+    summary: 'Une erreur serveur est survenue.',
+    error: msg,
+  });
 }
 
 /**
  * Maps the few FK constraint names admins actually encounter into
- * plain-French descriptions. Returning '' falls back to the generic
- * "(contrainte : X)" suffix so we never hide info the admin might need
- * to grep the schema for.
+ * plain-French descriptions. Returns both a `summary` (for the modal's
+ * primary headline, no jargon) and a `detail` (the explanation the
+ * admin would want when troubleshooting).
  *
  * Constraint names follow Postgres conventions:
  *   <ChildTable>_<columnName>_fkey
  * e.g. "Payment_clientId_fkey" means rows in Payment with this clientId
  * are blocking the delete.
  */
-function describeBlockingReference(constraint: string): string {
+function describeBlockingReference(constraint: string): {
+  summary?: string;
+  detail?: string;
+} {
   switch (constraint) {
     case 'Payment_clientId_fkey':
-      return 'Des paiements lui sont liés (conservés pour la comptabilité). Utilisez "Anonymiser" plutôt que la suppression définitive.';
+      return {
+        summary: 'Ce client a des paiements liés et ne peut pas être supprimé définitivement.',
+        detail:
+          'Des paiements lui sont liés (conservés pour la comptabilité). Utilisez "Anonymiser" plutôt que la suppression définitive.',
+      };
     case 'Payment_relatedScheduledEventId_fkey':
-      return 'Des paiements référencent cet événement.';
+      return {
+        summary: 'Cet événement a des paiements liés et ne peut pas être supprimé définitivement.',
+        detail: 'Des paiements référencent cet événement.',
+      };
     case 'Enrollment_clientId_fkey':
-      return 'Des inscriptions sont liées à ce client.';
+      return {
+        summary: 'Ce client a des inscriptions en cours.',
+        detail: 'Des inscriptions sont liées à ce client.',
+      };
     case 'Enrollment_facilitatorId_fkey':
-      return 'Des inscriptions sont liées à cet intervenant.';
+      return {
+        summary: 'Cet intervenant a des inscriptions en cours.',
+        detail: 'Des inscriptions sont liées à cet intervenant.',
+      };
     case 'Enrollment_roomId_fkey':
-      return 'Des inscriptions utilisent cette salle.';
+      return {
+        summary: 'Cette salle est utilisée par des inscriptions.',
+        detail: 'Des inscriptions utilisent cette salle.',
+      };
     case 'Enrollment_locationId_fkey':
-      return 'Des inscriptions sont liées à cet établissement.';
+      return {
+        summary: 'Cet établissement a des inscriptions en cours.',
+        detail: 'Des inscriptions sont liées à cet établissement.',
+      };
     case 'Enrollment_serviceId_fkey':
-      return 'Des inscriptions utilisent ce service.';
+      return {
+        summary: 'Ce service a des inscriptions en cours.',
+        detail: 'Des inscriptions utilisent ce service.',
+      };
     case 'Enrollment_termId_fkey':
-      return 'Des inscriptions sont liées à ce trimestre.';
+      return {
+        summary: 'Ce trimestre a des inscriptions liées.',
+        detail: 'Des inscriptions sont liées à ce trimestre.',
+      };
     case 'ScheduledEvent_roomId_fkey':
-      return 'Des événements utilisent cette salle.';
+      return {
+        summary: 'Cette salle est utilisée par des événements.',
+        detail: 'Des événements utilisent cette salle.',
+      };
     case 'ScheduledEvent_locationId_fkey':
-      return 'Des événements sont liés à cet établissement.';
+      return {
+        summary: 'Cet établissement a des événements programmés.',
+        detail: 'Des événements sont liés à cet établissement.',
+      };
     case 'ScheduledEvent_serviceId_fkey':
-      return 'Des événements utilisent ce service.';
+      return {
+        summary: 'Ce service est utilisé par des événements.',
+        detail: 'Des événements utilisent ce service.',
+      };
     case 'ScheduledEvent_serviceCategoryId_fkey':
-      return 'Des événements utilisent cette catégorie.';
+      return {
+        summary: 'Cette catégorie est utilisée par des événements.',
+        detail: 'Des événements utilisent cette catégorie.',
+      };
     case 'Room_locationId_fkey':
-      return 'Des salles dépendent de cet établissement.';
+      return {
+        summary: 'Cet établissement contient des salles.',
+        detail: 'Des salles dépendent de cet établissement.',
+      };
     default:
-      return '';
+      return {};
   }
 }
