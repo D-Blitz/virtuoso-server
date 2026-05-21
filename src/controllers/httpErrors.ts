@@ -89,11 +89,62 @@ export function sendError(
     }
   }
 
-  // Non-Prisma exception: surface the message so we stop debugging blind
-  // 500s. The original behavior used a hardcoded string here, which is
-  // what hid the "client delete 500" root cause for so long.
+  // Non-Prisma exception (or PrismaClientUnknownRequestError when the
+  // connector failed to classify the underlying Postgres error — see
+  // the "client + payment hard-delete" report: the user_facing_error
+  // came back as `None`, which means Prisma threw the *Unknown*
+  // variant, which our instanceof check above misses).
+  //
+  // Fall through to message-pattern detection so we still recognise
+  // the common cases:
+  //   - Postgres FK violation       → 409, with a tailored summary
+  //   - Manual "paiement"/"anonymiser" throws (e.g. the facilitator
+  //     guard in trash.service.purge) → 409
+  //   - Manual "no trashed" throws (trash service)                  → 404
+  // Everything else falls to a generic 500 with the raw message.
   const msg =
     err instanceof Error && err.message ? err.message : fallbackMessage;
+  const lower = msg.toLowerCase();
+
+  // Postgres FK violation pattern. Catches both raw ConnectorError
+  // messages and the Prisma "Foreign key constraint failed on the
+  // field: X" format.
+  const fkMatch =
+    msg.match(/foreign key constraint ["']([^"']+_fkey)["']/i) ??
+    msg.match(/foreign key constraint failed on the field:\s*([A-Za-z_]+)/i);
+  if (fkMatch) {
+    const constraint = fkMatch[1];
+    const ref = describeBlockingReference(constraint);
+    res.status(409).json({
+      summary:
+        ref.summary ??
+        'Cet élément ne peut pas être supprimé car il est lié à d’autres données.',
+      error: ref.detail
+        ? `Suppression bloquée — ${ref.detail}`
+        : `Suppression bloquée — référence existante (${constraint}).`,
+      code: 'P2003',
+    });
+    return;
+  }
+
+  // Manual policy throws from services (e.g. the Facilitator+Payment
+  // guard) — recognized by keywords in the French message.
+  if (lower.includes('no trashed')) {
+    res.status(404).json({
+      summary: 'Cet élément n’est plus dans la corbeille.',
+      error: msg,
+    });
+    return;
+  }
+  if (lower.includes('paiement') || lower.includes('anonymiser')) {
+    res.status(409).json({
+      summary:
+        'Cet intervenant a des paiements liés et ne peut pas être supprimé définitivement.',
+      error: msg,
+    });
+    return;
+  }
+
   res.status(500).json({
     summary: 'Une erreur serveur est survenue.',
     error: msg,
@@ -111,7 +162,7 @@ export function sendError(
  * e.g. "Payment_clientId_fkey" means rows in Payment with this clientId
  * are blocking the delete.
  */
-function describeBlockingReference(constraint: string): {
+export function describeBlockingReference(constraint: string): {
   summary?: string;
   detail?: string;
 } {

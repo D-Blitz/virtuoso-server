@@ -1,5 +1,4 @@
 import { Request, Response } from 'express';
-import { Prisma } from '@prisma/client';
 import { getContext } from '../auth/context';
 import {
   SOFT_DELETABLE_ENTITY_TYPES,
@@ -159,39 +158,17 @@ export class TrashController {
       }
       await trashService.purge(entityType, req.params.id);
       res.status(204).send();
-    } catch (err: any) {
-      console.error('trash purge error:', err);
-      // Try the shared mapper first — it correctly handles Prisma's
-      // P2003 / P2025 codes (P2003 fires for blocked hard-deletes like
-      // the Client + Payment FK case). For non-Prisma errors thrown
-      // by the service (e.g. the facilitator-payment safety check)
-      // we fall back to keyword-based status mapping so the user
-      // sees the actual message instead of "Failed to purge".
-      if (err instanceof Prisma.PrismaClientKnownRequestError) {
-        sendError(res, err, 'Failed to purge');
-        return;
-      }
-      const msg = err?.message ?? 'Failed to purge';
-      const lower = msg.toLowerCase();
-      if (lower.includes('no trashed')) {
-        res.status(404).json({
-          summary: 'Cet élément n’est plus dans la corbeille.',
-          error: msg,
-        });
-        return;
-      }
-      if (lower.includes('paiement') || lower.includes('anonymiser')) {
-        res.status(409).json({
-          summary:
-            'Cet intervenant a des paiements liés et ne peut pas être supprimé définitivement.',
-          error: msg,
-        });
-        return;
-      }
-      res.status(500).json({
-        summary: 'La suppression définitive a échoué.',
-        error: msg,
-      });
+    } catch (err) {
+      // sendError now handles every case we care about:
+      //   - Prisma KnownRequestError (P2025/P2003/P2002)
+      //   - Prisma UnknownRequestError + raw ConnectorError (FK
+      //     violation pattern in the message → 409 with the same
+      //     friendly summary as the Known variant). This is what
+      //     fired on the Client+Payment hard-delete: Prisma was
+      //     emitting Unknown, so the old `instanceof Known` check
+      //     missed it.
+      //   - Manual policy throws (no trashed / paiement / anonymiser)
+      sendError(res, err, 'La suppression définitive a échoué.');
     }
   }
 
