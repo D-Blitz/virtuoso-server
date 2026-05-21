@@ -86,25 +86,32 @@ function modelName(entityType: AnonymizableEntityType): string {
 }
 
 /**
- * Find the row regardless of whether it's trashed or archived,
- * bypassing the Prisma extension's default scope. Returns null if
- * the row is fully active OR doesn't exist — anonymize() requires
- * the row to be in one of the hidden states first.
+ * Find the row regardless of whether it's trashed or archived.
+ *
+ * Why two queries and not one OR: the Prisma extension's scopeWhere
+ * checks for `deletedAt` / `archivedAt` only at the top level of
+ * the where clause. An `OR: [{ deletedAt: …}, { archivedAt: …}]`
+ * leaves the top level WITHOUT those keys, so the extension then
+ * injects `deletedAt: null` AND `archivedAt: null` as additional
+ * constraints — which contradicts our OR and the query finds
+ * nothing. Bug surfaced as "Client X is not in trash or archive" on
+ * a clearly-trashed row.
+ *
+ * Two findFirsts (trashed first, then archived) each pass the
+ * filtered column at the top level → the extension's `'X' in where`
+ * check skips its auto-injection, and the query actually matches.
  */
 async function findHiddenRow(
   entityType: AnonymizableEntityType,
   id: string,
 ): Promise<any | null> {
   const client = (prisma as any)[modelName(entityType)];
-  // OR filter expressed as findFirst with explicit deletedAt-or-
-  // archivedAt: not-null. Both columns exist on the 2 anonymizable
-  // entities (added by the 0.5 trash migration + 6.11 archive
-  // migration respectively).
+  const trashed = await client.findFirst({
+    where: { id, deletedAt: { not: null } },
+  });
+  if (trashed) return trashed;
   return client.findFirst({
-    where: {
-      id,
-      OR: [{ deletedAt: { not: null } }, { archivedAt: { not: null } }],
-    },
+    where: { id, archivedAt: { not: null } },
   });
 }
 
@@ -141,15 +148,18 @@ export async function anonymize<T = any>(
 
   const patch = redactionPatch(entityType, id, ctx?.userId ?? null);
 
-  // updateMany bypasses the extension's `deletedAt: null` /
-  // `archivedAt: null` injection (which would prevent us from
-  // touching the hidden row). Targeted by id + the hidden-state
-  // condition so we never match a stray active row.
+  // We already know which hidden state the row is in (from `before`).
+  // Targeting the updateMany at the *specific* state (deletedAt OR
+  // archivedAt, not both) keeps the where clause's top-level key set
+  // unambiguous — which sidesteps the same extension-auto-injection
+  // trap that broke findFirst earlier.
+  const wasInTrash = before.deletedAt != null;
+  const stateFilter = wasInTrash
+    ? { deletedAt: { not: null } }
+    : { archivedAt: { not: null } };
+
   const result = await client.updateMany({
-    where: {
-      id,
-      OR: [{ deletedAt: { not: null } }, { archivedAt: { not: null } }],
-    },
+    where: { id, ...stateFilter },
     data: patch,
   });
   if (result.count === 0) {
@@ -157,10 +167,7 @@ export async function anonymize<T = any>(
   }
 
   const after = await client.findFirst({
-    where: {
-      id,
-      OR: [{ deletedAt: { not: null } }, { archivedAt: { not: null } }],
-    },
+    where: { id, ...stateFilter },
   });
 
   return { before: before as T, after: after as T };
