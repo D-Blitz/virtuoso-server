@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import { EnrollmentService } from '../services/enrollment.service';
+import { sendError } from './httpErrors';
 
 const enrollmentService = new EnrollmentService();
 
@@ -47,8 +48,7 @@ export class EnrollmentController {
       res.status(201).json(created);
       return;
     } catch (error) {
-      console.error(error);
-      res.status(500).json({ error: 'Failed to create enrollment' });
+      sendError(res, error, 'Failed to create enrollment');
       return;
     }
   }
@@ -58,8 +58,7 @@ export class EnrollmentController {
       const enrollments = await enrollmentService.getAll();
       res.json(enrollments);
     } catch (error) {
-      console.error(error);
-      res.status(500).json({ error: 'Failed to fetch enrollments' });
+      sendError(res, error, 'Failed to fetch enrollments');
     }
   }
 
@@ -76,8 +75,7 @@ export class EnrollmentController {
       res.json(updated);
       return;
     } catch (error) {
-      console.error(error);
-      res.status(500).json({ error: 'Failed to update enrollment' });
+      sendError(res, error, 'Failed to update enrollment');
       return;
     }
   }
@@ -90,8 +88,7 @@ export class EnrollmentController {
       res.status(204).send();
       return;
     } catch (error) {
-      console.error(error);
-      res.status(500).json({ error: 'Failed to delete enrollment' });
+      sendError(res, error, 'Failed to delete enrollment');
       return;
     }
   }

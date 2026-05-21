@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import { ClosureService } from '../services/closure.service';
+import { sendError } from './httpErrors';
 
 const closureService = new ClosureService();
 
@@ -9,8 +10,7 @@ export class ClosureController {
       const closure = await closureService.create(req.body);
       res.status(201).json(closure);
     } catch (error) {
-      console.error(error);
-      res.status(500).json({ error: 'Failed to create closure' });
+      sendError(res, error, 'Failed to create closure');
     }
   }
 
@@ -19,8 +19,7 @@ export class ClosureController {
       const closures = await closureService.getAll();
       res.json(closures);
     } catch (error) {
-      console.error(error);
-      res.status(500).json({ error: 'Failed to fetch closures' });
+      sendError(res, error, 'Failed to fetch closures');
     }
   }
 
@@ -29,8 +28,7 @@ export class ClosureController {
       const updated = await closureService.update(req.params.id, req.body);
       res.json(updated);
     } catch (error) {
-      console.error(error);
-      res.status(500).json({ error: 'Failed to update closure' });
+      sendError(res, error, 'Failed to update closure');
     }
   }
 
@@ -39,8 +37,7 @@ export class ClosureController {
       await closureService.delete(req.params.id);
       res.status(204).send();
     } catch (error) {
-      console.error(error);
-      res.status(500).json({ error: 'Failed to delete closure' });
+      sendError(res, error, 'Failed to delete closure');
     }
   }
 }

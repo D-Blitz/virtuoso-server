@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import { ClientService } from '../services/client.service';
+import { sendError } from './httpErrors';
 
 const clientService = new ClientService();
 
@@ -9,8 +10,7 @@ export class ClientController {
       const client = await clientService.create(req.body);
       res.status(201).json(client);
     } catch (error) {
-      console.error(error);
-      res.status(500).json({ error: 'Failed to create client' });
+      sendError(res, error, 'Failed to create client');
     }
   }
 
@@ -19,8 +19,7 @@ export class ClientController {
       const clients = await clientService.getAll();
       res.json(clients);
     } catch (error) {
-      console.error(error);
-      res.status(500).json({ error: 'Failed to fetch clients' });
+      sendError(res, error, 'Failed to fetch clients');
     }
   }
 
@@ -30,8 +29,7 @@ export class ClientController {
       const updated = await clientService.update(id, req.body);
       res.json(updated);
     } catch (error) {
-      console.error(error);
-      res.status(500).json({ error: 'Failed to update client' });
+      sendError(res, error, 'Failed to update client');
     }
   }
 
@@ -41,8 +39,7 @@ export class ClientController {
       await clientService.delete(id);
       res.status(204).send();
     } catch (error) {
-      console.error(error);
-      res.status(500).json({ error: 'Failed to delete client' });
+      sendError(res, error, 'Failed to delete client');
     }
   }
 }

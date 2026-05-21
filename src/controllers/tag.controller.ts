@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import { TagService } from '../services/tag.service';
+import { sendError } from './httpErrors';
 
 const tagService = new TagService();
 
@@ -9,8 +10,7 @@ export class TagController {
       const tag = await tagService.create(req.body);
       res.status(201).json(tag);
     } catch (error) {
-      console.error(error);
-      res.status(500).json({ error: 'Failed to create tag' });
+      sendError(res, error, 'Failed to create tag');
     }
   }
 
@@ -19,8 +19,7 @@ export class TagController {
       const tags = await tagService.getAll();
       res.json(tags);
     } catch (error) {
-      console.error(error);
-      res.status(500).json({ error: 'Failed to fetch tags' });
+      sendError(res, error, 'Failed to fetch tags');
     }
   }
 
@@ -30,8 +29,7 @@ export class TagController {
       const updated = await tagService.update(id, req.body);
       res.json(updated);
     } catch (error) {
-      console.error(error);
-      res.status(500).json({ error: 'Failed to update tag' });
+      sendError(res, error, 'Failed to update tag');
     }
   }
 
@@ -41,8 +39,7 @@ export class TagController {
       await tagService.delete(id);
       res.status(204).send();
     } catch (error) {
-      console.error(error);
-      res.status(500).json({ error: 'Failed to delete tag' });
+      sendError(res, error, 'Failed to delete tag');
     }
   }
 }

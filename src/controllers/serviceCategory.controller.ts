@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import { ServiceCategoryService } from '../services/serviceCategory.service';
+import { sendError } from './httpErrors';
 
 const serviceCategoryService = new ServiceCategoryService();
 
@@ -9,8 +10,7 @@ export class ServiceCategoryController {
       const category = await serviceCategoryService.create(req.body);
       res.status(201).json(category);
     } catch (error) {
-      console.error(error);
-      res.status(500).json({ error: 'Failed to create service category' });
+      sendError(res, error, 'Failed to create service category');
     }
   }
 
@@ -19,8 +19,7 @@ export class ServiceCategoryController {
       const categories = await serviceCategoryService.getAll();
       res.json(categories);
     } catch (error) {
-      console.error(error);
-      res.status(500).json({ error: 'Failed to fetch service categories' });
+      sendError(res, error, 'Failed to fetch service categories');
     }
   }
 
@@ -30,8 +29,7 @@ export class ServiceCategoryController {
       const updated = await serviceCategoryService.update(id, req.body);
       res.json(updated);
     } catch (error) {
-      console.error(error);
-      res.status(500).json({ error: 'Failed to update service category' });
+      sendError(res, error, 'Failed to update service category');
     }
   }
 
@@ -41,8 +39,7 @@ export class ServiceCategoryController {
       await serviceCategoryService.delete(id);
       res.status(204).send();
     } catch (error) {
-      console.error(error);
-      res.status(500).json({ error: 'Failed to delete service category' });
+      sendError(res, error, 'Failed to delete service category');
     }
   }
 }

@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import { FacilitatorService } from '../services/facilitator.service';
+import { sendError } from './httpErrors';
 
 const facilitatorService = new FacilitatorService();
 
@@ -9,8 +10,7 @@ export class FacilitatorController {
       const facilitator = await facilitatorService.create(req.body);
       res.status(201).json(facilitator);
     } catch (error) {
-      console.error(error);
-      res.status(500).json({ error: 'Failed to create facilitator' });
+      sendError(res, error, 'Failed to create facilitator');
     }
   }
 
@@ -19,8 +19,7 @@ export class FacilitatorController {
       const facilitators = await facilitatorService.getAll();
       res.json(facilitators);
     } catch (error) {
-      console.error(error);
-      res.status(500).json({ error: 'Failed to fetch facilitators' });
+      sendError(res, error, 'Failed to fetch facilitators');
     }
   }
 
@@ -30,8 +29,7 @@ export class FacilitatorController {
       const updated = await facilitatorService.update(id, req.body);
       res.json(updated);
     } catch (error) {
-      console.error(error);
-      res.status(500).json({ error: 'Failed to update facilitator' });
+      sendError(res, error, 'Failed to update facilitator');
     }
   }
 
@@ -41,8 +39,7 @@ export class FacilitatorController {
       await facilitatorService.delete(id);
       res.status(204).send();
     } catch (error) {
-      console.error(error);
-      res.status(500).json({ error: 'Failed to delete facilitator' });
+      sendError(res, error, 'Failed to delete facilitator');
     }
   }
 }

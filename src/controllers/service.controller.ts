@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import { ServiceService } from '../services/service.service';
+import { sendError } from './httpErrors';
 
 const serviceService = new ServiceService();
 
@@ -9,8 +10,7 @@ export class ServiceController {
       const service = await serviceService.create(req.body);
       res.status(201).json(service);
     } catch (error) {
-      console.error(error);
-      res.status(500).json({ error: 'Failed to create service' });
+      sendError(res, error, 'Failed to create service');
     }
   }
 
@@ -19,8 +19,7 @@ export class ServiceController {
       const services = await serviceService.getAll();
       res.json(services);
     } catch (error) {
-      console.error(error);
-      res.status(500).json({ error: 'Failed to fetch services' });
+      sendError(res, error, 'Failed to fetch services');
     }
   }
 
@@ -30,8 +29,7 @@ export class ServiceController {
       const updated = await serviceService.update(id, req.body);
       res.json(updated);
     } catch (error) {
-      console.error(error);
-      res.status(500).json({ error: 'Failed to update service' });
+      sendError(res, error, 'Failed to update service');
     }
   }
 
@@ -41,8 +39,7 @@ export class ServiceController {
       await serviceService.delete(id);
       res.status(204).send();
     } catch (error) {
-      console.error(error);
-      res.status(500).json({ error: 'Failed to delete service' });
+      sendError(res, error, 'Failed to delete service');
     }
   }
 }

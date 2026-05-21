@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import { ScheduledEventService } from '../services/scheduledEvent.service';
+import { sendError } from './httpErrors';
 
 const scheduledEventService = new ScheduledEventService();
 
@@ -15,6 +16,10 @@ export class ScheduledEventController {
       const events = await scheduledEventService.create(req.body);
       res.status(201).json(events);
     } catch (error: any) {
+      // Create has its own keyword-based 400 mapping because the service
+      // throws plain Errors for validation failures ("Invalid X",
+      // "Missing serviceId", "must be after"). TODO: replace with typed
+      // ValidationError codes so the catch can use sendError uniformly.
       console.error(error);
       const msg = error?.message ?? 'Failed to create event';
       const lower = msg.toLowerCase();
@@ -45,8 +50,7 @@ export class ScheduledEventController {
       const events = await scheduledEventService.getAll({ from, to });
       res.json(events);
     } catch (error) {
-      console.error(error);
-      res.status(500).json({ error: 'Failed to fetch events' });
+      sendError(res, error, 'Failed to fetch events');
     }
   }
 
@@ -60,8 +64,7 @@ export class ScheduledEventController {
       );
       res.json(updated);
     } catch (error) {
-      console.error(error);
-      res.status(500).json({ error: 'Failed to update event' });
+      sendError(res, error, 'Failed to update event');
     }
   }
 
@@ -71,8 +74,7 @@ export class ScheduledEventController {
       await scheduledEventService.delete(id, parseScope(req));
       res.status(204).send();
     } catch (error) {
-      console.error(error);
-      res.status(500).json({ error: 'Failed to delete event' });
+      sendError(res, error, 'Failed to delete event');
     }
   }
 }

@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import { RoomService } from '../services/room.service';
+import { sendError } from './httpErrors';
 
 const roomService = new RoomService();
 
@@ -9,8 +10,7 @@ export class RoomController {
       const room = await roomService.create(req.body);
       res.status(201).json(room);
     } catch (error) {
-      console.error(error);
-      res.status(500).json({ error: 'Failed to create room' });
+      sendError(res, error, 'Failed to create room');
     }
   }
 
@@ -19,8 +19,7 @@ export class RoomController {
       const rooms = await roomService.getAll();
       res.json(rooms);
     } catch (error) {
-      console.error(error);
-      res.status(500).json({ error: 'Failed to fetch rooms' });
+      sendError(res, error, 'Failed to fetch rooms');
     }
   }
 
@@ -30,8 +29,7 @@ export class RoomController {
       const updated = await roomService.update(id, req.body);
       res.json(updated);
     } catch (error) {
-      console.error(error);
-      res.status(500).json({ error: 'Failed to update room' });
+      sendError(res, error, 'Failed to update room');
     }
   }
 
@@ -41,8 +39,7 @@ export class RoomController {
       await roomService.delete(id);
       res.status(204).send();
     } catch (error) {
-      console.error(error);
-      res.status(500).json({ error: 'Failed to delete room' });
+      sendError(res, error, 'Failed to delete room');
     }
   }
 }

@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import { TermService } from '../services/term.service';
+import { sendError } from './httpErrors';
 
 const termService = new TermService();
 
@@ -9,8 +10,7 @@ export class TermController {
       const term = await termService.create(req.body);
       res.status(201).json(term);
     } catch (error) {
-      console.error(error);
-      res.status(500).json({ error: 'Failed to create term' });
+      sendError(res, error, 'Failed to create term');
     }
   }
 
@@ -19,8 +19,7 @@ export class TermController {
       const terms = await termService.getAll();
       res.json(terms);
     } catch (error) {
-      console.error(error);
-      res.status(500).json({ error: 'Failed to fetch terms' });
+      sendError(res, error, 'Failed to fetch terms');
     }
   }
 
@@ -31,8 +30,7 @@ export class TermController {
       const updated = await termService.update(id, req.body);
       res.json(updated);
     } catch (error) {
-      console.error(error);
-      res.status(500).json({ error: 'Failed to update term' });
+      sendError(res, error, 'Failed to update term');
     }
   }
 
@@ -43,8 +41,7 @@ export class TermController {
       await termService.delete(id);
       res.status(204).send();
     } catch (error) {
-      console.error(error);
-      res.status(500).json({ error: 'Failed to delete term' });
+      sendError(res, error, 'Failed to delete term');
     }
   }
 }
