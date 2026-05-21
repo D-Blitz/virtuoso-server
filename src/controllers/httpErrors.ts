@@ -106,12 +106,16 @@ export function sendError(
     err instanceof Error && err.message ? err.message : fallbackMessage;
   const lower = msg.toLowerCase();
 
-  // Postgres FK violation pattern. Catches both raw ConnectorError
-  // messages and the Prisma "Foreign key constraint failed on the
-  // field: X" format.
+  // Postgres FK violation pattern. We need to be permissive about
+  // quoting because Prisma's error message embeds the raw Rust debug
+  // output of the ConnectorError — which has its own escaped quotes,
+  // so the actual JS string can contain \"X_fkey\" (literal backslash
+  // + quote), not just "X_fkey". Strategy: scan for the constraint
+  // name pattern <Model>_<column>_fkey anywhere in the message; the
+  // surrounding quote/backslash chars are irrelevant.
   const fkMatch =
-    msg.match(/foreign key constraint ["']([^"']+_fkey)["']/i) ??
-    msg.match(/foreign key constraint failed on the field:\s*([A-Za-z_]+)/i);
+    msg.match(/foreign key constraint failed on the field:\s*([A-Za-z_]+)/i) ??
+    msg.match(/([A-Z][A-Za-z0-9]+_[A-Za-z0-9]+_fkey)/);
   if (fkMatch) {
     const constraint = fkMatch[1];
     const ref = describeBlockingReference(constraint);
