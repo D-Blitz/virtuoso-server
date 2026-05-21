@@ -1,6 +1,7 @@
 import prisma from '../prisma';
+import { getContext } from '../auth/context';
 import { auditLog } from './audit/audit.service';
-import { snapshotEnrollment } from './audit/snapshots';
+import { snapshotEnrollment, snapshotScheduledEvent } from './audit/snapshots';
 import { softDelete } from './trash/softDelete';
 
 const ENROLLMENT_INCLUDE = {
@@ -59,13 +60,56 @@ export class EnrollmentService {
   }
 
   async delete(id: string) {
-    const before = await softDelete<any>('enrollment', id);
+    // Cascade: deleting an enrollment should also soft-delete every
+    // ScheduledEvent linked to it. Each event row gets its own audit
+    // DELETE entry so the audit trail is complete.
+    const ctx = getContext();
+    const deletedAt = new Date();
+    const deletedById = ctx?.userId ?? null;
+
+    const result = await prisma.$transaction(async (tx) => {
+      // Snapshot the enrollment + its events BEFORE the soft-delete so
+      // we can populate audit before-snapshots.
+      const before = await tx.enrollment.findUniqueOrThrow({
+        where: { id },
+        include: ENROLLMENT_INCLUDE,
+      });
+      const eventRows = await tx.scheduledEvent.findMany({
+        where: { enrollmentId: id } as any,
+      });
+
+      // Soft-delete every linked event (updateMany bypasses the default
+      // deletedAt:null scope because we mention deletedAt explicitly).
+      await tx.scheduledEvent.updateMany({
+        where: { enrollmentId: id } as any,
+        data: { deletedAt, deletedById } as any,
+      });
+
+      // Soft-delete the enrollment itself.
+      await tx.enrollment.update({
+        where: { id },
+        data: { deletedAt, deletedById } as any,
+      });
+
+      return { before, eventRows };
+    });
+
+    // Audit the enrollment DELETE + one DELETE per cascaded event.
     void auditLog.record({
       action: 'DELETE',
       entityType: 'Enrollment',
       entityId: id,
-      before: snapshotEnrollment(before),
+      before: snapshotEnrollment(result.before),
     });
-    return before;
+    for (const ev of result.eventRows) {
+      void auditLog.record({
+        action: 'DELETE',
+        entityType: 'ScheduledEvent',
+        entityId: (ev as any).id,
+        before: snapshotScheduledEvent(ev),
+      });
+    }
+
+    return result.before;
   }
 }

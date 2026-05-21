@@ -35,6 +35,7 @@ import trashRoutes from './routes/trash.routes';
 // jobs
 import { startSlotHoldSweep } from './jobs/sweepSlotHolds';
 import { startEnrollmentInviteJobs } from './jobs/enrollmentInvites';
+import { startTrashPurgeJob } from './jobs/trashPurge';
 
 dotenv.config();
 
@@ -107,6 +108,7 @@ app.use('/api/trash', trashRoutes);
 // Background jobs
 startSlotHoldSweep();
 startEnrollmentInviteJobs();
+startTrashPurgeJob();
 
 app.listen(PORT, () => {
   console.log(`Server running at http://localhost:${PORT}`);
