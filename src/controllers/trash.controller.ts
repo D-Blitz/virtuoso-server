@@ -121,12 +121,40 @@ export class TrashController {
     }
   }
 
-  /** DELETE /api/trash/:entityType/:id — hard-delete from trash. */
+  /**
+   * DELETE /api/trash/:entityType/:id?scope=THIS|ALL
+   *
+   * scope=ALL cascades for series-related rows:
+   *   - ScheduledEvent with a seriesId → purges the parent series row
+   *     (if also trashed) + every trashed sibling event.
+   *   - RecurrenceSeries → purges the series + every trashed event of
+   *     the series.
+   * scope=ALL on any other entity type returns 400.
+   */
   async purge(req: Request, res: Response) {
     if (!guardAdminOnly(res)) return;
     try {
       const entityType = parseEntityType(req.params.entityType, res);
       if (!entityType) return;
+      const scope = req.query.scope === 'ALL' ? 'ALL' : 'THIS';
+      if (scope === 'ALL') {
+        if (
+          entityType !== 'ScheduledEvent' &&
+          entityType !== 'RecurrenceSeries'
+        ) {
+          res.status(400).json({
+            error:
+              'scope=ALL is only supported for ScheduledEvent and RecurrenceSeries.',
+          });
+          return;
+        }
+        const result = await trashService.purgeSeriesCascade({
+          entityType,
+          id: req.params.id,
+        });
+        res.json(result);
+        return;
+      }
       await trashService.purge(entityType, req.params.id);
       res.status(204).send();
     } catch (err: any) {

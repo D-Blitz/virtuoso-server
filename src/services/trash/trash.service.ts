@@ -405,6 +405,107 @@ export class TrashService {
   }
 
   /**
+   * Cascading hard-purge for a series — symmetric counterpart of
+   * restoreSeriesFromEvent. Given an input id that is either:
+   *   - a trashed ScheduledEvent with a seriesId, or
+   *   - a trashed RecurrenceSeries
+   * permanently deletes the series row AND every trashed sibling
+   * occurrence that shares the same seriesId. Audited as one DELETE
+   * per row.
+   *
+   * Live (non-trashed) events of the series are NOT touched — purge is
+   * only ever about clearing the trash. If a series has any live event,
+   * the series row itself is also expected to be live (we keep them in
+   * sync at delete time), so the series purge below is a no-op in
+   * that case and only the trashed siblings get purged.
+   */
+  async purgeSeriesCascade(args: {
+    /** 'ScheduledEvent' | 'RecurrenceSeries' */
+    entityType: 'ScheduledEvent' | 'RecurrenceSeries';
+    id: string;
+  }): Promise<{ purgedEvents: number; purgedSeries: boolean }> {
+    let seriesId: string;
+    if (args.entityType === 'ScheduledEvent') {
+      const ev = await prisma.scheduledEvent.findFirst({
+        where: { id: args.id, deletedAt: { not: null } },
+      });
+      if (!ev) {
+        throw new Error(`No trashed ScheduledEvent found with id ${args.id}`);
+      }
+      if (!ev.seriesId) {
+        throw new Error(
+          `ScheduledEvent ${args.id} is not part of a series; use a regular purge instead.`,
+        );
+      }
+      seriesId = ev.seriesId;
+    } else {
+      // Caller already passed the series id directly. Verify it exists
+      // in the trash so we don't silently no-op for typos.
+      const ser = await prisma.recurrenceSeries.findFirst({
+        where: { id: args.id, deletedAt: { not: null } },
+      });
+      if (!ser) {
+        throw new Error(
+          `No trashed RecurrenceSeries found with id ${args.id}`,
+        );
+      }
+      seriesId = args.id;
+    }
+
+    // Purge every trashed event in the series first. We don't have a
+    // safe way to atomically delete-cascade these via Prisma without
+    // FK cascades configured, so loop + audit each.
+    const trashedEvents = await prisma.scheduledEvent.findMany({
+      where: { seriesId, deletedAt: { not: null } },
+    });
+    let purgedEvents = 0;
+    for (const ev of trashedEvents) {
+      try {
+        await hardPurgeTrashed('scheduledEvent', ev.id);
+        void auditLog.record({
+          action: 'DELETE',
+          entityType: 'ScheduledEvent',
+          entityId: ev.id,
+          before: snapshotScheduledEvent(ev),
+        });
+        purgedEvents++;
+      } catch (err) {
+        console.error(
+          `[trash] purgeSeriesCascade: failed to purge event ${ev.id}:`,
+          err,
+        );
+      }
+    }
+
+    // Then the series row, if it's also trashed. A live series can't
+    // exist alongside all-trashed events in normal flow but we still
+    // guard against it.
+    let purgedSeries = false;
+    const ser = await prisma.recurrenceSeries.findFirst({
+      where: { id: seriesId, deletedAt: { not: null } },
+    });
+    if (ser) {
+      try {
+        await hardPurgeTrashed('recurrenceSeries', seriesId);
+        void auditLog.record({
+          action: 'DELETE',
+          entityType: 'RecurrenceSeries',
+          entityId: seriesId,
+          before: snapshotRecurrenceSeries(ser),
+        });
+        purgedSeries = true;
+      } catch (err) {
+        console.error(
+          `[trash] purgeSeriesCascade: failed to purge series ${seriesId}:`,
+          err,
+        );
+      }
+    }
+
+    return { purgedEvents, purgedSeries };
+  }
+
+  /**
    * Hard-delete every trashed row across all entity types. Audited as
    * one DELETE entry per row.
    */
