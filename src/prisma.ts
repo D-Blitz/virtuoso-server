@@ -67,6 +67,7 @@ const ARCHIVABLE_MODELS = new Set<string>([
   'Service',
   'Location',
   'Room',
+  'ScheduledEvent',
 ]);
 
 /**

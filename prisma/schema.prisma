@@ -315,6 +315,12 @@ model ScheduledEvent {
   deletedAt   DateTime?
   deletedById String?
 
+  // Archive (Phase 6.11) — mutually exclusive with trash. Lets the
+  // admin retire past events from the active calendar without losing
+  // the audit/reporting trail.
+  archivedAt   DateTime?
+  archivedById String?
+
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id])
 
@@ -325,6 +331,7 @@ model ScheduledEvent {
   @@index([enrollmentId]) // enrollment → events lookup
   @@index([seriesId]) // series → occurrences fan-out
   @@index([deletedAt]) // trash listing + purge cron
+  @@index([archivedAt]) // archive listing
 }
 
 // =========================================================================

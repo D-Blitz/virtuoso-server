@@ -16,6 +16,7 @@ import {
   snapshotFacilitator,
   snapshotLocation,
   snapshotRoom,
+  snapshotScheduledEvent,
   snapshotService,
   snapshotTerm,
 } from '../services/audit/snapshots';
@@ -39,6 +40,8 @@ function snapshotterForArchive(
       return snapshotLocation;
     case 'Room':
       return snapshotRoom;
+    case 'ScheduledEvent':
+      return snapshotScheduledEvent;
   }
 }
 

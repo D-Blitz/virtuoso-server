@@ -5,6 +5,7 @@ import {
   snapshotFacilitator,
   snapshotLocation,
   snapshotRoom,
+  snapshotScheduledEvent,
   snapshotService,
   snapshotTerm,
 } from '../audit/snapshots';
@@ -30,7 +31,8 @@ export type ArchivableEntityType =
   | 'Term'
   | 'Service'
   | 'Location'
-  | 'Room';
+  | 'Room'
+  | 'ScheduledEvent';
 
 export const ARCHIVABLE_ENTITY_TYPES: ArchivableEntityType[] = [
   'Client',
@@ -39,6 +41,7 @@ export const ARCHIVABLE_ENTITY_TYPES: ArchivableEntityType[] = [
   'Service',
   'Location',
   'Room',
+  'ScheduledEvent',
 ];
 
 function modelName(entityType: ArchivableEntityType): string {
@@ -61,6 +64,8 @@ function snapshotterFor(
       return snapshotLocation;
     case 'Room':
       return snapshotRoom;
+    case 'ScheduledEvent':
+      return snapshotScheduledEvent;
   }
 }
 
@@ -97,6 +102,14 @@ function labelFor(entityType: ArchivableEntityType, row: any): string {
       return row.name;
     case 'Room':
       return row.name;
+    case 'ScheduledEvent':
+      return new Date(row.startTime).toLocaleString('fr-FR', {
+        weekday: 'short',
+        day: 'numeric',
+        month: 'short',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
   }
 }
 
