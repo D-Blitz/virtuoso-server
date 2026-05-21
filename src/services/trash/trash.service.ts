@@ -394,6 +394,41 @@ export class TrashService {
     entityType: SoftDeletableEntityType,
     id: string,
   ): Promise<void> {
+    // Pre-purge safety check for indirect Payment references.
+    //
+    // - Client: the FK Payment_clientId_fkey already blocks at the DB
+    //   level with P2003 (the proper fix is anonymization — see
+    //   BACKLOG 0.5a). No manual check needed.
+    // - Facilitator: there's NO direct Payment.facilitatorId column,
+    //   only the chain Facilitator ↔ ScheduledEvent (m2m) ←
+    //   Payment.relatedScheduledEventId (optional, SetNull). Postgres
+    //   wouldn't refuse the delete, but the result would be a
+    //   Payment row whose related event is gone AND whose facilitator
+    //   audit trail is lost (the m2m link is cascade-deleted). We
+    //   refuse with a clear message so the admin doesn't accidentally
+    //   sever an accounting paper trail.
+    //
+    // This is a stop-gap. The real fix is the same anonymization
+    // flow we need for Client (BACKLOG 0.5a) — redact the personal
+    // columns while keeping the row + relations intact.
+    if (entityType === 'Facilitator') {
+      const paymentCount = await prisma.payment.count({
+        where: {
+          relatedScheduledEvent: {
+            facilitators: { some: { id } },
+          },
+        },
+      });
+      if (paymentCount > 0) {
+        throw new Error(
+          `Des paiements sont liés à des événements de cet intervenant (${paymentCount}). ` +
+            `La suppression définitive briserait la traçabilité comptable. ` +
+            `Utilisez "Anonymiser" plutôt que la suppression définitive ` +
+            `(fonctionnalité à venir — pour l'instant gardez l'intervenant dans la corbeille).`,
+        );
+      }
+    }
+
     const before = await hardPurgeTrashed(modelName(entityType), id);
     const snap = snapshotterFor(entityType);
     void auditLog.record({

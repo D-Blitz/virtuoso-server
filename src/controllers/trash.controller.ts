@@ -1,10 +1,12 @@
 import { Request, Response } from 'express';
+import { Prisma } from '@prisma/client';
 import { getContext } from '../auth/context';
 import {
   SOFT_DELETABLE_ENTITY_TYPES,
   TrashService,
   type SoftDeletableEntityType,
 } from '../services/trash/trash.service';
+import { sendError } from './httpErrors';
 
 const trashService = new TrashService();
 
@@ -159,8 +161,23 @@ export class TrashController {
       res.status(204).send();
     } catch (err: any) {
       console.error('trash purge error:', err);
+      // Try the shared mapper first — it correctly handles Prisma's
+      // P2003 / P2025 codes (P2003 fires for blocked hard-deletes like
+      // the Client + Payment FK case). For non-Prisma errors thrown
+      // by the service (e.g. the facilitator-payment safety check)
+      // we fall back to keyword-based status mapping so the user
+      // sees the actual message instead of "Failed to purge".
+      if (err instanceof Prisma.PrismaClientKnownRequestError) {
+        sendError(res, err, 'Failed to purge');
+        return;
+      }
       const msg = err?.message ?? 'Failed to purge';
-      const status = msg.toLowerCase().includes('no trashed') ? 404 : 500;
+      const lower = msg.toLowerCase();
+      const status = lower.includes('no trashed')
+        ? 404
+        : lower.includes('paiement') || lower.includes('anonymiser')
+          ? 409
+          : 500;
       res.status(status).json({ error: msg });
     }
   }
