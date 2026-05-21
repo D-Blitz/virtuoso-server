@@ -151,23 +151,45 @@ export async function anonymize<T = any>(
   // We already know which hidden state the row is in (from `before`).
   // Targeting the updateMany at the *specific* state (deletedAt OR
   // archivedAt, not both) keeps the where clause's top-level key set
-  // unambiguous — which sidesteps the same extension-auto-injection
-  // trap that broke findFirst earlier.
+  // unambiguous — which sidesteps the extension's auto-injection trap.
   const wasInTrash = before.deletedAt != null;
   const stateFilter = wasInTrash
     ? { deletedAt: { not: null } }
     : { archivedAt: { not: null } };
 
+  // If the row was trashed, anonymize ALSO moves it into archive in
+  // the same updateMany. Reasoning: anonymize is irreversible (PII is
+  // gone), so the trash bin's "restorable for 30 days" semantic no
+  // longer applies. Archive is the right permanent home — it's where
+  // /admin/archives already detects the anonymized state and disables
+  // the Restaurer button. Without this transition, the row would sit
+  // in trash with a misleading TTL countdown until the daily cron
+  // either hard-deleted it (no FKs) or fell back to archive (FKs).
+  // Both end states are fine, but the UI is confusing in the meantime.
+  // Audit: the metadata field's `anonymized: true` flag captures the
+  // intent of the change; the deletedAt → archivedAt lifecycle flip
+  // is an implementation detail of "anonymize means preserve".
+  const lifecycleTransition = wasInTrash
+    ? {
+        deletedAt: null,
+        deletedById: null,
+        archivedAt: new Date(),
+        archivedById: ctx?.userId ?? null,
+      }
+    : {};
+
   const result = await client.updateMany({
     where: { id, ...stateFilter },
-    data: patch,
+    data: { ...patch, ...lifecycleTransition },
   });
   if (result.count === 0) {
     throw new Error(`Failed to anonymize ${entityType} ${id} (no rows updated)`);
   }
 
+  // After the update, the row is guaranteed to be in archive (either
+  // it always was, or we just moved it). One lookup, one filter shape.
   const after = await client.findFirst({
-    where: { id, ...stateFilter },
+    where: { id, archivedAt: { not: null } },
   });
 
   return { before: before as T, after: after as T };
