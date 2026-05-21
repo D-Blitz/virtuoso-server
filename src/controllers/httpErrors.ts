@@ -36,13 +36,32 @@ export function sendError(
           .status(404)
           .json({ error: err.message || 'Élément introuvable ou déjà supprimé.' });
         return;
-      case 'P2003':
+      case 'P2003': {
+        // P2003 fires on hard-deletes (and updates that violate FKs)
+        // when the row is still referenced. The most useful detail is
+        // which constraint blocked us — that tells the admin *what* is
+        // pointing at the row. Prisma exposes this as `meta.field_name`
+        // (newer versions) or `meta.constraint` (older). We try both
+        // and translate the few constraint names admins are likely to
+        // encounter into plain French.
+        const meta = (err.meta ?? {}) as Record<string, unknown>;
+        const constraint =
+          (typeof meta.field_name === 'string' && meta.field_name) ||
+          (typeof meta.constraint === 'string' && meta.constraint) ||
+          '';
+        const what = describeBlockingReference(constraint);
+        const detail = what
+          ? ` ${what}`
+          : constraint
+            ? ` (contrainte : ${constraint})`
+            : '';
         res.status(409).json({
           error:
-            'Suppression bloquée par une référence existante (clé étrangère).',
+            `Suppression bloquée — cet élément est encore référencé.${detail}`,
           code: err.code,
         });
         return;
+      }
       case 'P2002':
         res.status(409).json({
           error:
@@ -64,4 +83,48 @@ export function sendError(
   const msg =
     err instanceof Error && err.message ? err.message : fallbackMessage;
   res.status(500).json({ error: msg });
+}
+
+/**
+ * Maps the few FK constraint names admins actually encounter into
+ * plain-French descriptions. Returning '' falls back to the generic
+ * "(contrainte : X)" suffix so we never hide info the admin might need
+ * to grep the schema for.
+ *
+ * Constraint names follow Postgres conventions:
+ *   <ChildTable>_<columnName>_fkey
+ * e.g. "Payment_clientId_fkey" means rows in Payment with this clientId
+ * are blocking the delete.
+ */
+function describeBlockingReference(constraint: string): string {
+  switch (constraint) {
+    case 'Payment_clientId_fkey':
+      return 'Des paiements lui sont liés (conservés pour la comptabilité). Utilisez "Anonymiser" plutôt que la suppression définitive.';
+    case 'Payment_relatedScheduledEventId_fkey':
+      return 'Des paiements référencent cet événement.';
+    case 'Enrollment_clientId_fkey':
+      return 'Des inscriptions sont liées à ce client.';
+    case 'Enrollment_facilitatorId_fkey':
+      return 'Des inscriptions sont liées à cet intervenant.';
+    case 'Enrollment_roomId_fkey':
+      return 'Des inscriptions utilisent cette salle.';
+    case 'Enrollment_locationId_fkey':
+      return 'Des inscriptions sont liées à cet établissement.';
+    case 'Enrollment_serviceId_fkey':
+      return 'Des inscriptions utilisent ce service.';
+    case 'Enrollment_termId_fkey':
+      return 'Des inscriptions sont liées à ce trimestre.';
+    case 'ScheduledEvent_roomId_fkey':
+      return 'Des événements utilisent cette salle.';
+    case 'ScheduledEvent_locationId_fkey':
+      return 'Des événements sont liés à cet établissement.';
+    case 'ScheduledEvent_serviceId_fkey':
+      return 'Des événements utilisent ce service.';
+    case 'ScheduledEvent_serviceCategoryId_fkey':
+      return 'Des événements utilisent cette catégorie.';
+    case 'Room_locationId_fkey':
+      return 'Des salles dépendent de cet établissement.';
+    default:
+      return '';
+  }
 }
