@@ -65,8 +65,14 @@ model Location {
   enrollments  Enrollment[]
   closures     Closure[]
 
+  // Trash bin (Phase 0.5)
+  deletedAt   DateTime?
+  deletedById String?
+
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id])
+
+  @@index([deletedAt])
 }
 
 model Facilitator {
@@ -98,11 +104,16 @@ model Facilitator {
   languages      String[] @default([]) // BCP-47 codes (e.g. "fr-FR", "en-US")
   priorityWeight Float    @default(1.0)
 
+  // Trash bin (Phase 0.5)
+  deletedAt   DateTime?
+  deletedById String?
+
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id])
 
   // Hot path: every facilitator list, recommender.
   @@index([organizationId])
+  @@index([deletedAt])
 }
 
 model Room {
@@ -117,10 +128,15 @@ model Room {
   events       ScheduledEvent[]
   enrollments  Enrollment[]
 
+  // Trash bin (Phase 0.5)
+  deletedAt   DateTime?
+  deletedById String?
+
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id])
 
   @@unique([organizationId, name])
+  @@index([deletedAt])
 }
 
 model Client {
@@ -138,11 +154,16 @@ model Client {
   payments          Payment[]
   enrollmentInvites EnrollmentInvite[]
 
+  // Trash bin (Phase 0.5)
+  deletedAt   DateTime?
+  deletedById String?
+
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id])
 
   // Hot path: client list, search, pickers.
   @@index([organizationId])
+  @@index([deletedAt])
 }
 
 model Tag {
@@ -154,8 +175,14 @@ model Tag {
   events       ScheduledEvent[] @relation("EventTags")
   services     Service[]        @relation("ServiceTags")
 
+  // Trash bin (Phase 0.5)
+  deletedAt   DateTime?
+  deletedById String?
+
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id])
+
+  @@index([deletedAt])
 }
 
 model Service {
@@ -181,8 +208,14 @@ model Service {
   //              (room rentals, concert tickets, masterclasses, etc.)
   bookingMode String @default("LESSON")
 
+  // Trash bin (Phase 0.5)
+  deletedAt   DateTime?
+  deletedById String?
+
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id])
+
+  @@index([deletedAt])
 }
 
 model ServiceCategory {
@@ -194,8 +227,14 @@ model ServiceCategory {
   services       Service[]
   ScheduledEvent ScheduledEvent[]
 
+  // Trash bin (Phase 0.5)
+  deletedAt   DateTime?
+  deletedById String?
+
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id])
+
+  @@index([deletedAt])
 }
 
 model ScheduledEvent {
@@ -247,6 +286,10 @@ model ScheduledEvent {
   enrollmentInvites EnrollmentInvite[]
   rescheduleTokens  ScheduledEventRescheduleToken[]
 
+  // Trash bin (Phase 0.5)
+  deletedAt   DateTime?
+  deletedById String?
+
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id])
 
@@ -256,6 +299,7 @@ model ScheduledEvent {
   @@index([locationId, startTime]) // per-location calendar, slot options
   @@index([enrollmentId]) // enrollment → events lookup
   @@index([seriesId]) // series → occurrences fan-out
+  @@index([deletedAt]) // trash listing + purge cron
 }
 
 // =========================================================================
@@ -291,10 +335,15 @@ model RecurrenceSeries {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  // Trash bin (Phase 0.5)
+  deletedAt   DateTime?
+  deletedById String?
+
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id])
 
   @@index([organizationId, startDate])
+  @@index([deletedAt])
 }
 
 model Term {
@@ -311,12 +360,17 @@ model Term {
 
   enrollments Enrollment[]
 
+  // Trash bin (Phase 0.5)
+  deletedAt   DateTime?
+  deletedById String?
+
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id])
 
   // Active-term lookups hit on every checkout / cron tick.
   @@index([locationId, startDate])
   @@index([organizationId, startDate])
+  @@index([deletedAt])
 }
 
 model Enrollment {
@@ -363,6 +417,10 @@ model Enrollment {
 
   events ScheduledEvent[]
 
+  // Trash bin (Phase 0.5)
+  deletedAt   DateTime?
+  deletedById String?
+
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id])
 
@@ -370,6 +428,7 @@ model Enrollment {
   @@index([organizationId, status])
   @@index([clientId])
   @@index([termId])
+  @@index([deletedAt])
 }
 
 model Closure {
@@ -384,12 +443,17 @@ model Closure {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  // Trash bin (Phase 0.5)
+  deletedAt   DateTime?
+  deletedById String?
+
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id])
 
   // Slot-availability checks scan closures by location + date window.
   @@index([locationId, startDate])
   @@index([startDate, endDate])
+  @@index([deletedAt])
 }
 
 // =========================================================================
