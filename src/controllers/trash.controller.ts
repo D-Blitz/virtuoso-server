@@ -45,14 +45,25 @@ function parseEntityType(
 }
 
 export class TrashController {
-  /** GET /api/trash?entityType=...&page=&pageSize= */
+  /**
+   * GET /api/trash?entityType=...&page=&pageSize=
+   *
+   * entityType=ALL returns a merged cross-type feed; any of the 12
+   * concrete types returns only that type. Restore + purge endpoints
+   * never accept ALL — those always target one row of one type.
+   */
   async list(req: Request, res: Response) {
     if (!guardAdminOnly(res)) return;
     try {
-      const entityType = parseEntityType(req.query.entityType, res);
-      if (!entityType) return;
       const page = parsePagingInt(req.query.page, 1);
       const pageSize = parsePagingInt(req.query.pageSize, 50);
+      if (req.query.entityType === 'ALL') {
+        const result = await trashService.listAll({ page, pageSize });
+        res.json(result);
+        return;
+      }
+      const entityType = parseEntityType(req.query.entityType, res);
+      if (!entityType) return;
       const result = await trashService.list({ entityType, page, pageSize });
       res.json(result);
     } catch (err) {

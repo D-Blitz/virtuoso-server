@@ -216,6 +216,61 @@ export class TrashService {
     return out;
   }
 
+  /**
+   * Cross-type trash listing — every soft-deleted row across all 12
+   * entity types, merged and sorted by deletedAt desc.
+   *
+   * Implementation note: we fetch every trashed row from every type
+   * into memory, then sort + slice. This is fine for v1 because the
+   * trash is bounded by the TTL purge cron (default 30 days) and only
+   * admins use this surface. If trash sizes grow to thousands per type,
+   * revisit with a SQL UNION-based approach (Prisma doesn't support it
+   * natively across models, so it would need `prisma.$queryRaw`).
+   */
+  async listAll(args: {
+    page?: number;
+    pageSize?: number;
+  }): Promise<TrashPage> {
+    const page = Math.max(1, Math.floor(args.page ?? 1));
+    const pageSize = Math.min(
+      MAX_PAGE_SIZE,
+      Math.max(1, Math.floor(args.pageSize ?? DEFAULT_PAGE_SIZE)),
+    );
+
+    const perType = await Promise.all(
+      SOFT_DELETABLE_ENTITY_TYPES.map(async (t) => {
+        const client = (prisma as any)[modelName(t)];
+        const rows = await client.findMany({
+          where: { deletedAt: { not: null } },
+          orderBy: { deletedAt: 'desc' },
+        });
+        const snap = snapshotterFor(t);
+        return rows.map(
+          (r: any): TrashedItem => ({
+            id: r.id,
+            entityType: t,
+            label: labelFor(t, r),
+            deletedAt:
+              r.deletedAt instanceof Date
+                ? r.deletedAt.toISOString()
+                : r.deletedAt,
+            deletedById: r.deletedById ?? null,
+            snapshot: snap(r) ?? {},
+          }),
+        );
+      }),
+    );
+
+    const all: TrashedItem[] = perType.flat();
+    all.sort((a, b) => (a.deletedAt < b.deletedAt ? 1 : -1));
+
+    const total = all.length;
+    const start = (page - 1) * pageSize;
+    const items = all.slice(start, start + pageSize);
+
+    return { items, total, page, pageSize };
+  }
+
   /** Restore a single trashed row. Audited as UPDATE. */
   async restore(
     entityType: SoftDeletableEntityType,
