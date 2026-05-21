@@ -16,6 +16,33 @@ const TENANT_SCOPED_MODELS = new Set<string>([
 ]);
 
 /**
+ * Models that have a `deletedAt` column for soft-delete (Phase 0.5).
+ * Reads on these models default to `deletedAt: null` unless the caller
+ * explicitly filters on `deletedAt` themselves (escape hatch for the
+ * trash bin UI, the restore flow, and the TTL purge cron).
+ *
+ * Kept separate from TENANT_SCOPED_MODELS because:
+ *   - Not every tenant-scoped model is soft-deletable
+ *     (though right now they happen to overlap entirely).
+ *   - RecurrenceSeries is soft-deletable but tenant-scoping for it is
+ *     implicit (always accessed via ScheduledEvent.seriesId).
+ */
+const SOFT_DELETE_MODELS = new Set<string>([
+  'Location',
+  'Facilitator',
+  'Room',
+  'Client',
+  'Tag',
+  'Service',
+  'ServiceCategory',
+  'ScheduledEvent',
+  'RecurrenceSeries',
+  'Term',
+  'Enrollment',
+  'Closure',
+]);
+
+/**
  * Slow-query logging.
  *
  * Threshold (ms) is configurable via `SLOW_QUERY_MS` env var. Default
@@ -53,40 +80,80 @@ if (slowQueryThresholdMs > 0) {
   console.log(`[prisma] slow-query logging enabled (≥${slowQueryThresholdMs}ms)`);
 }
 
+/**
+ * Apply soft-delete scoping to a Prisma `where` clause.
+ *
+ * If the caller already mentioned `deletedAt` (e.g. `deletedAt: { not: null }`
+ * for the trash listing, or `deletedAt: { lt: cutoff }` for the TTL purge
+ * cron), we leave their filter intact — that's the escape hatch.
+ * Otherwise we add the default `deletedAt: null` filter so trashed rows
+ * are invisible to ordinary queries.
+ */
+function withSoftDeleteFilter(where: Record<string, any> | undefined) {
+  if (where && 'deletedAt' in where) return where;
+  return { ...(where ?? {}), deletedAt: null };
+}
+
 const prisma = base.$extends({
-  name: 'orgScope',
+  name: 'scoping',
   query: {
     $allModels: {
       async $allOperations({ model, operation, args, query }) {
-        if (!model || !TENANT_SCOPED_MODELS.has(model)) {
+        // Early return for models the extension doesn't touch — keep it as
+        // one combined check so TS can narrow `model` for the rest of the
+        // function (otherwise `query(args)` infers as `never`).
+        if (
+          !model ||
+          (!TENANT_SCOPED_MODELS.has(model) && !SOFT_DELETE_MODELS.has(model))
+        ) {
           return query(args);
         }
 
-        const ctx = getContext();
-        // No context = script/seed/cron path. Pass through unscoped.
-        if (!ctx) return query(args);
+        const isOrgScoped = TENANT_SCOPED_MODELS.has(model);
+        const isSoftDeletable = SOFT_DELETE_MODELS.has(model);
 
-        const orgId = ctx.organizationId;
+        const ctx = getContext();
+        const orgId = ctx?.organizationId;
         const a = args as Record<string, any>;
+
+        // Helper: apply both scopings to a where clause where appropriate.
+        const scopeWhere = (where: Record<string, any> | undefined) => {
+          let next: Record<string, any> = { ...(where ?? {}) };
+          if (isOrgScoped && orgId !== undefined) {
+            next.organizationId = orgId;
+          }
+          if (isSoftDeletable) {
+            next = withSoftDeleteFilter(next);
+          }
+          return next;
+        };
 
         switch (operation) {
           case 'create': {
-            const existing = a.data ?? {};
-            // Skip injection if relation syntax (`organization`) is already used,
-            // to avoid Prisma's "both organization and organizationId set" error.
-            if (existing.organization === undefined) {
-              a.data = { ...existing, organizationId: existing.organizationId ?? orgId };
+            // Soft-delete: no scoping on create (new rows have deletedAt=null).
+            if (isOrgScoped && orgId !== undefined) {
+              const existing = a.data ?? {};
+              // Skip injection if relation syntax (`organization`) is already used,
+              // to avoid Prisma's "both organization and organizationId set" error.
+              if (existing.organization === undefined) {
+                a.data = {
+                  ...existing,
+                  organizationId: existing.organizationId ?? orgId,
+                };
+              }
             }
             break;
           }
           case 'createMany':
           case 'createManyAndReturn': {
-            const data = a.data;
-            const items = Array.isArray(data) ? data : [data];
-            a.data = items.map((d: any) => ({
-              ...d,
-              organizationId: d?.organizationId ?? orgId,
-            }));
+            if (isOrgScoped && orgId !== undefined) {
+              const data = a.data;
+              const items = Array.isArray(data) ? data : [data];
+              a.data = items.map((d: any) => ({
+                ...d,
+                organizationId: d?.organizationId ?? orgId,
+              }));
+            }
             break;
           }
           case 'findFirst':
@@ -97,44 +164,58 @@ const prisma = base.$extends({
           case 'groupBy':
           case 'updateMany':
           case 'deleteMany': {
-            a.where = { ...(a.where ?? {}), organizationId: orgId };
+            a.where = scopeWhere(a.where);
             break;
           }
           case 'update':
           case 'delete': {
             // Prisma 5+ accepts non-unique fields in WhereUniqueInput.
-            a.where = { ...(a.where ?? {}), organizationId: orgId };
+            a.where = scopeWhere(a.where);
             break;
           }
           case 'upsert': {
-            a.where = { ...(a.where ?? {}), organizationId: orgId };
-            const createData = a.create ?? {};
-            if (createData.organization === undefined) {
-              a.create = {
-                ...createData,
-                organizationId: createData.organizationId ?? orgId,
-              };
+            a.where = scopeWhere(a.where);
+            if (isOrgScoped && orgId !== undefined) {
+              const createData = a.create ?? {};
+              if (createData.organization === undefined) {
+                a.create = {
+                  ...createData,
+                  organizationId: createData.organizationId ?? orgId,
+                };
+              }
             }
             break;
           }
           case 'findUnique':
           case 'findUniqueOrThrow': {
-            // If `select` is used without organizationId, force-add it so
-            // we can post-filter, then strip it from the returned shape.
+            // Force-add organizationId + deletedAt to the select (if select is
+            // used) so we can post-filter on them, then strip from the
+            // returned shape. Track which fields the caller actually wanted.
             const selectClause = a.select;
             let stripOrgId = false;
-            if (
-              selectClause &&
-              typeof selectClause === 'object' &&
-              selectClause.organizationId !== true
-            ) {
-              a.select = { ...selectClause, organizationId: true };
-              stripOrgId = true;
+            let stripDeletedAt = false;
+            if (selectClause && typeof selectClause === 'object') {
+              const next: any = { ...selectClause };
+              if (isOrgScoped && next.organizationId !== true) {
+                next.organizationId = true;
+                stripOrgId = true;
+              }
+              if (isSoftDeletable && next.deletedAt !== true) {
+                next.deletedAt = true;
+                stripDeletedAt = true;
+              }
+              a.select = next;
             }
 
             const result: any = await query(a as any);
 
-            if (result && result.organizationId !== orgId) {
+            // Wrong org → not found
+            if (
+              isOrgScoped &&
+              orgId !== undefined &&
+              result &&
+              result.organizationId !== orgId
+            ) {
               if (operation === 'findUniqueOrThrow') {
                 throw new Prisma.PrismaClientKnownRequestError('Record not found', {
                   code: 'P2025',
@@ -144,9 +225,28 @@ const prisma = base.$extends({
               return null;
             }
 
-            if (stripOrgId && result) {
-              const { organizationId: _omit, ...rest } = result;
-              return rest;
+            // Trashed → not found (unless caller explicitly asked for deletedAt
+            // in their select, which signals "I'm handling the trash semantics")
+            if (
+              isSoftDeletable &&
+              result &&
+              result.deletedAt != null &&
+              stripDeletedAt
+            ) {
+              if (operation === 'findUniqueOrThrow') {
+                throw new Prisma.PrismaClientKnownRequestError('Record not found', {
+                  code: 'P2025',
+                  clientVersion: Prisma.prismaVersion.client,
+                });
+              }
+              return null;
+            }
+
+            if (result && (stripOrgId || stripDeletedAt)) {
+              const cleaned = { ...result };
+              if (stripOrgId) delete cleaned.organizationId;
+              if (stripDeletedAt) delete cleaned.deletedAt;
+              return cleaned;
             }
             return result;
           }
