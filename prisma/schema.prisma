@@ -69,10 +69,15 @@ model Location {
   deletedAt   DateTime?
   deletedById String?
 
+  // Archive (Phase 6.11) — mutually exclusive with trash.
+  archivedAt   DateTime?
+  archivedById String?
+
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id])
 
   @@index([deletedAt])
+  @@index([archivedAt])
 }
 
 model Facilitator {
@@ -108,12 +113,17 @@ model Facilitator {
   deletedAt   DateTime?
   deletedById String?
 
+  // Archive (Phase 6.11) — mutually exclusive with trash.
+  archivedAt   DateTime?
+  archivedById String?
+
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id])
 
   // Hot path: every facilitator list, recommender.
   @@index([organizationId])
   @@index([deletedAt])
+  @@index([archivedAt])
 }
 
 model Room {
@@ -132,11 +142,16 @@ model Room {
   deletedAt   DateTime?
   deletedById String?
 
+  // Archive (Phase 6.11) — mutually exclusive with trash.
+  archivedAt   DateTime?
+  archivedById String?
+
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id])
 
   @@unique([organizationId, name])
   @@index([deletedAt])
+  @@index([archivedAt])
 }
 
 model Client {
@@ -158,12 +173,17 @@ model Client {
   deletedAt   DateTime?
   deletedById String?
 
+  // Archive (Phase 6.11) — mutually exclusive with trash.
+  archivedAt   DateTime?
+  archivedById String?
+
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id])
 
   // Hot path: client list, search, pickers.
   @@index([organizationId])
   @@index([deletedAt])
+  @@index([archivedAt])
 }
 
 model Tag {
@@ -212,10 +232,15 @@ model Service {
   deletedAt   DateTime?
   deletedById String?
 
+  // Archive (Phase 6.11) — mutually exclusive with trash.
+  archivedAt   DateTime?
+  archivedById String?
+
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id])
 
   @@index([deletedAt])
+  @@index([archivedAt])
 }
 
 model ServiceCategory {
@@ -364,6 +389,10 @@ model Term {
   deletedAt   DateTime?
   deletedById String?
 
+  // Archive (Phase 6.11) — mutually exclusive with trash.
+  archivedAt   DateTime?
+  archivedById String?
+
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id])
 
@@ -371,6 +400,7 @@ model Term {
   @@index([locationId, startDate])
   @@index([organizationId, startDate])
   @@index([deletedAt])
+  @@index([archivedAt])
 }
 
 model Enrollment {

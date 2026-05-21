@@ -32,6 +32,7 @@ import closureRoutes from './routes/closure.routes';
 import auditLogRoutes from './routes/auditLog.routes';
 import trashRoutes from './routes/trash.routes';
 import dependentsRoutes from './routes/dependents.routes';
+import archiveRoutes from './routes/archive.routes';
 
 // jobs
 import { startSlotHoldSweep } from './jobs/sweepSlotHolds';
@@ -106,6 +107,7 @@ app.use('/api/closures', closureRoutes);
 app.use('/api/audit-log', auditLogRoutes);
 app.use('/api/trash', trashRoutes);
 app.use('/api/dependents', dependentsRoutes);
+app.use('/api/archive', archiveRoutes);
 
 // Background jobs
 startSlotHoldSweep();

@@ -43,6 +43,33 @@ const SOFT_DELETE_MODELS = new Set<string>([
 ]);
 
 /**
+ * Models that have an `archivedAt` column for the Archive feature
+ * (Phase 6.11). Archive is the "keep forever, just hide" counterpart
+ * of the trash bin's "delete with TTL" semantic.
+ *
+ * Scoping mirrors SOFT_DELETE_MODELS: reads default to
+ * `archivedAt: null` unless the caller explicitly filters on it (the
+ * /admin/archives page is the only intended escape hatch).
+ *
+ * Mutually exclusive with the trash state by convention: a row has at
+ * most one of (deletedAt, archivedAt) set. The TTL purge cron is the
+ * one place that actively transitions a row from trash → archive,
+ * when FK constraints block a hard delete (see jobs/trashPurge.ts).
+ *
+ * Subset of SOFT_DELETE_MODELS — only the entities a school actually
+ * wants to "retire but keep" (Tag/Closure/Enrollment/Event/etc. don't
+ * have an archive use-case worth the scoping complexity).
+ */
+const ARCHIVABLE_MODELS = new Set<string>([
+  'Client',
+  'Facilitator',
+  'Term',
+  'Service',
+  'Location',
+  'Room',
+]);
+
+/**
  * Slow-query logging.
  *
  * Threshold (ms) is configurable via `SLOW_QUERY_MS` env var. Default
@@ -94,6 +121,17 @@ function withSoftDeleteFilter(where: Record<string, any> | undefined) {
   return { ...(where ?? {}), deletedAt: null };
 }
 
+/**
+ * Same shape as withSoftDeleteFilter, but for the Phase-6.11 archive
+ * state. The /admin/archives listing opts in by passing
+ * `archivedAt: { not: null }`; everything else gets the default
+ * archivedAt: null filter so archived rows are invisible.
+ */
+function withArchiveFilter(where: Record<string, any> | undefined) {
+  if (where && 'archivedAt' in where) return where;
+  return { ...(where ?? {}), archivedAt: null };
+}
+
 const prisma = base.$extends({
   name: 'scoping',
   query: {
@@ -104,19 +142,24 @@ const prisma = base.$extends({
         // function (otherwise `query(args)` infers as `never`).
         if (
           !model ||
-          (!TENANT_SCOPED_MODELS.has(model) && !SOFT_DELETE_MODELS.has(model))
+          (!TENANT_SCOPED_MODELS.has(model) &&
+            !SOFT_DELETE_MODELS.has(model) &&
+            !ARCHIVABLE_MODELS.has(model))
         ) {
           return query(args);
         }
 
         const isOrgScoped = TENANT_SCOPED_MODELS.has(model);
         const isSoftDeletable = SOFT_DELETE_MODELS.has(model);
+        const isArchivable = ARCHIVABLE_MODELS.has(model);
 
         const ctx = getContext();
         const orgId = ctx?.organizationId;
         const a = args as Record<string, any>;
 
-        // Helper: apply both scopings to a where clause where appropriate.
+        // Helper: apply all three scopings to a where clause where
+        // appropriate. Archive filter layers on top of soft-delete —
+        // ordinary reads exclude both trashed AND archived rows.
         const scopeWhere = (where: Record<string, any> | undefined) => {
           let next: Record<string, any> = { ...(where ?? {}) };
           if (isOrgScoped && orgId !== undefined) {
@@ -124,6 +167,9 @@ const prisma = base.$extends({
           }
           if (isSoftDeletable) {
             next = withSoftDeleteFilter(next);
+          }
+          if (isArchivable) {
+            next = withArchiveFilter(next);
           }
           return next;
         };
@@ -188,12 +234,28 @@ const prisma = base.$extends({
           }
           case 'findUnique':
           case 'findUniqueOrThrow': {
-            // Force-add organizationId + deletedAt to the select (if select is
-            // used) so we can post-filter on them, then strip from the
-            // returned shape. Track which fields the caller actually wanted.
+            // Caller opts in to seeing trashed/archived rows by
+            // including `deletedAt: true` / `archivedAt: true` in
+            // their select. Without that, both trashed and archived
+            // rows are treated as not-found.
             const selectClause = a.select;
+            const callerWantsDeletedAt =
+              isSoftDeletable &&
+              selectClause &&
+              typeof selectClause === 'object' &&
+              selectClause.deletedAt === true;
+            const callerWantsArchivedAt =
+              isArchivable &&
+              selectClause &&
+              typeof selectClause === 'object' &&
+              selectClause.archivedAt === true;
+
+            // Force-add organizationId + deletedAt + archivedAt to
+            // the select (if select is used) so we can post-filter,
+            // then strip from the returned shape.
             let stripOrgId = false;
             let stripDeletedAt = false;
+            let stripArchivedAt = false;
             if (selectClause && typeof selectClause === 'object') {
               const next: any = { ...selectClause };
               if (isOrgScoped && next.organizationId !== true) {
@@ -203,6 +265,10 @@ const prisma = base.$extends({
               if (isSoftDeletable && next.deletedAt !== true) {
                 next.deletedAt = true;
                 stripDeletedAt = true;
+              }
+              if (isArchivable && next.archivedAt !== true) {
+                next.archivedAt = true;
+                stripArchivedAt = true;
               }
               a.select = next;
             }
@@ -225,13 +291,12 @@ const prisma = base.$extends({
               return null;
             }
 
-            // Trashed → not found (unless caller explicitly asked for deletedAt
-            // in their select, which signals "I'm handling the trash semantics")
+            // Trashed → not found (unless caller opted in).
             if (
               isSoftDeletable &&
+              !callerWantsDeletedAt &&
               result &&
-              result.deletedAt != null &&
-              stripDeletedAt
+              result.deletedAt != null
             ) {
               if (operation === 'findUniqueOrThrow') {
                 throw new Prisma.PrismaClientKnownRequestError('Record not found', {
@@ -242,10 +307,29 @@ const prisma = base.$extends({
               return null;
             }
 
-            if (result && (stripOrgId || stripDeletedAt)) {
+            // Archived → not found (unless caller opted in).
+            // Same opt-in pattern as soft-delete; the /admin/archives
+            // listing is the only consumer that asks to see them.
+            if (
+              isArchivable &&
+              !callerWantsArchivedAt &&
+              result &&
+              result.archivedAt != null
+            ) {
+              if (operation === 'findUniqueOrThrow') {
+                throw new Prisma.PrismaClientKnownRequestError('Record not found', {
+                  code: 'P2025',
+                  clientVersion: Prisma.prismaVersion.client,
+                });
+              }
+              return null;
+            }
+
+            if (result && (stripOrgId || stripDeletedAt || stripArchivedAt)) {
               const cleaned = { ...result };
               if (stripOrgId) delete cleaned.organizationId;
               if (stripDeletedAt) delete cleaned.deletedAt;
+              if (stripArchivedAt) delete cleaned.archivedAt;
               return cleaned;
             }
             return result;
