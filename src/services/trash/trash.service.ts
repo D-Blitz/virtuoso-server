@@ -247,6 +247,93 @@ export class TrashService {
     });
   }
 
+  /**
+   * Cascading restore for a trashed ScheduledEvent that belongs to a
+   * series. Restores:
+   *   - The RecurrenceSeries row (if currently trashed)
+   *   - Every trashed ScheduledEvent that shares the same seriesId
+   *
+   * Each restored row is audited individually as an UPDATE so the audit
+   * log explains why a batch of rows came back at the same timestamp.
+   *
+   * The input is a ScheduledEvent id (matching the trash UI's row id),
+   * not a seriesId — the trash page only knows about events by id, and
+   * the seriesId lives in the event's snapshot.
+   */
+  async restoreSeriesFromEvent(
+    scheduledEventId: string,
+  ): Promise<{ restoredEvents: number; restoredSeries: boolean }> {
+    // Find the trashed event (bypassing the default scope) so we can
+    // read its seriesId.
+    const eventBefore = await prisma.scheduledEvent.findFirst({
+      where: { id: scheduledEventId, deletedAt: { not: null } },
+    });
+    if (!eventBefore) {
+      throw new Error(
+        `No trashed ScheduledEvent found with id ${scheduledEventId}`,
+      );
+    }
+    const seriesId = eventBefore.seriesId;
+    if (!seriesId) {
+      throw new Error(
+        `ScheduledEvent ${scheduledEventId} is not part of a series; use a regular restore instead.`,
+      );
+    }
+
+    // Restore the series row first (if it's trashed) — events without a
+    // live series row would be orphaned and the scoping extension would
+    // hide them.
+    const seriesBefore = await prisma.recurrenceSeries.findFirst({
+      where: { id: seriesId, deletedAt: { not: null } },
+    });
+    let restoredSeries = false;
+    if (seriesBefore) {
+      await restoreSoftDeleted('recurrenceSeries', seriesId);
+      const seriesAfter = await prisma.recurrenceSeries.findUniqueOrThrow({
+        where: { id: seriesId },
+      });
+      void auditLog.record({
+        action: 'UPDATE',
+        entityType: 'RecurrenceSeries',
+        entityId: seriesId,
+        before: snapshotRecurrenceSeries(seriesBefore),
+        after: snapshotRecurrenceSeries(seriesAfter),
+      });
+      restoredSeries = true;
+    }
+
+    // Restore every trashed event in the series. We re-query rather
+    // than reuse `eventBefore` so a series with multiple trashed events
+    // (e.g. the user deleted the whole series in bulk) all come back.
+    const trashedEvents = await prisma.scheduledEvent.findMany({
+      where: { seriesId, deletedAt: { not: null } },
+    });
+    let restoredEvents = 0;
+    for (const before of trashedEvents) {
+      try {
+        await restoreSoftDeleted('scheduledEvent', before.id);
+        const after = await prisma.scheduledEvent.findUniqueOrThrow({
+          where: { id: before.id },
+        });
+        void auditLog.record({
+          action: 'UPDATE',
+          entityType: 'ScheduledEvent',
+          entityId: before.id,
+          before: snapshotScheduledEvent(before),
+          after: snapshotScheduledEvent(after),
+        });
+        restoredEvents++;
+      } catch (err) {
+        console.error(
+          `[trash] restoreSeriesFromEvent: failed to restore event ${before.id}:`,
+          err,
+        );
+      }
+    }
+
+    return { restoredEvents, restoredSeries };
+  }
+
   /** Hard-delete a trashed row. Audited as DELETE. */
   async purge(
     entityType: SoftDeletableEntityType,

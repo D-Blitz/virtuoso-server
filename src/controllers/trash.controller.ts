@@ -73,12 +73,33 @@ export class TrashController {
     }
   }
 
-  /** POST /api/trash/:entityType/:id/restore */
+  /**
+   * POST /api/trash/:entityType/:id/restore?scope=THIS|ALL
+   *
+   * `scope` defaults to THIS (single-row restore). `scope=ALL` is only
+   * valid for ScheduledEvent ids that belong to a series and triggers a
+   * cascading restore of the parent RecurrenceSeries + all sibling
+   * trashed events.
+   */
   async restore(req: Request, res: Response) {
     if (!guardAdminOnly(res)) return;
     try {
       const entityType = parseEntityType(req.params.entityType, res);
       if (!entityType) return;
+      const scope = req.query.scope === 'ALL' ? 'ALL' : 'THIS';
+      if (scope === 'ALL') {
+        if (entityType !== 'ScheduledEvent') {
+          res.status(400).json({
+            error: 'scope=ALL is only supported for ScheduledEvent.',
+          });
+          return;
+        }
+        const result = await trashService.restoreSeriesFromEvent(
+          req.params.id,
+        );
+        res.json(result);
+        return;
+      }
       await trashService.restore(entityType, req.params.id);
       res.status(204).send();
     } catch (err: any) {
