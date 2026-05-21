@@ -10,6 +10,9 @@ router.post('/purge-all', (req, res) => controller.purgeAll(req, res));
 router.post('/:entityType/:id/restore', (req, res) =>
   controller.restore(req, res),
 );
+router.post('/:entityType/:id/archive', (req, res) =>
+  controller.archive(req, res),
+);
 router.delete('/:entityType/:id', (req, res) => controller.purge(req, res));
 
 export default router;

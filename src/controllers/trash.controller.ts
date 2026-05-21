@@ -5,7 +5,42 @@ import {
   TrashService,
   type SoftDeletableEntityType,
 } from '../services/trash/trash.service';
+import {
+  ARCHIVABLE_ENTITY_TYPES,
+  type ArchivableEntityType,
+} from '../services/archive/archive.service';
+import { transitionTrashToArchive } from '../services/archive/archive';
+import { auditLog } from '../services/audit/audit.service';
+import {
+  snapshotClient,
+  snapshotFacilitator,
+  snapshotLocation,
+  snapshotRoom,
+  snapshotService,
+  snapshotTerm,
+} from '../services/audit/snapshots';
 import { sendError } from './httpErrors';
+
+const ARCHIVABLE_TYPE_SET = new Set<string>(ARCHIVABLE_ENTITY_TYPES);
+
+function snapshotterForArchive(
+  entityType: ArchivableEntityType,
+): (row: any) => object | null {
+  switch (entityType) {
+    case 'Client':
+      return snapshotClient;
+    case 'Facilitator':
+      return snapshotFacilitator;
+    case 'Term':
+      return snapshotTerm;
+    case 'Service':
+      return snapshotService;
+    case 'Location':
+      return snapshotLocation;
+    case 'Room':
+      return snapshotRoom;
+  }
+}
 
 const trashService = new TrashService();
 
@@ -169,6 +204,54 @@ export class TrashController {
       //     missed it.
       //   - Manual policy throws (no trashed / paiement / anonymiser)
       sendError(res, err, 'La suppression définitive a échoué.');
+    }
+  }
+
+  /**
+   * POST /api/trash/:entityType/:id/archive
+   *
+   * Move a trashed row directly into archive — used by the "Archiver
+   * à la place" fallback when a hard-delete is blocked by an FK
+   * constraint. Atomic via `transitionTrashToArchive`: clears
+   * deletedAt + sets archivedAt in a single updateMany so the row
+   * never appears in the active list (which it would briefly do if
+   * the admin did restore-then-archive in two calls).
+   *
+   * Only valid for archivable entity types (Client, Facilitator,
+   * Term, Service, Location, Room). Non-archivable types return 400.
+   */
+  async archive(req: Request, res: Response) {
+    if (!guardAdminOnly(res)) return;
+    try {
+      const entityType = parseEntityType(req.params.entityType, res);
+      if (!entityType) return;
+      if (!ARCHIVABLE_TYPE_SET.has(entityType)) {
+        res.status(400).json({
+          summary: 'Ce type d’élément ne peut pas être archivé.',
+          error: `Archive is only supported for ${Array.from(
+            ARCHIVABLE_TYPE_SET,
+          ).join(', ')}.`,
+        });
+        return;
+      }
+      const archivable = entityType as ArchivableEntityType;
+      const modelName =
+        archivable.charAt(0).toLowerCase() + archivable.slice(1);
+      const before = await transitionTrashToArchive(
+        modelName,
+        req.params.id,
+        getContext()?.email ?? 'unknown',
+      );
+      const snap = snapshotterForArchive(archivable);
+      void auditLog.record({
+        action: 'UPDATE',
+        entityType: archivable,
+        entityId: req.params.id,
+        before: snap(before),
+      });
+      res.status(204).send();
+    } catch (err) {
+      sendError(res, err, 'Failed to archive from trash');
     }
   }
 
