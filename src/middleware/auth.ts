@@ -103,19 +103,36 @@ export async function requireUser(req: Request, res: Response, next: NextFunctio
     // otherwise a bad/forged cookie would silently elevate to the bypass role.
     const payload = await verifySessionToken(extracted.token, extracted.cookieName);
     if (payload?.sub && payload?.organizationId) {
-      // Prefer the new roleId; fall back to looking up the role row by the
-      // legacy role string isn't possible (different shapes), so a legacy
-      // token simply gets empty permissions and a STAFF-derived role until
-      // the user re-logs in.
+      // Prefer the new roleId from the JWT. If it's missing — pre-0.3
+      // session that predates the schema migration — fall back to a
+      // single User lookup to get the current roleId. This avoids
+      // forcing every user to sign out and back in after the migration,
+      // and also covers the rare case where an admin changed someone's
+      // role: the next request picks up the new permission set on the
+      // following lookup pass since loadRolePermissions runs per-request
+      // anyway.
+      let effectiveRoleId = payload.roleId ?? null;
+      if (!effectiveRoleId) {
+        const user = await prisma.user.findUnique({
+          where: { id: payload.sub },
+          select: { roleId: true, disabledAt: true },
+        });
+        if (user?.disabledAt) {
+          res.status(401).json({ error: 'Account disabled' });
+          return;
+        }
+        effectiveRoleId = user?.roleId ?? null;
+      }
+
       const { permissions, roleName } = await loadRolePermissions(
-        payload.roleId ?? null,
+        effectiveRoleId,
       );
 
       ctx = {
         userId: payload.sub,
         organizationId: payload.organizationId,
         email: payload.email ?? '',
-        roleId: payload.roleId ?? null,
+        roleId: effectiveRoleId,
         roleName: payload.roleName ?? roleName,
         permissions,
       };
