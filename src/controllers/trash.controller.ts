@@ -55,20 +55,10 @@ function parsePagingInt(raw: unknown, fallback: number): number {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
-/**
- * Trash is sensitive: shows soft-deleted rows from across the org.
- * Restrict to OWNER/ADMIN until the Phase 0.3 permission system
- * formalizes a `can_manage_trash` permission.
- */
-function guardAdminOnly(res: Response): boolean {
-  const ctx = getContext();
-  const role = ctx?.role;
-  if (role !== 'OWNER' && role !== 'ADMIN') {
-    res.status(403).json({ error: 'Forbidden' });
-    return false;
-  }
-  return true;
-}
+// Phase 0.3: the in-controller guardAdminOnly helper used to live here.
+// It has been replaced by per-route `requirePermission(...)` middleware
+// in `routes/trash.routes.ts`: TRASH_ACCESS for list/restore/archive,
+// PURGE_PERMANENTLY for hard-delete (incl. purgeAll).
 
 function parseEntityType(
   raw: unknown,
@@ -92,7 +82,7 @@ export class TrashController {
    * never accept ALL — those always target one row of one type.
    */
   async list(req: Request, res: Response) {
-    if (!guardAdminOnly(res)) return;
+
     try {
       const page = parsePagingInt(req.query.page, 1);
       const pageSize = parsePagingInt(req.query.pageSize, 50);
@@ -113,7 +103,7 @@ export class TrashController {
 
   /** GET /api/trash/counts — counts per entity type. */
   async counts(_req: Request, res: Response) {
-    if (!guardAdminOnly(res)) return;
+
     try {
       const counts = await trashService.countsByType();
       res.json({ counts });
@@ -132,7 +122,7 @@ export class TrashController {
    * trashed events.
    */
   async restore(req: Request, res: Response) {
-    if (!guardAdminOnly(res)) return;
+
     try {
       const entityType = parseEntityType(req.params.entityType, res);
       if (!entityType) return;
@@ -171,7 +161,7 @@ export class TrashController {
    * scope=ALL on any other entity type returns 400.
    */
   async purge(req: Request, res: Response) {
-    if (!guardAdminOnly(res)) return;
+
     try {
       const entityType = parseEntityType(req.params.entityType, res);
       if (!entityType) return;
@@ -224,7 +214,7 @@ export class TrashController {
    * Term, Service, Location, Room). Non-archivable types return 400.
    */
   async archive(req: Request, res: Response) {
-    if (!guardAdminOnly(res)) return;
+
     try {
       const entityType = parseEntityType(req.params.entityType, res);
       if (!entityType) return;
@@ -260,7 +250,7 @@ export class TrashController {
 
   /** POST /api/trash/purge-all — empty the whole trash. Destructive. */
   async purgeAll(_req: Request, res: Response) {
-    if (!guardAdminOnly(res)) return;
+
     try {
       const result = await trashService.purgeAll();
       res.json(result);

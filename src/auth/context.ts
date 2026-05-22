@@ -5,28 +5,20 @@ import type { Permission } from '@prisma/client';
  * Per-request authenticated identity. Populated by the `requireUser`
  * middleware before any route handler runs.
  *
- * `role` (string) is kept for backward compat with the pre-0.3 guards
- * (`requireMutationRole`, the 4 `guardAdminOnly` helpers). It carries
- * a derived `OWNER | ADMIN | STAFF | FACILITATOR` synonym computed
- * from the user's Permission set, so existing role-name checks keep
- * working until Step 2 replaces them with permission-based checks.
- *
- * `roleId` / `roleName` / `permissions` are the new (Phase 0.3) source
- * of truth. Use `hasPermission(p)` rather than reading `permissions`
- * directly.
+ * Phase 0.3: the freeform `role` string is gone. Authorization is
+ * permission-based — every gated route calls `requirePermission(...)`
+ * which reads from the `permissions` set below. `roleName` is kept
+ * for audit-log denormalization (display name of the role at action
+ * time) and for surfaces that want to render a role badge.
  */
 export type RequestContext = {
   userId: string;
   organizationId: string;
   email: string;
 
-  // New (0.3)
   roleId: string | null;
   roleName: string | null;
   permissions: Set<Permission>;
-
-  // Legacy synonym — see deriveLegacyRole() below.
-  role: string;
 };
 
 export const requestContext = new AsyncLocalStorage<RequestContext>();
@@ -40,27 +32,11 @@ export function getOrganizationId(): string | undefined {
 }
 
 /**
- * Bridge from a user's Permission set back to the four legacy role
- * strings the older guards check for. Once Step 2 rips out those
- * guards, this function can be deleted.
- *
- * Mapping:
- *   - has ROLE_MANAGE + ORG_MANAGE → OWNER
- *   - has ADMIN_ACCESS + CLIENT_MANAGE → ADMIN
- *   - has ADMIN_ACCESS                 → STAFF
- *   - otherwise                        → FACILITATOR (no admin access)
- */
-export function deriveLegacyRole(perms: Set<Permission>): string {
-  if (perms.has('ROLE_MANAGE') && perms.has('ORG_MANAGE')) return 'OWNER';
-  if (perms.has('ADMIN_ACCESS') && perms.has('CLIENT_MANAGE')) return 'ADMIN';
-  if (perms.has('ADMIN_ACCESS')) return 'STAFF';
-  return 'FACILITATOR';
-}
-
-/**
  * Permission-check shortcut. Returns true if the current request's
  * user has the permission, false otherwise. Safe to call without a
- * request context (returns false).
+ * request context (returns false). Prefer `requirePermission()`
+ * middleware at the route level; this helper is for in-handler checks
+ * (e.g. conditional response-shaping based on capability).
  */
 export function hasPermission(perm: Permission): boolean {
   return requestContext.getStore()?.permissions.has(perm) ?? false;

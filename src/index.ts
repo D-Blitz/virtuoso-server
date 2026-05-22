@@ -4,7 +4,6 @@ import dotenv from 'dotenv';
 
 // auth
 import { requireUser } from './middleware/auth';
-import { requireMutationRole } from './middleware/role';
 import authRoutes from './routes/auth.routes';
 import publicWidgetRoutes from './routes/publicWidget.routes';
 import publicInviteRoutes from './routes/publicInvite.routes';
@@ -84,9 +83,9 @@ app.use('/api/public/invites', publicInviteRoutes);
 app.use('/api/public/reschedule', publicRescheduleRoutes);
 
 // All /api routes below require an authenticated session (dev bypass available).
-// Mutations (POST/PUT/PATCH/DELETE) additionally require OWNER or ADMIN role.
+// Authorization is permission-based per-route (Phase 0.3) — each router
+// declares the Permission it needs via requirePermission(...).
 app.use('/api', requireUser);
-app.use('/api', requireMutationRole(['OWNER', 'ADMIN']));
 
 app.use('/api/facilitators', facilitatorRoutes);
 app.use('/api/rooms', roomRoutes);

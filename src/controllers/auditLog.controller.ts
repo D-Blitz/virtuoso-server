@@ -1,6 +1,5 @@
 import { Request, Response } from 'express';
 import { AuditLogService } from '../services/audit/audit.service';
-import { getContext } from '../auth/context';
 
 const auditLogService = new AuditLogService();
 
@@ -10,26 +9,13 @@ function parsePagingInt(raw: unknown, fallback: number): number {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
-/**
- * Audit log is sensitive: shows every mutation across the org, including
- * staff actions. Restrict to OWNER/ADMIN. This is a stopgap until the
- * Phase 0.3 permission system formalizes "can_view_audit_log" as a
- * resource-scoped permission.
- */
-function guardAdminOnly(res: Response): boolean {
-  const ctx = getContext();
-  const role = ctx?.role;
-  if (role !== 'OWNER' && role !== 'ADMIN') {
-    res.status(403).json({ error: 'Forbidden' });
-    return false;
-  }
-  return true;
-}
+// Phase 0.3: the in-controller guardAdminOnly helper has been replaced
+// by `requirePermission('AUDIT_LOG_VIEW')` in routes/auditLog.routes.ts.
 
 export class AuditLogController {
   /** Org-wide recent activity feed for /admin/audit-log. */
   async recent(req: Request, res: Response) {
-    if (!guardAdminOnly(res)) return;
+
     try {
       const page = parsePagingInt(req.query.page, 1);
       const pageSize = parsePagingInt(req.query.pageSize, 50);
@@ -67,7 +53,7 @@ export class AuditLogController {
 
   /** Per-entity history. Used by entity detail pages (Phase 3.3). */
   async forEntity(req: Request, res: Response) {
-    if (!guardAdminOnly(res)) return;
+
     try {
       const { entityType, entityId } = req.params;
       if (!entityType || !entityId) {

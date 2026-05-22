@@ -1,11 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import type { Permission } from '@prisma/client';
 import { verifySessionToken } from '../auth/jwt';
-import {
-  requestContext,
-  RequestContext,
-  deriveLegacyRole,
-} from '../auth/context';
+import { requestContext, RequestContext } from '../auth/context';
 import prisma from '../prisma';
 
 const SESSION_COOKIE_NAMES = [
@@ -94,7 +90,6 @@ function devBypassContext(): RequestContext | null {
     roleId: null,
     roleName: 'DevBypass',
     permissions,
-    role: deriveLegacyRole(permissions),
   };
 }
 
@@ -123,7 +118,6 @@ export async function requireUser(req: Request, res: Response, next: NextFunctio
         roleId: payload.roleId ?? null,
         roleName: payload.roleName ?? roleName,
         permissions,
-        role: deriveLegacyRole(permissions),
       };
     } else {
       res.status(401).json({ error: 'Invalid session token' });

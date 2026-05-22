@@ -1,5 +1,4 @@
 import { Request, Response } from 'express';
-import { getContext } from '../auth/context';
 import {
   ARCHIVABLE_ENTITY_TYPES,
   ArchiveService,
@@ -17,21 +16,10 @@ function parsePagingInt(raw: unknown, fallback: number): number {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
-/**
- * Same admin-only guard as the trash controller. Archive is a sensitive
- * surface: it shows organization-wide rows the school has retired but
- * preserved — visible only to OWNER/ADMIN until the Phase 0.3
- * permission system formalizes a dedicated `can_manage_archive`.
- */
-function guardAdminOnly(res: Response): boolean {
-  const ctx = getContext();
-  const role = ctx?.role;
-  if (role !== 'OWNER' && role !== 'ADMIN') {
-    res.status(403).json({ error: 'Forbidden' });
-    return false;
-  }
-  return true;
-}
+// Phase 0.3: the in-controller guardAdminOnly helper used to live here.
+// It has been replaced by per-route `requirePermission(...)` middleware
+// declared in `routes/archive.routes.ts`: ARCHIVE_ACCESS for view /
+// unarchive / sendToTrash, PURGE_PERMANENTLY for the hard-delete.
 
 function parseEntityType(
   raw: unknown,
@@ -54,7 +42,7 @@ export class ArchiveController {
    * concrete types returns only that type.
    */
   async list(req: Request, res: Response) {
-    if (!guardAdminOnly(res)) return;
+
     try {
       const page = parsePagingInt(req.query.page, 1);
       const pageSize = parsePagingInt(req.query.pageSize, 50);
@@ -74,7 +62,7 @@ export class ArchiveController {
 
   /** GET /api/archive/counts — counts per entity type. */
   async counts(_req: Request, res: Response) {
-    if (!guardAdminOnly(res)) return;
+
     try {
       const counts = await archiveService.countsByType();
       res.json({ counts });
@@ -85,7 +73,7 @@ export class ArchiveController {
 
   /** POST /api/archive/:entityType/:id — archive an active row. */
   async archive(req: Request, res: Response) {
-    if (!guardAdminOnly(res)) return;
+
     try {
       const entityType = parseEntityType(req.params.entityType, res);
       if (!entityType) return;
@@ -98,7 +86,7 @@ export class ArchiveController {
 
   /** POST /api/archive/:entityType/:id/unarchive — restore archived. */
   async unarchive(req: Request, res: Response) {
-    if (!guardAdminOnly(res)) return;
+
     try {
       const entityType = parseEntityType(req.params.entityType, res);
       if (!entityType) return;
@@ -119,7 +107,7 @@ export class ArchiveController {
    * window. This endpoint stays for the cron and power-user flows.
    */
   async purge(req: Request, res: Response) {
-    if (!guardAdminOnly(res)) return;
+
     try {
       const entityType = parseEntityType(req.params.entityType, res);
       if (!entityType) return;
@@ -136,7 +124,7 @@ export class ArchiveController {
    * The admin's "Supprimer" button in /admin/archives points here.
    */
   async sendToTrash(req: Request, res: Response) {
-    if (!guardAdminOnly(res)) return;
+
     try {
       const entityType = parseEntityType(req.params.entityType, res);
       if (!entityType) return;

@@ -76,10 +76,14 @@ function resolveActor(override: AuditActor | undefined): AuditActor {
     // scripts. Record as fully anonymous; better than nothing.
     return { id: null, email: null, role: null };
   }
+  // Phase 0.3: store the per-org Role name (e.g. 'Propriétaire',
+  // 'Administrateur', or any custom role) rather than the old
+  // 'OWNER | ADMIN | …' bucket. Historical audit rows keep their
+  // original bucket strings — diff renderers tolerate either.
   return {
     id: ctx.userId ?? null,
     email: ctx.email ?? null,
-    role: ctx.role ?? null,
+    role: ctx.roleName ?? null,
   };
 }
 

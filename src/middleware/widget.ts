@@ -55,8 +55,8 @@ export async function requireWidget(
 
   // Run the rest of the chain inside an org-scoped context so any prisma
   // queries in the controller stay scoped to the widget's tenant. Public
-  // widget requests are unauthenticated — no permissions, role is the
-  // sentinel 'PUBLIC' so audit logging can distinguish widget activity.
+  // widget requests are unauthenticated — no permissions; roleName is
+  // 'Widget' so audit logging can distinguish widget activity.
   requestContext.run(
     {
       userId: 'public-widget',
@@ -65,7 +65,6 @@ export async function requireWidget(
       roleId: null,
       roleName: 'Widget',
       permissions: new Set(),
-      role: 'PUBLIC',
     },
     () => next(),
   );
