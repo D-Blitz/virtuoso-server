@@ -55,6 +55,13 @@ model User {
   // for facilitator-ids [x, y]". Admin-picked at user create/edit time.
   permissionScopes UserPermissionScope[]
 
+  // Phase 0.3: soft-disable (deactivate without losing the row).
+  // Login + permission middleware treat a disabled user as
+  // unauthenticated. Distinct from trash: a disabled user keeps their
+  // roleId/facilitatorId, can be reactivated, and never auto-purges.
+  disabledAt   DateTime?
+  disabledById String?
+
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id])
   facilitatorId  String?      @unique
@@ -64,6 +71,7 @@ model User {
 
   @@unique([organizationId, email])
   @@index([roleId])
+  @@index([disabledAt])
 }
 
 // =====================================================================

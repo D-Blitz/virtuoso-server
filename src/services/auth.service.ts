@@ -27,6 +27,10 @@ export class AuthService {
       include: { roleRef: { select: { id: true, name: true } } },
     });
     if (!user || !user.passwordHash) return null;
+    // Phase 0.3: disabled users can't log in. Returned as bad creds
+    // rather than a specific "disabled" message — same response shape
+    // as wrong password, doesn't leak account state to an attacker.
+    if (user.disabledAt) return null;
 
     const ok = await verifyPassword(password, user.passwordHash);
     if (!ok) return null;
