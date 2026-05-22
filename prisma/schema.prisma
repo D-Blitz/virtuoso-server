@@ -17,6 +17,7 @@ model Organization {
   createdAt DateTime @default(now())
 
   users             User[]
+  roles             Role[]
   locations         Location[]
   facilitators      Facilitator[]
   rooms             Room[]
@@ -42,7 +43,18 @@ model User {
   id             String       @id @default(cuid())
   email          String
   passwordHash   String?
-  role           String // OWNER | ADMIN | STAFF | FACILITATOR
+
+  // Phase 0.3: role is now a FK to a per-org Role row carrying a
+  // Permission[] array. Nullable so deleting a role doesn't cascade
+  // -delete its users (admins reassign instead). The freeform
+  // `role` string was dropped by 20260526000000_granular_permissions.
+  roleId         String?
+  roleRef        Role?        @relation(fields: [roleId], references: [id], onDelete: SetNull)
+
+  // Per-user resource-scoped grants — e.g. "this user can EVENT_MANAGE_SCOPED
+  // for facilitator-ids [x, y]". Admin-picked at user create/edit time.
+  permissionScopes UserPermissionScope[]
+
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id])
   facilitatorId  String?      @unique
@@ -51,6 +63,103 @@ model User {
   updatedAt      DateTime     @updatedAt
 
   @@unique([organizationId, email])
+  @@index([roleId])
+}
+
+// =====================================================================
+// Phase 0.3 — Granular permission system
+// =====================================================================
+// Each Organization defines its own Role rows. Three are seeded at org
+// creation (Propriétaire / Administrateur / Enseignant) with isSystem
+// = true so the UI can't delete them; admins are free to fork additional
+// custom roles with any subset of Permission values.
+//
+// Resource scoping (e.g. "Sarah manages events for facilitators X, Y")
+// lives in UserPermissionScope so it's per-user, not per-role — two
+// teachers share the Enseignant role but each gets their own scope rows.
+
+enum Permission {
+  // Org-level admin
+  ADMIN_ACCESS // gates /admin/* surface in the frontend middleware
+  ORG_MANAGE
+  USER_MANAGE
+  ROLE_MANAGE
+
+  // People
+  CLIENT_VIEW
+  CLIENT_MANAGE
+  CLIENT_ANONYMIZE
+  FACILITATOR_VIEW
+  FACILITATOR_MANAGE
+
+  // Catalog
+  SERVICE_MANAGE
+  SERVICE_CATEGORY_MANAGE
+  LOCATION_MANAGE
+  ROOM_MANAGE
+  TAG_MANAGE
+
+  // Schedule
+  TERM_MANAGE
+  CLOSURE_MANAGE
+  EVENT_VIEW
+  EVENT_MANAGE_ALL // any event in the org
+  EVENT_MANAGE_SCOPED // only events on facilitators listed in UserPermissionScope
+  SERIES_MANAGE
+  ENROLLMENT_MANAGE
+
+  // Money
+  PAYMENT_VIEW
+  PAYMENT_MANAGE
+  REFUND_ISSUE
+
+  // Ops
+  ARCHIVE_ACCESS
+  TRASH_ACCESS
+  PURGE_PERMANENTLY
+  AUDIT_LOG_VIEW
+
+  // Widget
+  WIDGET_MANAGE
+}
+
+model Role {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  name        String
+  description String?
+  color       String? // hex string for chip rendering
+  isSystem    Boolean @default(false) // seeded roles can't be deleted via UI
+
+  permissions Permission[] @default([])
+
+  users User[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([organizationId, name])
+  @@index([organizationId])
+}
+
+// Per-user resource-scoped grants. resourceType is loosely typed because
+// the FK target could be any of several models (currently only Facilitator
+// in v1, but Service / Location / etc. could follow); Postgres can't
+// enforce a single FK across multiple tables, so the consistency check
+// lives in the app layer.
+model UserPermissionScope {
+  id           String     @id @default(cuid())
+  userId       String
+  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  permission   Permission
+  resourceType String // 'Facilitator' for v1
+  resourceId   String // not DB-enforced; polymorphic
+  createdAt    DateTime   @default(now())
+
+  @@unique([userId, permission, resourceType, resourceId])
+  @@index([userId, permission])
 }
 
 model Location {

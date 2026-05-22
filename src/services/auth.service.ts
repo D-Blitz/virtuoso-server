@@ -1,11 +1,18 @@
 import prisma from '../prisma';
 import { verifyPassword } from '../auth/password';
 
+/**
+ * Identity embedded in the session JWT. `roleId` is what the auth
+ * middleware uses on every subsequent request to load the user's
+ * Role row + permission set (Phase 0.3). `roleName` is included
+ * so the frontend can display the role badge without an extra fetch.
+ */
 export type AuthenticatedUser = {
   id: string;
   email: string;
   organizationId: string;
-  role: string;
+  roleId: string | null;
+  roleName: string | null;
 };
 
 export class AuthService {
@@ -17,6 +24,7 @@ export class AuthService {
   async login(email: string, password: string): Promise<AuthenticatedUser | null> {
     const user = await prisma.user.findFirst({
       where: { email },
+      include: { roleRef: { select: { id: true, name: true } } },
     });
     if (!user || !user.passwordHash) return null;
 
@@ -27,7 +35,8 @@ export class AuthService {
       id: user.id,
       email: user.email,
       organizationId: user.organizationId,
-      role: user.role,
+      roleId: user.roleRef?.id ?? null,
+      roleName: user.roleRef?.name ?? null,
     };
   }
 }
