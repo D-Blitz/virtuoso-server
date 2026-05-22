@@ -33,6 +33,7 @@ import trashRoutes from './routes/trash.routes';
 import dependentsRoutes from './routes/dependents.routes';
 import archiveRoutes from './routes/archive.routes';
 import anonymizeRoutes from './routes/anonymize.routes';
+import roleRoutes from './routes/role.routes';
 
 // jobs
 import { startSlotHoldSweep } from './jobs/sweepSlotHolds';
@@ -109,6 +110,7 @@ app.use('/api/trash', trashRoutes);
 app.use('/api/dependents', dependentsRoutes);
 app.use('/api/archive', archiveRoutes);
 app.use('/api/anonymize', anonymizeRoutes);
+app.use('/api/roles', roleRoutes);
 
 // Background jobs
 startSlotHoldSweep();
