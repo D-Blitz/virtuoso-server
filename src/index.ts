@@ -1,6 +1,11 @@
+// Load .env BEFORE any other import so top-level code in imported
+// modules sees the env vars. The previous `dotenv.config()` call at the
+// bottom of this file ran AFTER imports — fine for lazy reads but a
+// latent footgun for any module that reads env at import time.
+import 'dotenv/config';
+
 import express from 'express';
 import cors from 'cors';
-import dotenv from 'dotenv';
 
 // auth
 import { requireUser } from './middleware/auth';
@@ -40,8 +45,6 @@ import userRoutes from './routes/user.routes';
 import { startSlotHoldSweep } from './jobs/sweepSlotHolds';
 import { startEnrollmentInviteJobs } from './jobs/enrollmentInvites';
 import { startTrashPurgeJob } from './jobs/trashPurge';
-
-dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
