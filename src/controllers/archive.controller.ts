@@ -113,6 +113,10 @@ export class ArchiveController {
    * DELETE /api/archive/:entityType/:id — hard-delete from archive.
    * FK-blocked rows surface the same friendly summary as the trash
    * bin's purge (Client+Payment → "Anonymiser" guidance).
+   *
+   * The admin UI no longer calls this by default — `sendToTrash`
+   * (below) is the friendlier path that gives a 30-day recovery
+   * window. This endpoint stays for the cron and power-user flows.
    */
   async purge(req: Request, res: Response) {
     if (!guardAdminOnly(res)) return;
@@ -123,6 +127,23 @@ export class ArchiveController {
       res.status(204).send();
     } catch (err) {
       sendError(res, err, 'Failed to purge from archive');
+    }
+  }
+
+  /**
+   * POST /api/archive/:entityType/:id/trash — move an archived row
+   * back into the trash bin, where the 30-day TTL applies again.
+   * The admin's "Supprimer" button in /admin/archives points here.
+   */
+  async sendToTrash(req: Request, res: Response) {
+    if (!guardAdminOnly(res)) return;
+    try {
+      const entityType = parseEntityType(req.params.entityType, res);
+      if (!entityType) return;
+      await archiveService.sendToTrash(entityType, req.params.id);
+      res.status(204).send();
+    } catch (err) {
+      sendError(res, err, 'Failed to move archive to trash');
     }
   }
 }

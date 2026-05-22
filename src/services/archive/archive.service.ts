@@ -9,7 +9,11 @@ import {
   snapshotService,
   snapshotTerm,
 } from '../audit/snapshots';
-import { archive, unarchive } from './archive';
+import {
+  archive,
+  transitionArchiveToTrash,
+  unarchive,
+} from './archive';
 
 /**
  * Archive admin service. Counterpart of `TrashService` — same shape,
@@ -285,6 +289,11 @@ export class ArchiveService {
    * Payments), this throws and the controller surfaces the friendly
    * message via httpErrors.sendError → describeBlockingReference.
    * Anonymization (0.5a) is the real fix when that hits.
+   *
+   * Note: the admin UI now defaults to `sendToTrash` (below) for
+   * delete-from-archive, so this method is mostly for the cron and
+   * "really really delete" power-user paths. The hard-purge endpoint
+   * stays available for those cases.
    */
   async purge(
     entityType: ArchivableEntityType,
@@ -307,6 +316,29 @@ export class ArchiveService {
     const snap = snapshotterFor(entityType);
     void auditLog.record({
       action: 'DELETE',
+      entityType,
+      entityId: id,
+      before: snap(before),
+    });
+  }
+
+  /**
+   * Move an archived row into trash — the default behavior of the
+   * "Supprimer" button on /admin/archives. Gives the admin a 30-day
+   * recovery window instead of an immediate hard delete (which was
+   * the previous behavior, reported as a UX papercut).
+   *
+   * The transition is atomic in a single updateMany. Audit log entry
+   * records the lifecycle flip; the row's actual content is unchanged.
+   */
+  async sendToTrash(
+    entityType: ArchivableEntityType,
+    id: string,
+  ): Promise<void> {
+    const before = await transitionArchiveToTrash<any>(modelName(entityType), id);
+    const snap = snapshotterFor(entityType);
+    void auditLog.record({
+      action: 'UPDATE',
       entityType,
       entityId: id,
       before: snap(before),

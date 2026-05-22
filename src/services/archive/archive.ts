@@ -121,3 +121,47 @@ export async function transitionTrashToArchive<T = any>(
 
   return before;
 }
+
+/**
+ * Reverse of `transitionTrashToArchive`: move an archived row into
+ * trash. Used by the /admin/archives "Supprimer" button so deleting
+ * from archive routes through the trash bin's 30-day recovery
+ * window instead of hard-deleting on the spot.
+ *
+ * Atomically:
+ *   - clears archivedAt + archivedById
+ *   - stamps deletedAt + deletedById with the caller's id
+ *
+ * Returns the row before the transition for the audit before-snapshot.
+ */
+export async function transitionArchiveToTrash<T = any>(
+  modelName: string,
+  id: string,
+): Promise<T> {
+  const ctx = getContext();
+  const client = (prisma as any)[modelName];
+  if (!client) {
+    throw new Error(`Unknown archivable model: ${modelName}`);
+  }
+
+  const before = (await client.findFirst({
+    where: { id, archivedAt: { not: null } },
+  })) as T | null;
+  if (!before) {
+    throw new Error(
+      `No archived ${modelName} found with id ${id} (transitionArchiveToTrash)`,
+    );
+  }
+
+  await client.updateMany({
+    where: { id, archivedAt: { not: null } },
+    data: {
+      archivedAt: null,
+      archivedById: null,
+      deletedAt: new Date(),
+      deletedById: ctx?.userId ?? null,
+    },
+  });
+
+  return before;
+}
