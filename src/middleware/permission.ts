@@ -93,19 +93,106 @@ export function requireAllPermissions(perms: Permission[]) {
 /**
  * Resource-scoped event manage gate. Used on POST/PUT/DELETE routes
  * for ScheduledEvent. The check is:
- *   1. If user has EVENT_MANAGE_ALL  → allow.
- *   2. Else if user has EVENT_MANAGE_SCOPED, look up the event's
- *      facilitator(s); if ANY of them appears in the user's
- *      UserPermissionScope (permission=EVENT_MANAGE_SCOPED,
- *      resourceType='Facilitator'), allow.
- *   3. Else 403.
  *
- * Reads the event id from `req.params.id`. Skipped on POST since the
- * created event's facilitators are in the body — the controller
- * does its own re-check via `assertEventManageable(facilitatorIds)`
+ *   1. If user has EVENT_MANAGE_ALL → allow.
+ *   2. Else if user has EVENT_MANAGE_SCOPED, group their
+ *      UserPermissionScope rows (for that permission) by resourceType
+ *      and apply an AND-across-dimensions check:
+ *        - For each dimension the user has rows in (Facilitator /
+ *          Location / Room), the event's matching field must be in
+ *          the user's allowlist for that dimension.
+ *        - Within a dimension, multiple rows are OR (any match).
+ *        - Dimensions the user has zero rows in impose no constraint.
+ *      Example: scope {Fac: A,B; Room: X,Y} edits event {Fac: C, Room: X}
+ *      → fails because facilitator dimension doesn't match.
+ *   3. If the user has EVENT_MANAGE_SCOPED but ZERO scope rows total,
+ *      they can't manage anything (the scope grant must be configured
+ *      per-user explicitly). → 403.
+ *   4. Else 403.
+ *
+ * Reads the event id from `req.params.id`. POST has no id — the
+ * controller does its own re-check via `assertEventManageable({...})`
  * after parsing the body. This keeps the middleware simple and the
  * permission check close to the data that drives it.
  */
+
+type EventDimensions = {
+  facilitatorIds: string[];
+  roomId: string | null;
+  locationId: string | null;
+};
+
+type ScopeCheckResult =
+  | { ok: true }
+  | { ok: false; reason: 'no-scope-rows' | 'dimension-mismatch'; dim?: string };
+
+/**
+ * Shared scope-matching logic for the middleware AND the controller
+ * helper. Pure data-in / data-out — easy to unit-test, easy to keep
+ * the two enforcement points behaviorally identical.
+ */
+async function matchesEventScope(
+  userId: string,
+  event: EventDimensions,
+): Promise<ScopeCheckResult> {
+  const scopes = await prisma.userPermissionScope.findMany({
+    where: { userId, permission: 'EVENT_MANAGE_SCOPED' },
+    select: { resourceType: true, resourceId: true },
+  });
+
+  if (scopes.length === 0) {
+    // No scope rows at all = nothing manageable. Explicit denial so the
+    // admin gets a clear error (vs. the silent "no dimensions configured"
+    // bug if we collapsed this into the loop below).
+    return { ok: false, reason: 'no-scope-rows' };
+  }
+
+  // Group by resourceType.
+  const byType = new Map<string, Set<string>>();
+  for (const s of scopes) {
+    if (!byType.has(s.resourceType)) byType.set(s.resourceType, new Set());
+    byType.get(s.resourceType)!.add(s.resourceId);
+  }
+
+  // AND across non-empty dimensions.
+  if (byType.has('Facilitator')) {
+    const allowed = byType.get('Facilitator')!;
+    if (!event.facilitatorIds.some((id) => allowed.has(id))) {
+      return { ok: false, reason: 'dimension-mismatch', dim: 'Facilitator' };
+    }
+  }
+  if (byType.has('Location')) {
+    const allowed = byType.get('Location')!;
+    if (!event.locationId || !allowed.has(event.locationId)) {
+      return { ok: false, reason: 'dimension-mismatch', dim: 'Location' };
+    }
+  }
+  if (byType.has('Room')) {
+    const allowed = byType.get('Room')!;
+    if (!event.roomId || !allowed.has(event.roomId)) {
+      return { ok: false, reason: 'dimension-mismatch', dim: 'Room' };
+    }
+  }
+
+  return { ok: true };
+}
+
+function scopeErrorMessage(result: ScopeCheckResult & { ok: false }): string {
+  if (result.reason === 'no-scope-rows') {
+    return "Forbidden: aucune ressource n'a été assignée à cet utilisateur.";
+  }
+  // dimension-mismatch
+  const label =
+    result.dim === 'Facilitator'
+      ? 'intervenant'
+      : result.dim === 'Location'
+        ? 'établissement'
+        : result.dim === 'Room'
+          ? 'salle'
+          : 'ressource';
+  return `Forbidden: ${label} hors du périmètre de l'utilisateur.`;
+}
+
 export function requireEventManage() {
   return async (
     req: Request,
@@ -129,8 +216,6 @@ export function requireEventManage() {
       return;
     }
 
-    // SCOPED branch: derive the event's facilitator ids and verify at
-    // least one of them is in the user's permission scope rows.
     const eventId = req.params.id;
     if (!eventId) {
       // POST routes hit this branch with no id — the controller's
@@ -141,7 +226,11 @@ export function requireEventManage() {
 
     const event = await prisma.scheduledEvent.findFirst({
       where: { id: eventId },
-      select: { facilitators: { select: { id: true } } },
+      select: {
+        facilitators: { select: { id: true } },
+        roomId: true,
+        locationId: true,
+      },
     });
     if (!event) {
       // Defer NotFound handling to the controller (consistent 404 shape).
@@ -149,27 +238,14 @@ export function requireEventManage() {
       return;
     }
 
-    const facilitatorIds = event.facilitators.map((f) => f.id);
-    if (facilitatorIds.length === 0) {
-      res.status(403).json({
-        error: 'Forbidden: event has no facilitator',
-        permission: 'EVENT_MANAGE_SCOPED',
-      });
-      return;
-    }
-
-    const matchingScope = await prisma.userPermissionScope.findFirst({
-      where: {
-        userId: ctx.userId,
-        permission: 'EVENT_MANAGE_SCOPED',
-        resourceType: 'Facilitator',
-        resourceId: { in: facilitatorIds },
-      },
-      select: { id: true },
+    const result = await matchesEventScope(ctx.userId, {
+      facilitatorIds: event.facilitators.map((f) => f.id),
+      roomId: event.roomId,
+      locationId: event.locationId,
     });
-    if (!matchingScope) {
+    if (!result.ok) {
       res.status(403).json({
-        error: 'Forbidden: facilitator outside scope',
+        error: scopeErrorMessage(result),
         permission: 'EVENT_MANAGE_SCOPED',
       });
       return;
@@ -182,10 +258,16 @@ export function requireEventManage() {
  * Helper for controllers that need to assert event-manage after they've
  * parsed the body (POST routes, ALL-scope series-update branches). Throws
  * a structured error that sendError() can surface as a 403.
+ *
+ * Dimensions match the middleware's check: Facilitator + Location + Room.
+ * Callers pass whatever is in the request body; pass null for dimensions
+ * the event doesn't have.
  */
-export async function assertEventManageable(
-  facilitatorIds: string[],
-): Promise<void> {
+export async function assertEventManageable(args: {
+  facilitatorIds: string[];
+  roomId: string | null;
+  locationId: string | null;
+}): Promise<void> {
   const ctx = getContext();
   if (!ctx) throw new Error('No request context');
   if (ctx.permissions.has('EVENT_MANAGE_ALL')) return;
@@ -196,24 +278,10 @@ export async function assertEventManageable(
     err.statusCode = 403;
     throw err;
   }
-  if (facilitatorIds.length === 0) {
-    const err = new Error('Forbidden: event has no facilitator') as Error & {
-      statusCode?: number;
-    };
-    err.statusCode = 403;
-    throw err;
-  }
-  const match = await prisma.userPermissionScope.findFirst({
-    where: {
-      userId: ctx.userId,
-      permission: 'EVENT_MANAGE_SCOPED',
-      resourceType: 'Facilitator',
-      resourceId: { in: facilitatorIds },
-    },
-    select: { id: true },
-  });
-  if (!match) {
-    const err = new Error('Forbidden: facilitator outside scope') as Error & {
+
+  const result = await matchesEventScope(ctx.userId, args);
+  if (!result.ok) {
+    const err = new Error(scopeErrorMessage(result)) as Error & {
       statusCode?: number;
     };
     err.statusCode = 403;

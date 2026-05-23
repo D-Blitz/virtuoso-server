@@ -5,6 +5,40 @@ import { getContext, getOrganizationId } from '../../auth/context';
 import type { Permission } from '@prisma/client';
 
 /**
+ * Phase 0.3.1 — privilege-escalation guard for role assignment.
+ *
+ * Mirrors the guard in role.service: a user can only assign a target
+ * role whose permissions are a subset of their own. Otherwise an
+ * admin with limited perms but USER_MANAGE could promote themselves
+ * (or anyone else) to a role with broader perms.
+ *
+ * Pass null to skip the check (used when explicitly unassigning a role).
+ */
+async function assertCanAssignRole(roleId: string | null): Promise<void> {
+  if (!roleId) return;
+  const ctx = getContext();
+  if (!ctx) throw new Error('No request context');
+  const role = await prisma.role.findUnique({
+    where: { id: roleId },
+    select: { permissions: true, name: true },
+  });
+  if (!role) {
+    const err = new Error('Rôle introuvable.') as Error & {
+      statusCode?: number;
+    };
+    err.statusCode = 400;
+    throw err;
+  }
+  const missing = role.permissions.filter((p) => !ctx.permissions.has(p));
+  if (missing.length === 0) return;
+  const err = new Error(
+    `Vous ne pouvez assigner que des rôles dont les permissions sont incluses dans les vôtres. Le rôle « ${role.name} » inclut des permissions que vous ne possédez pas : ${missing.join(', ')}.`,
+  ) as Error & { statusCode?: number };
+  err.statusCode = 400;
+  throw err;
+}
+
+/**
  * Phase 0.3 — User CRUD service.
  *
  * Soft-disable, not soft-delete: the row stays in the User table with
@@ -157,6 +191,8 @@ export class UserService {
       throw err;
     }
 
+    await assertCanAssignRole(input.roleId);
+
     const passwordHash = await hashPassword(input.password);
 
     const row = await prisma.user.create({
@@ -228,6 +264,14 @@ export class UserService {
         err.statusCode = 400;
         throw err;
       }
+    }
+
+    // Privilege-escalation guard: target role must not include perms
+    // the caller lacks. Only checked when roleId is being CHANGED so
+    // editing a user's email without touching their role doesn't
+    // need full role-coverage from the caller.
+    if (input.roleId !== undefined && input.roleId !== existing.roleId) {
+      await assertCanAssignRole(input.roleId);
     }
 
     const data: Record<string, any> = {};

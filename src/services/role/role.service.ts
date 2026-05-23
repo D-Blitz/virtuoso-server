@@ -1,7 +1,31 @@
 import prisma from '../../prisma';
 import { auditLog } from '../audit/audit.service';
 import type { Permission } from '@prisma/client';
-import { getOrganizationId } from '../../auth/context';
+import { getContext, getOrganizationId } from '../../auth/context';
+
+/**
+ * Phase 0.3.1 — privilege-escalation guard.
+ *
+ * Standard RBAC defense: a user can only grant a permission they
+ * themselves hold. Without this, anyone with ROLE_MANAGE could create
+ * a role with every permission (including ROLE_MANAGE itself) and
+ * either assign someone to it or assign themselves to it — bypassing
+ * any tier the org tried to maintain.
+ *
+ * Exception: full bypass when the caller has every permission they're
+ * about to grant. Propriétaire naturally passes for any input.
+ */
+function assertCanGrantPermissions(perms: Permission[]): void {
+  const ctx = getContext();
+  if (!ctx) throw new Error('No request context');
+  const missing = perms.filter((p) => !ctx.permissions.has(p));
+  if (missing.length === 0) return;
+  const err = new Error(
+    `Vous ne pouvez accorder que des permissions que vous possédez vous-même. Permissions refusées : ${missing.join(', ')}.`,
+  ) as Error & { statusCode?: number };
+  err.statusCode = 400;
+  throw err;
+}
 
 /**
  * Phase 0.3 — Role CRUD service.
@@ -85,6 +109,8 @@ export class RoleService {
       throw err;
     }
 
+    assertCanGrantPermissions(input.permissions);
+
     const row = await prisma.role.create({
       data: {
         organizationId,
@@ -162,6 +188,15 @@ export class RoleService {
       data.color = input.color?.trim() || null;
     }
     if (input.permissions !== undefined) {
+      // Privilege-escalation guard: only check the DELTA against the
+      // caller's perms. Adding a permission you don't have is blocked;
+      // keeping permissions the role already had (set by someone with
+      // higher privilege) is fine — otherwise an Admin couldn't tweak
+      // an Administrateur template's color/description without also
+      // having every permission that template includes.
+      const previousSet = new Set(existing.permissions);
+      const added = input.permissions.filter((p) => !previousSet.has(p));
+      if (added.length > 0) assertCanGrantPermissions(added);
       data.permissions = input.permissions;
     }
 
