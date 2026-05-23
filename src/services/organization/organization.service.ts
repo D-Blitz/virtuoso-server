@@ -23,14 +23,14 @@ export type OrganizationSettingsDto = {
   timezone: string;
   currency: string;
 
-  // Annual settings (Phase 0.7)
+  // Annual settings (Phase 0.7). Vertical-agnostic — the original
+  // trialFeeCreditsTerm1 + holidayZone (both school-specific) were
+  // dropped in 20260523000004_drop_school_specific_settings.
   vatRate: number;
   membershipFee: number;
   membershipFeeEnabled: boolean;
   trialFee: number;
-  trialFeeCreditsTerm1: boolean;
   outstandingReminderThreshold: number;
-  holidayZone: string | null;
 };
 
 export type OrganizationSettingsInput = {
@@ -42,13 +42,8 @@ export type OrganizationSettingsInput = {
   membershipFee?: number;
   membershipFeeEnabled?: boolean;
   trialFee?: number;
-  trialFeeCreditsTerm1?: boolean;
   outstandingReminderThreshold?: number;
-  // null = explicit clear; undefined = leave unchanged
-  holidayZone?: string | null;
 };
-
-const HOLIDAY_ZONES = new Set(['A', 'B', 'C']);
 
 function rowToDto(row: any): OrganizationSettingsDto {
   return {
@@ -62,9 +57,7 @@ function rowToDto(row: any): OrganizationSettingsDto {
     membershipFee: row.membershipFee,
     membershipFeeEnabled: row.membershipFeeEnabled,
     trialFee: row.trialFee,
-    trialFeeCreditsTerm1: row.trialFeeCreditsTerm1,
     outstandingReminderThreshold: row.outstandingReminderThreshold,
-    holidayZone: row.holidayZone,
   };
 }
 
@@ -157,7 +150,10 @@ export class OrganizationService {
       );
     }
     if (input.trialFee !== undefined) {
-      data.trialFee = assertPositive("Le tarif de l'essai", input.trialFee);
+      data.trialFee = assertPositive(
+        'Le tarif de la session découverte',
+        input.trialFee,
+      );
     }
     if (input.outstandingReminderThreshold !== undefined) {
       data.outstandingReminderThreshold = assertPositive(
@@ -167,22 +163,6 @@ export class OrganizationService {
     }
     if (input.membershipFeeEnabled !== undefined) {
       data.membershipFeeEnabled = !!input.membershipFeeEnabled;
-    }
-    if (input.trialFeeCreditsTerm1 !== undefined) {
-      data.trialFeeCreditsTerm1 = !!input.trialFeeCreditsTerm1;
-    }
-    if (input.holidayZone !== undefined) {
-      if (input.holidayZone === null || input.holidayZone === '') {
-        data.holidayZone = null;
-      } else if (HOLIDAY_ZONES.has(input.holidayZone)) {
-        data.holidayZone = input.holidayZone;
-      } else {
-        const err = new Error(
-          "La zone de vacances scolaires doit être A, B, C ou vide.",
-        ) as Error & { statusCode?: number };
-        err.statusCode = 400;
-        throw err;
-      }
     }
 
     const row = await prisma.organization.update({
@@ -214,8 +194,6 @@ function snapshotOrg(row: any): object {
     membershipFee: row.membershipFee,
     membershipFeeEnabled: row.membershipFeeEnabled,
     trialFee: row.trialFee,
-    trialFeeCreditsTerm1: row.trialFeeCreditsTerm1,
     outstandingReminderThreshold: row.outstandingReminderThreshold,
-    holidayZone: row.holidayZone,
   };
 }
