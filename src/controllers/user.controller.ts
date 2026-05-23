@@ -55,8 +55,15 @@ export class UserController {
   /** POST /api/users */
   async create(req: Request, res: Response) {
     try {
-      const { email, password, roleId, facilitatorId, manageableFacilitatorIds } =
-        req.body ?? {};
+      const {
+        email,
+        password,
+        roleId,
+        facilitatorId,
+        manageableFacilitatorIds,
+        manageableLocationIds,
+        manageableRoomIds,
+      } = req.body ?? {};
       if (typeof email !== 'string' || typeof password !== 'string') {
         res
           .status(400)
@@ -69,6 +76,8 @@ export class UserController {
         roleId: asString(roleId) ?? null,
         facilitatorId: asString(facilitatorId) ?? null,
         manageableFacilitatorIds: asStringList(manageableFacilitatorIds),
+        manageableLocationIds: asStringList(manageableLocationIds),
+        manageableRoomIds: asStringList(manageableRoomIds),
       });
       res.status(201).json(row);
     } catch (err) {
@@ -84,6 +93,8 @@ export class UserController {
         roleId,
         facilitatorId,
         manageableFacilitatorIds,
+        manageableLocationIds,
+        manageableRoomIds,
       } = req.body ?? {};
       const row = await service.update(req.params.id, {
         email: asString(email),
@@ -95,10 +106,20 @@ export class UserController {
           facilitatorId === undefined
             ? undefined
             : (asString(facilitatorId) ?? null),
+        // Per-dimension scope rewrites — undefined means "leave this
+        // dimension alone", explicit array (even []) means "rewrite".
         manageableFacilitatorIds:
           manageableFacilitatorIds === undefined
             ? undefined
             : asStringList(manageableFacilitatorIds),
+        manageableLocationIds:
+          manageableLocationIds === undefined
+            ? undefined
+            : asStringList(manageableLocationIds),
+        manageableRoomIds:
+          manageableRoomIds === undefined
+            ? undefined
+            : asStringList(manageableRoomIds),
       });
       res.json(row);
     } catch (err) {

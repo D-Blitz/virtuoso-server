@@ -163,14 +163,20 @@ export class UserService {
    * Create a user. Password is hashed with bcrypt. The created user's
    * role + initial scope rows are wired in the same transaction so a
    * half-created user can never exist.
+   *
+   * Phase 0.3.1: scope picker is multi-dimensional (Facilitator +
+   * Location + Room). All three combine with AND semantics in the
+   * `requireEventManage` middleware.
    */
   async create(input: {
     email: string;
     password: string;
     roleId: string | null;
     facilitatorId: string | null;
-    /** Manageable facilitator ids for EVENT_MANAGE_SCOPED. */
+    /** EVENT_MANAGE_SCOPED scopes — dimension-by-dimension. */
     manageableFacilitatorIds: string[];
+    manageableLocationIds: string[];
+    manageableRoomIds: string[];
   }): Promise<UserDto> {
     const organizationId = getOrganizationId();
     if (!organizationId) throw new Error('No organization context');
@@ -195,6 +201,25 @@ export class UserService {
 
     const passwordHash = await hashPassword(input.password);
 
+    // Build a flat list of scope rows across all three dimensions.
+    const initialScopes = [
+      ...input.manageableFacilitatorIds.map((id) => ({
+        permission: 'EVENT_MANAGE_SCOPED' as Permission,
+        resourceType: 'Facilitator',
+        resourceId: id,
+      })),
+      ...input.manageableLocationIds.map((id) => ({
+        permission: 'EVENT_MANAGE_SCOPED' as Permission,
+        resourceType: 'Location',
+        resourceId: id,
+      })),
+      ...input.manageableRoomIds.map((id) => ({
+        permission: 'EVENT_MANAGE_SCOPED' as Permission,
+        resourceType: 'Room',
+        resourceId: id,
+      })),
+    ];
+
     const row = await prisma.user.create({
       data: {
         organizationId,
@@ -202,13 +227,7 @@ export class UserService {
         passwordHash,
         roleId: input.roleId,
         facilitatorId: input.facilitatorId,
-        permissionScopes: {
-          create: input.manageableFacilitatorIds.map((id) => ({
-            permission: 'EVENT_MANAGE_SCOPED' as Permission,
-            resourceType: 'Facilitator',
-            resourceId: id,
-          })),
-        },
+        permissionScopes: { create: initialScopes },
       },
       include: userIncludes,
     });
@@ -235,7 +254,12 @@ export class UserService {
       email?: string;
       roleId?: string | null;
       facilitatorId?: string | null;
+      // Pass undefined to leave that dimension unchanged. Pass [] to
+      // clear it. Each dimension is rewritten independently — passing
+      // one dimension doesn't touch the others.
       manageableFacilitatorIds?: string[];
+      manageableLocationIds?: string[];
+      manageableRoomIds?: string[];
     },
   ): Promise<UserDto> {
     const existing = await prisma.user.findFirst({
@@ -291,24 +315,36 @@ export class UserService {
       data.facilitatorId = input.facilitatorId;
     }
 
-    // Rewriting the scope list: drop the old EVENT_MANAGE_SCOPED rows
-    // and write the new ones. Other scope permissions (if/when added
-    // later) are left alone.
-    if (input.manageableFacilitatorIds !== undefined) {
+    // Rewriting the scope list: per dimension, drop the old
+    // EVENT_MANAGE_SCOPED rows for that dimension and write the new
+    // ones. Other dimensions (and other permissions, if any) are
+    // untouched. Callers control which dimensions get rewritten by
+    // setting/omitting the corresponding manageable*Ids field.
+    const dimensions: Array<{
+      input: string[] | undefined;
+      resourceType: 'Facilitator' | 'Location' | 'Room';
+    }> = [
+      { input: input.manageableFacilitatorIds, resourceType: 'Facilitator' },
+      { input: input.manageableLocationIds, resourceType: 'Location' },
+      { input: input.manageableRoomIds, resourceType: 'Room' },
+    ];
+
+    for (const dim of dimensions) {
+      if (dim.input === undefined) continue;
       await prisma.userPermissionScope.deleteMany({
         where: {
           userId: id,
           permission: 'EVENT_MANAGE_SCOPED',
-          resourceType: 'Facilitator',
+          resourceType: dim.resourceType,
         },
       });
-      if (input.manageableFacilitatorIds.length > 0) {
+      if (dim.input.length > 0) {
         await prisma.userPermissionScope.createMany({
-          data: input.manageableFacilitatorIds.map((fid) => ({
+          data: dim.input.map((rid) => ({
             userId: id,
             permission: 'EVENT_MANAGE_SCOPED' as Permission,
-            resourceType: 'Facilitator',
-            resourceId: fid,
+            resourceType: dim.resourceType,
+            resourceId: rid,
           })),
         });
       }
