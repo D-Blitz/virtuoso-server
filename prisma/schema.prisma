@@ -16,6 +16,20 @@ model Organization {
   currency  String   @default("EUR")
   createdAt DateTime @default(now())
 
+  // Phase 0.7 — annual settings panel.
+  // Values the school typically tweaks once per season; surfaced as
+  // a single editor at /admin/parametres. Each field has a sensible
+  // default so existing orgs work unchanged after the migration.
+  // Invoice number format + "duplicate from N-1" deferred to Phase
+  // 6.5 (invoicing) and the future school-year concept.
+  vatRate                       Float    @default(20)   // % VAT applied on invoices
+  membershipFee                 Float    @default(50)   // EUR
+  membershipFeeEnabled          Boolean  @default(true) // toggle whole feature off if school doesn't bill membership
+  trialFee                      Float    @default(28)   // EUR
+  trialFeeCreditsTerm1          Boolean  @default(true) // true = trial cost discounted from T1 enrollment total
+  outstandingReminderThreshold  Float    @default(10)   // EUR min unpaid before the dunning email fires (Phase 1.7)
+  holidayZone                   String?                  // 'A' | 'B' | 'C' — French school-holiday zone; null = not set
+
   users             User[]
   roles             Role[]
   locations         Location[]
