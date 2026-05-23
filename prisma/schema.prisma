@@ -16,25 +16,16 @@ model Organization {
   currency  String   @default("EUR")
   createdAt DateTime @default(now())
 
-  // Phase 0.7 — vertical-agnostic annual settings panel.
-  // Surfaced as a single editor at /admin/parametres. Each field has
-  // a sensible default so existing orgs work unchanged.
+  // Phase 0.7 — truly universal settings only. Surfaced as a single
+  // editor at /admin/parametres. Every billing-flavored field (trial
+  // fee, recurring annual fee, dunning threshold) was removed because
+  // each belongs to a more specific concept that doesn't generalize
+  // across coaching / therapy / tutoring / wellness / music-school
+  // verticals. See drop_billing_settings_from_org migration for the
+  // reasoning per field, and the future-work entries in BACKLOG 0.7.
   //
-  // Generification pass (commit-after): dropped trialFeeCreditsTerm1
-  // (school-trimestre logic) and holidayZone (FR-only) since this
-  // product targets coaching / therapy / tutoring / wellness verticals
-  // too, not just music schools. What's left translates cleanly:
-  //   - vatRate                       — every org has a tax rate
-  //   - membershipFee + Enabled       — recurring annual fee (clubs,
-  //                                     gyms, schools, associations)
-  //   - trialFee                      — discovery-session pricing
-  //                                     (universal across service biz)
-  //   - outstandingReminderThreshold  — dunning cutoff (universal)
-  vatRate                       Float    @default(20)   // % tax applied on invoices
-  membershipFee                 Float    @default(50)   // recurring annual fee
-  membershipFeeEnabled          Boolean  @default(true) // toggle the feature off when not applicable
-  trialFee                      Float    @default(28)   // discovery / intro session price
-  outstandingReminderThreshold  Float    @default(10)   // min unpaid balance before dunning email fires (Phase 1.7)
+  // What stays: identity (handled by the columns above) + tax rate.
+  vatRate Float @default(20) // % tax applied on invoices
 
   users             User[]
   roles             Role[]

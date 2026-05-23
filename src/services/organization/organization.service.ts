@@ -5,14 +5,20 @@ import { getOrganizationId } from '../../auth/context';
 /**
  * Phase 0.7 — organization service.
  *
- * Backs the `/admin/parametres` admin screen. Exposes the seven
- * annual-settings tunables + the core identity fields (name, locale,
- * timezone, currency). Read is gated by ADMIN_ACCESS on the route;
+ * Backs the `/admin/parametres` admin screen. Exposes the truly
+ * universal org settings: identity fields (name, locale, timezone,
+ * currency) + tax rate. Read is gated by ADMIN_ACCESS on the route;
  * write is gated by ORG_MANAGE.
  *
  * Only the org the caller is logged into is reachable — there's no
  * cross-org lookup helper. The route reads the orgId from the
  * request context.
+ *
+ * Anything billing-flavored (trial pricing, recurring fees, dunning
+ * thresholds) was deliberately kept out of this surface: each one
+ * belongs to a more specific concept (a Service the user creates,
+ * a future subscription model, a per-service dunning policy) and
+ * doesn't generalize across verticals. See BACKLOG 0.7.
  */
 
 export type OrganizationSettingsDto = {
@@ -22,15 +28,7 @@ export type OrganizationSettingsDto = {
   locale: string;
   timezone: string;
   currency: string;
-
-  // Annual settings (Phase 0.7). Vertical-agnostic — the original
-  // trialFeeCreditsTerm1 + holidayZone (both school-specific) were
-  // dropped in 20260523000004_drop_school_specific_settings.
   vatRate: number;
-  membershipFee: number;
-  membershipFeeEnabled: boolean;
-  trialFee: number;
-  outstandingReminderThreshold: number;
 };
 
 export type OrganizationSettingsInput = {
@@ -39,10 +37,6 @@ export type OrganizationSettingsInput = {
   timezone?: string;
   currency?: string;
   vatRate?: number;
-  membershipFee?: number;
-  membershipFeeEnabled?: boolean;
-  trialFee?: number;
-  outstandingReminderThreshold?: number;
 };
 
 function rowToDto(row: any): OrganizationSettingsDto {
@@ -54,10 +48,6 @@ function rowToDto(row: any): OrganizationSettingsDto {
     timezone: row.timezone,
     currency: row.currency,
     vatRate: row.vatRate,
-    membershipFee: row.membershipFee,
-    membershipFeeEnabled: row.membershipFeeEnabled,
-    trialFee: row.trialFee,
-    outstandingReminderThreshold: row.outstandingReminderThreshold,
   };
 }
 
@@ -82,16 +72,12 @@ export class OrganizationService {
   /**
    * Update org settings. Partial — only fields present in `input` are
    * touched. Validation:
-   *   - Money fields: must be >= 0 (no negative TVA, no negative
-   *     membership). Stripe does the cent rounding downstream; we
-   *     accept Float here for UX.
-   *   - holidayZone: 'A' | 'B' | 'C' | null (the three French school
-   *     zones; null = not configured / school not in France).
    *   - name: must trim to non-empty.
+   *   - vatRate: must be >= 0 and finite. Stripe handles cent rounding
+   *     downstream; we accept Float here for UX.
    *
-   * Writes one audit entry with before/after snapshots of all the
-   * settings columns (matches how every other mutating service in
-   * the org records changes).
+   * Writes one audit entry with before/after snapshots (matches how
+   * every other mutating service in the org records changes).
    */
   async updateSettings(
     input: OrganizationSettingsInput,
@@ -127,42 +113,19 @@ export class OrganizationService {
     if (input.timezone !== undefined) data.timezone = input.timezone.trim();
     if (input.currency !== undefined) data.currency = input.currency.trim();
 
-    // Money fields — reject negatives. NaN guards too (JSON.parse
-    // would coerce "abc" to NaN; we want a clear 400 not a write).
-    function assertPositive(label: string, v: unknown): number {
-      const n = typeof v === 'number' ? v : Number(v);
+    if (input.vatRate !== undefined) {
+      const n =
+        typeof input.vatRate === 'number'
+          ? input.vatRate
+          : Number(input.vatRate);
       if (!Number.isFinite(n) || n < 0) {
         const err = new Error(
-          `${label} doit être un nombre positif ou nul.`,
+          'Le taux de TVA doit être un nombre positif ou nul.',
         ) as Error & { statusCode?: number };
         err.statusCode = 400;
         throw err;
       }
-      return n;
-    }
-    if (input.vatRate !== undefined) {
-      data.vatRate = assertPositive('Le taux de TVA', input.vatRate);
-    }
-    if (input.membershipFee !== undefined) {
-      data.membershipFee = assertPositive(
-        "Le montant de la cotisation",
-        input.membershipFee,
-      );
-    }
-    if (input.trialFee !== undefined) {
-      data.trialFee = assertPositive(
-        'Le tarif de la session découverte',
-        input.trialFee,
-      );
-    }
-    if (input.outstandingReminderThreshold !== undefined) {
-      data.outstandingReminderThreshold = assertPositive(
-        'Le seuil de relance',
-        input.outstandingReminderThreshold,
-      );
-    }
-    if (input.membershipFeeEnabled !== undefined) {
-      data.membershipFeeEnabled = !!input.membershipFeeEnabled;
+      data.vatRate = n;
     }
 
     const row = await prisma.organization.update({
@@ -170,8 +133,6 @@ export class OrganizationService {
       data,
     });
 
-    // Audit: snapshot only the settings columns (the relation arrays
-    // would balloon the entry).
     void auditLog.record({
       action: 'UPDATE',
       entityType: 'Organization',
@@ -191,9 +152,5 @@ function snapshotOrg(row: any): object {
     timezone: row.timezone,
     currency: row.currency,
     vatRate: row.vatRate,
-    membershipFee: row.membershipFee,
-    membershipFeeEnabled: row.membershipFeeEnabled,
-    trialFee: row.trialFee,
-    outstandingReminderThreshold: row.outstandingReminderThreshold,
   };
 }
