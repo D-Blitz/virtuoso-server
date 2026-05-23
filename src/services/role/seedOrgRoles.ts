@@ -8,17 +8,19 @@ import type { Permission } from '@prisma/client';
  *
  * Phase 0.3.1 — only Propriétaire is isSystem=true (the bootstrap;
  * an org must always have someone with full access). Administrateur
- * and Enseignant are seeded as starter TEMPLATES with isSystem=false:
+ * and Intervenant are seeded as starter TEMPLATES with isSystem=false:
  * admins can rename, retune, or delete them freely. Feedback was that
- * a hardcoded "Enseignant" role doesn't scale across schools with
- * different teacher tiers / titles.
+ * a hardcoded teaching role doesn't scale across schools with different
+ * teacher tiers / titles — these are just starting points.
  *
  * Use sites:
  *   1. The granular_permissions migration's SQL `INSERT … FROM
  *      Organization` (one-time backfill at schema upgrade time —
  *      see prisma/migrations/20260526000000_granular_permissions).
  *      The follow-up demote_template_roles migration flips Admin +
- *      Enseignant rows to isSystem=false for existing orgs.
+ *      Intervenant (then named "Enseignant") rows to isSystem=false
+ *      for existing orgs; rename_enseignant_to_intervenant updates
+ *      the name.
  *
  *   2. Any future organization-creation flow. The migration covers
  *      existing orgs only; the helper covers new orgs going forward.
@@ -86,12 +88,12 @@ const SEEDED_ROLES: SeedRole[] = [
     ],
   },
   {
-    name: 'Enseignant',
+    name: 'Intervenant',
     description:
-      'Modèle de départ — lecture seule sur les clients et les intervenants, gestion des événements des intervenants/salles assignés (configurable par utilisateur). Vous pouvez le cloner et le retoucher pour chaque tier d’intervenant.',
+      'Modèle de départ — lecture seule sur les clients et les intervenants, gestion des événements des intervenants/salles assignés (configurable par utilisateur). Vous pouvez le cloner et le retoucher pour chaque type d’intervenant.',
     color: '#10B981',
     // Starter template — deletable. Schools should clone this for
-    // each teacher tier (Enseignant junior, Enseignant senior,
+    // each intervenant tier (Intervenant junior, Intervenant senior,
     // Responsable de département, etc.).
     isSystem: false,
     permissions: [
@@ -116,7 +118,7 @@ export async function seedOrgRoles(
   organizationId: string,
 ): Promise<SeedResult> {
   // Match by name (not by isSystem) since the demote_template_roles
-  // migration flipped Administrateur + Enseignant to isSystem=false on
+  // migration flipped Administrateur + Intervenant to isSystem=false on
   // existing orgs — they're still present, just no longer locked.
   const existing = await prisma.role.findMany({
     where: { organizationId, name: { in: SEEDED_ROLES.map((r) => r.name) } },
