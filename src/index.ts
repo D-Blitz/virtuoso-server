@@ -46,6 +46,7 @@ import organizationRoutes from './routes/organization.routes';
 import { startSlotHoldSweep } from './jobs/sweepSlotHolds';
 import { startEnrollmentInviteJobs } from './jobs/enrollmentInvites';
 import { startTrashPurgeJob } from './jobs/trashPurge';
+import { startReminderJob } from './jobs/reminders';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -123,6 +124,7 @@ app.use('/api/organizations', organizationRoutes);
 startSlotHoldSweep();
 startEnrollmentInviteJobs();
 startTrashPurgeJob();
+startReminderJob();
 
 app.listen(PORT, () => {
   console.log(`Server running at http://localhost:${PORT}`);

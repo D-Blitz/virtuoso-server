@@ -410,6 +410,16 @@ model ScheduledEvent {
   rescheduleCount   Int       @default(0)
   originalStartTime DateTime?
 
+  // Phase 1.2 — pre-event reminders.
+  // Two stamps so the cron stays idempotent: the worker queries for
+  // events in the [now+47h, now+49h] / [now+23h, now+25h] window
+  // that still have the matching column null, sends, stamps. A
+  // second pass within the same window can't double-send because
+  // the stamp is now set.
+  // "first" = 48h (earlier in time), "second" = 24h (later in time).
+  firstReminderSentAt  DateTime?
+  secondReminderSentAt DateTime?
+
   // Relations
   roomId            String
   locationId        String

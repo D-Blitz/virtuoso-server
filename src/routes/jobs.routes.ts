@@ -23,4 +23,12 @@ router.post(
   (req, res) => controller.resendInvite(req, res),
 );
 
+// Phase 1.2 — manual trigger for the reminder cron. ORG_MANAGE
+// matches `run-invite-cycle` — same "run a platform job" sensitivity.
+router.post(
+  '/run-reminder-cycle',
+  requirePermission('ORG_MANAGE'),
+  (req, res) => controller.runReminderCycle(req, res),
+);
+
 export default router;

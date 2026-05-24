@@ -1,7 +1,9 @@
 import { Request, Response } from 'express';
 import { EnrollmentInviteService } from '../services/enrollmentInvite.service';
+import { ReminderService } from '../services/reminders/reminder.service';
 
 const inviteService = new EnrollmentInviteService();
+const reminderService = new ReminderService();
 
 /**
  * Admin-only endpoints to trigger background jobs on demand (testing /
@@ -37,6 +39,21 @@ export class JobsController {
     } catch (error) {
       console.error('diagnoseInvites error:', error);
       res.status(500).json({ error: 'Failed to diagnose invites' });
+    }
+  }
+
+  /**
+   * Manually trigger the T-24h / T-48h reminder cron cycle. Same
+   * idempotency guarantees as the periodic run — events with a
+   * stamp already set are skipped.
+   */
+  async runReminderCycle(_req: Request, res: Response) {
+    try {
+      const stats = await reminderService.runCycle();
+      res.json(stats);
+    } catch (error) {
+      console.error('runReminderCycle error:', error);
+      res.status(500).json({ error: 'Failed to run reminder cycle' });
     }
   }
 }

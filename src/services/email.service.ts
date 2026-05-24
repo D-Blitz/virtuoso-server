@@ -72,6 +72,24 @@ export type TrialRescheduleEmailParams = {
   locationName: string;
 };
 
+/**
+ * Phase 1.2 — pre-event reminder email.
+ * `hoursBefore` is the cron window (typically 24 or 48). Subject +
+ * lead copy vary based on the window so the email reads naturally
+ * ("dans 2 jours" at 48h, "demain" at 24h). The reschedule link is
+ * only honored for the 48h reminder (24h is past the cutoff anyway).
+ */
+export type TrialReminderEmailParams = {
+  to: string;
+  studentFirstname: string;
+  serviceName: string;
+  facilitatorName: string;
+  trialDateLabel: string;
+  locationName: string;
+  hoursBefore: number;
+  rescheduleUrl?: string;
+};
+
 export type EnrollmentLesson = {
   /** Used as the ICS UID. */
   id: string;
@@ -295,6 +313,107 @@ export class EmailService {
       console.log('Previous:', params.previousDateLabel);
       console.log('New:', params.newDateLabel);
       console.log('-------------------------------------');
+      return;
+    }
+
+    const { error } = await r.emails.send({
+      from: defaultFrom(),
+      to: params.to,
+      subject,
+      html,
+      text,
+    });
+    if (error) {
+      throw new Error(`Resend error: ${error.message || JSON.stringify(error)}`);
+    }
+  }
+
+  /**
+   * Pre-event reminder. One template, two delivery windows (T-24h
+   * and T-48h before startTime). The 48h version includes the
+   * reschedule link; the 24h version omits it because the reschedule
+   * token validity already requires ≥48h notice.
+   *
+   * Dispatched via NotificationDispatcher (not called directly by
+   * the cron) so SMS can drop in later as a second channel without
+   * touching the trigger logic.
+   */
+  async sendTrialReminder(
+    params: TrialReminderEmailParams,
+  ): Promise<void> {
+    const isFar = params.hoursBefore >= 48;
+    const subject = isFar
+      ? `Rappel : votre cours d'essai dans 2 jours (${params.trialDateLabel})`
+      : `Rappel : votre cours d'essai demain (${params.trialDateLabel})`;
+
+    const lead = isFar
+      ? `a lieu dans <strong>2 jours</strong>`
+      : `a lieu <strong>demain</strong>`;
+    const leadText = isFar ? 'a lieu dans 2 jours' : 'a lieu demain';
+
+    const rescheduleBlock =
+      params.rescheduleUrl && isFar
+        ? `
+        <p style="line-height:1.55;color:#333">
+          Un imprévu ? Vous pouvez encore décaler votre cours une fois
+          (avant les 48 h précédant la séance).
+        </p>
+        <p style="margin:32px 0">
+          <a href="${params.rescheduleUrl}"
+             style="background:#111;color:#fff;text-decoration:none;padding:12px 22px;border-radius:8px;font-weight:600;display:inline-block">
+            Modifier mon créneau
+          </a>
+        </p>`
+        : '';
+
+    const rescheduleText =
+      params.rescheduleUrl && isFar
+        ? [
+            ``,
+            `Un imprévu ? Vous pouvez décaler votre cours une fois (avant 48 h) :`,
+            params.rescheduleUrl,
+          ].join('\n')
+        : '';
+
+    const html = `
+      <div style="font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;padding:24px;color:#111">
+        <h1 style="margin:0 0 16px 0;font-size:22px">Bonjour ${escape(params.studentFirstname)},</h1>
+        <p style="line-height:1.55;color:#333">
+          Votre cours d&rsquo;essai
+          <strong>${escape(params.serviceName)}</strong> avec
+          <strong>${escape(params.facilitatorName)}</strong> ${lead}.
+        </p>
+        <div style="padding:16px;background:#f5f5f5;border-radius:8px;margin:16px 0">
+          <div style="font-size:15px;color:#555"><strong>Date :</strong> ${escape(params.trialDateLabel)}</div>
+          <div style="font-size:15px;color:#555;margin-top:6px"><strong>Lieu :</strong> ${escape(params.locationName)}</div>
+        </div>
+        ${rescheduleBlock}
+        <hr style="margin:32px 0;border:none;border-top:1px solid #eee" />
+        <p style="font-size:12px;color:#999">
+          À très vite !
+        </p>
+      </div>
+    `.trim();
+
+    const text = [
+      `Bonjour ${params.studentFirstname},`,
+      ``,
+      `Votre cours d'essai ${params.serviceName} avec ${params.facilitatorName} ${leadText}.`,
+      `Date : ${params.trialDateLabel}`,
+      `Lieu : ${params.locationName}`,
+      rescheduleText,
+      ``,
+      `À très vite !`,
+    ]
+      .filter((line) => line !== '')
+      .join('\n');
+
+    const r = getResend();
+    if (!r) {
+      console.log(`--- [email-stub] trial-reminder-${params.hoursBefore}h ---`);
+      console.log('To:', params.to);
+      console.log('Subject:', subject);
+      console.log('--------------------------------------------------');
       return;
     }
 
