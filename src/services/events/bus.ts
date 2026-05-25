@@ -56,13 +56,13 @@ export type EventRegistry = {
     scheduledEventId: string | null;
   };
 
-  // Event lifecycle (admin-driven)
+  // Event lifecycle (admin-driven). Refunds live on a separate
+  // surface — no refundIssued/refundedAmount here; if a refund
+  // accompanies the cancel, it emits its own `payment.refunded`.
   'event.cancelled': {
     scheduledEventId: string;
     reason: string | null;
     cancelledByUserId: string | null;
-    refundIssued: boolean;
-    refundedAmount: number;
   };
 };
 

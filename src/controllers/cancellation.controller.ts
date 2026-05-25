@@ -1,13 +1,8 @@
 import { Request, Response } from 'express';
-import {
-  CancellationService,
-  type RefundMode,
-} from '../services/cancellation/cancellation.service';
+import { CancellationService } from '../services/cancellation/cancellation.service';
 import { sendError } from './httpErrors';
 
 const service = new CancellationService();
-
-const VALID_MODES: ReadonlySet<RefundMode> = new Set(['NONE', 'FULL', 'PARTIAL']);
 
 export class CancellationController {
   /**
@@ -15,38 +10,17 @@ export class CancellationController {
    *
    * Body:
    *   reason?: string
-   *   refundMode: 'NONE' | 'FULL' | 'PARTIAL'
-   *   refundAmount?: number   // EUR, required when refundMode = 'PARTIAL'
    *
-   * Returns:
-   *   { scheduledEventId, refundIssued, refundedAmount, stripeRefundId }
+   * Refunds live on /admin/payments now (RefundService) — cancellation
+   * doesn't touch payments. If the admin needs to refund the associated
+   * Stripe payment, they do so separately from the payments surface.
    */
   async cancelEvent(req: Request, res: Response) {
     try {
-      const { reason, refundMode, refundAmount } = req.body ?? {};
-
-      if (!VALID_MODES.has(refundMode)) {
-        res.status(400).json({
-          error: 'refundMode doit être NONE, FULL ou PARTIAL.',
-        });
-        return;
-      }
-      if (
-        refundMode === 'PARTIAL' &&
-        (typeof refundAmount !== 'number' || refundAmount <= 0)
-      ) {
-        res.status(400).json({
-          error: 'Le montant du remboursement partiel est requis.',
-        });
-        return;
-      }
-
+      const { reason } = req.body ?? {};
       const result = await service.cancelEvent({
         eventId: req.params.id,
         reason: typeof reason === 'string' ? reason : null,
-        refundMode,
-        refundAmount:
-          typeof refundAmount === 'number' ? refundAmount : undefined,
       });
       res.json(result);
     } catch (err) {

@@ -21,10 +21,15 @@ const emailService = new EmailService();
 
 // ---------- event.cancelled (Phase 1.1) -----------------------------------
 //
-// Sends a cancellation email to each client linked to the event. If a
-// refund was issued, the email mentions the amount + timeline. We don't
-// notify the facilitator here — facilitator notifications land with
-// Phase 4 (notification center) where they get proper preferences.
+// Sends a cancellation notice to each client linked to the event.
+// Doesn't mention refunds — those are a separate workflow on the
+// payments surface, not tied to event cancellation. If the admin
+// also issued a refund, the client gets a separate refund notice
+// driven by `payment.refunded`.
+//
+// Doesn't notify the facilitator here — facilitator notifications
+// land with Phase 4 (notification center) where they get proper
+// per-user preferences.
 bus.on('event.cancelled', async (env) => {
   const ev = await prisma.scheduledEvent.findFirst({
     where: { id: env.payload.scheduledEventId },
@@ -36,7 +41,7 @@ bus.on('event.cancelled', async (env) => {
   });
   if (!ev) return;
   const facilitator = ev.facilitators[0];
-  const trialDateLabel = ev.startTime.toLocaleString('fr-FR', {
+  const dateLabel = ev.startTime.toLocaleString('fr-FR', {
     weekday: 'long',
     day: 'numeric',
     month: 'long',
@@ -49,15 +54,13 @@ bus.on('event.cancelled', async (env) => {
     try {
       await emailService.sendEventCancellation({
         to: client.email,
-        studentFirstname: client.firstname,
+        recipientFirstname: client.firstname,
         serviceName: ev.service?.name ?? '',
         facilitatorName: facilitator
           ? `${facilitator.firstname} ${facilitator.lastname}`
           : '',
-        trialDateLabel,
+        dateLabel,
         reason: env.payload.reason,
-        refundIssued: env.payload.refundIssued,
-        refundedAmount: env.payload.refundedAmount,
       });
     } catch (err) {
       console.error(
@@ -108,7 +111,7 @@ bus.on('payment.failed', async (env) => {
   try {
     await emailService.sendPaymentFailure({
       to: payment.client.email,
-      studentFirstname: payment.client.firstname,
+      recipientFirstname: payment.client.firstname,
       serviceName: payment.relatedScheduledEvent?.service?.name ?? '',
       amount,
       retryUrl,

@@ -72,25 +72,30 @@ export type TrialRescheduleEmailParams = {
   locationName: string;
 };
 
-/** Phase 1.1 — sent when an admin cancels a booking. */
+/**
+ * Phase 1.1 — sent when an admin cancels a booking. Refund info is
+ * intentionally absent — refunds are a separate workflow. A refund
+ * sends its own notice via `payment.refunded`.
+ */
 export type EventCancellationEmailParams = {
   to: string;
-  studentFirstname: string;
+  recipientFirstname: string;
+  /** Service name from the catalog — drives the lead sentence. */
   serviceName: string;
   facilitatorName: string;
-  trialDateLabel: string;
+  /** Pre-formatted FR date label, e.g. "lundi 19 mai à 14:00". */
+  dateLabel: string;
   reason: string | null;
-  refundIssued: boolean;
-  refundedAmount: number;
 };
 
 /** Phase 1.3 — sent on payment_intent.payment_failed. */
 export type PaymentFailureEmailParams = {
   to: string;
-  studentFirstname: string;
+  recipientFirstname: string;
+  /** Service name when available; falls back to a generic phrase. */
   serviceName: string;
   amount: number;
-  /** Retry / contact URL the student can click to fix their payment. */
+  /** Retry / contact URL the recipient can click. */
   retryUrl?: string;
 };
 
@@ -103,10 +108,11 @@ export type PaymentFailureEmailParams = {
  */
 export type TrialReminderEmailParams = {
   to: string;
-  studentFirstname: string;
+  recipientFirstname: string;
+  /** Service name from the catalog — interpolated when available. */
   serviceName: string;
   facilitatorName: string;
-  trialDateLabel: string;
+  dateLabel: string;
   locationName: string;
   hoursBefore: number;
   rescheduleUrl?: string;
@@ -364,20 +370,37 @@ export class EmailService {
     params: TrialReminderEmailParams,
   ): Promise<void> {
     const isFar = params.hoursBefore >= 48;
+    // Vertical-neutral subject. The service name (when present) carries
+    // the org's own naming — "Cours piano", "Séance coaching", "Atelier
+    // yoga" — so the reader sees their own framing.
+    const subjectService = params.serviceName
+      ? ` — ${params.serviceName}`
+      : '';
     const subject = isFar
-      ? `Rappel : votre cours d'essai dans 2 jours (${params.trialDateLabel})`
-      : `Rappel : votre cours d'essai demain (${params.trialDateLabel})`;
+      ? `Rappel : votre réservation dans 2 jours${subjectService} (${params.dateLabel})`
+      : `Rappel : votre réservation demain${subjectService} (${params.dateLabel})`;
 
     const lead = isFar
       ? `a lieu dans <strong>2 jours</strong>`
       : `a lieu <strong>demain</strong>`;
     const leadText = isFar ? 'a lieu dans 2 jours' : 'a lieu demain';
 
+    const serviceLabel = params.serviceName
+      ? `<strong>${escape(params.serviceName)}</strong>`
+      : 'votre réservation';
+    const serviceLabelText = params.serviceName || 'votre réservation';
+    const facilitatorLabel = params.facilitatorName
+      ? ` avec <strong>${escape(params.facilitatorName)}</strong>`
+      : '';
+    const facilitatorLabelText = params.facilitatorName
+      ? ` avec ${params.facilitatorName}`
+      : '';
+
     const rescheduleBlock =
       params.rescheduleUrl && isFar
         ? `
         <p style="line-height:1.55;color:#333">
-          Un imprévu ? Vous pouvez encore décaler votre cours une fois
+          Un imprévu ? Vous pouvez encore décaler votre créneau une fois
           (avant les 48 h précédant la séance).
         </p>
         <p style="margin:32px 0">
@@ -392,21 +415,19 @@ export class EmailService {
       params.rescheduleUrl && isFar
         ? [
             ``,
-            `Un imprévu ? Vous pouvez décaler votre cours une fois (avant 48 h) :`,
+            `Un imprévu ? Vous pouvez décaler votre créneau une fois (avant 48 h) :`,
             params.rescheduleUrl,
           ].join('\n')
         : '';
 
     const html = `
       <div style="font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;padding:24px;color:#111">
-        <h1 style="margin:0 0 16px 0;font-size:22px">Bonjour ${escape(params.studentFirstname)},</h1>
+        <h1 style="margin:0 0 16px 0;font-size:22px">Bonjour ${escape(params.recipientFirstname)},</h1>
         <p style="line-height:1.55;color:#333">
-          Votre cours d&rsquo;essai
-          <strong>${escape(params.serviceName)}</strong> avec
-          <strong>${escape(params.facilitatorName)}</strong> ${lead}.
+          ${serviceLabel}${facilitatorLabel} ${lead}.
         </p>
         <div style="padding:16px;background:#f5f5f5;border-radius:8px;margin:16px 0">
-          <div style="font-size:15px;color:#555"><strong>Date :</strong> ${escape(params.trialDateLabel)}</div>
+          <div style="font-size:15px;color:#555"><strong>Date :</strong> ${escape(params.dateLabel)}</div>
           <div style="font-size:15px;color:#555;margin-top:6px"><strong>Lieu :</strong> ${escape(params.locationName)}</div>
         </div>
         ${rescheduleBlock}
@@ -418,10 +439,10 @@ export class EmailService {
     `.trim();
 
     const text = [
-      `Bonjour ${params.studentFirstname},`,
+      `Bonjour ${params.recipientFirstname},`,
       ``,
-      `Votre cours d'essai ${params.serviceName} avec ${params.facilitatorName} ${leadText}.`,
-      `Date : ${params.trialDateLabel}`,
+      `${serviceLabelText}${facilitatorLabelText} ${leadText}.`,
+      `Date : ${params.dateLabel}`,
       `Lieu : ${params.locationName}`,
       rescheduleText,
       ``,
@@ -452,22 +473,26 @@ export class EmailService {
   }
 
   /**
-   * Phase 1.1 — student-facing notice that their booking was cancelled
-   * by the school. Tells them whether a refund was issued (and how
-   * much) so they don't have to ask.
+   * Phase 1.1 — recipient-facing notice that their reservation was
+   * cancelled. Vertical-neutral copy: "réservation" rather than
+   * "cours". The service name is interpolated when present so the
+   * email reads naturally for any org ("votre [Cours d'essai piano /
+   * Séance de coaching / Atelier yoga]").
    */
   async sendEventCancellation(
     params: EventCancellationEmailParams,
   ): Promise<void> {
-    const subject = `Votre cours du ${params.trialDateLabel} a été annulé`;
+    const subject = `Votre réservation du ${params.dateLabel} a été annulée`;
 
-    const refundLine = params.refundIssued
-      ? `<p style="line-height:1.55;color:#333">
-           Un remboursement de
-           <strong>${params.refundedAmount.toFixed(2)} €</strong>
-           a été lancé. Il devrait apparaître sur votre compte sous
-           quelques jours ouvrés.
-         </p>`
+    const serviceLabel = params.serviceName
+      ? `<strong>${escape(params.serviceName)}</strong>`
+      : 'votre réservation';
+    const serviceLabelText = params.serviceName || 'votre réservation';
+    const facilitatorLabel = params.facilitatorName
+      ? ` avec <strong>${escape(params.facilitatorName)}</strong>`
+      : '';
+    const facilitatorLabelText = params.facilitatorName
+      ? ` avec ${params.facilitatorName}`
       : '';
 
     const reasonBlock = params.reason
@@ -478,14 +503,12 @@ export class EmailService {
 
     const html = `
       <div style="font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;padding:24px;color:#111">
-        <h1 style="margin:0 0 16px 0;font-size:22px">Bonjour ${escape(params.studentFirstname)},</h1>
+        <h1 style="margin:0 0 16px 0;font-size:22px">Bonjour ${escape(params.recipientFirstname)},</h1>
         <p style="line-height:1.55;color:#333">
-          Votre cours <strong>${escape(params.serviceName)}</strong> avec
-          <strong>${escape(params.facilitatorName)}</strong>, prévu le
-          <strong>${escape(params.trialDateLabel)}</strong>, a été annulé.
+          ${serviceLabel}${facilitatorLabel}, prévu le
+          <strong>${escape(params.dateLabel)}</strong>, a été annulé.
         </p>
         ${reasonBlock}
-        ${refundLine}
         <p style="line-height:1.55;color:#333">
           Pour toute question, n&rsquo;hésitez pas à nous contacter.
         </p>
@@ -494,17 +517,13 @@ export class EmailService {
       </div>
     `.trim();
 
-    const refundText = params.refundIssued
-      ? `\nUn remboursement de ${params.refundedAmount.toFixed(2)} € a été lancé.\n`
-      : '';
     const reasonText = params.reason ? `\nRaison : ${params.reason}\n` : '';
 
     const text = [
-      `Bonjour ${params.studentFirstname},`,
+      `Bonjour ${params.recipientFirstname},`,
       ``,
-      `Votre cours ${params.serviceName} avec ${params.facilitatorName}, prévu le ${params.trialDateLabel}, a été annulé.`,
+      `${serviceLabelText}${facilitatorLabelText}, prévu le ${params.dateLabel}, a été annulé.`,
       reasonText,
-      refundText,
       `Pour toute question, contactez-nous.`,
     ]
       .filter((line) => line !== '')
@@ -515,7 +534,6 @@ export class EmailService {
       console.log('--- [email-stub] event-cancellation ---');
       console.log('To:', params.to);
       console.log('Subject:', subject);
-      console.log('Refund issued:', params.refundIssued, params.refundedAmount);
       console.log('---------------------------------------');
       return;
     }
@@ -533,13 +551,19 @@ export class EmailService {
   }
 
   /**
-   * Phase 1.3 — sent on `payment.failed`. Friendly "réessayez" email;
-   * doesn't expire the booking. Retry URL is optional.
+   * Phase 1.3 — sent on `payment.failed`. Friendly "réessayez"
+   * notice; doesn't expire the booking. Retry URL is optional.
+   * Vertical-neutral copy.
    */
   async sendPaymentFailure(
     params: PaymentFailureEmailParams,
   ): Promise<void> {
-    const subject = `Le paiement de votre inscription n'a pas abouti`;
+    const subject = `Le paiement de votre réservation n'a pas abouti`;
+
+    const serviceLabel = params.serviceName
+      ? `<strong>${escape(params.serviceName)}</strong>`
+      : 'votre réservation';
+    const serviceLabelText = params.serviceName || 'votre réservation';
 
     const retryBlock = params.retryUrl
       ? `<p style="margin:32px 0">
@@ -555,10 +579,9 @@ export class EmailService {
 
     const html = `
       <div style="font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;padding:24px;color:#111">
-        <h1 style="margin:0 0 16px 0;font-size:22px">Bonjour ${escape(params.studentFirstname)},</h1>
+        <h1 style="margin:0 0 16px 0;font-size:22px">Bonjour ${escape(params.recipientFirstname)},</h1>
         <p style="line-height:1.55;color:#333">
-          Votre paiement pour
-          <strong>${escape(params.serviceName)}</strong>
+          Votre paiement pour ${serviceLabel}
           (${params.amount.toFixed(2)} €) n&rsquo;a pas pu être finalisé.
         </p>
         <p style="line-height:1.55;color:#333">
@@ -578,9 +601,9 @@ export class EmailService {
     `.trim();
 
     const text = [
-      `Bonjour ${params.studentFirstname},`,
+      `Bonjour ${params.recipientFirstname},`,
       ``,
-      `Votre paiement pour ${params.serviceName} (${params.amount.toFixed(2)} €) n'a pas pu être finalisé.`,
+      `Votre paiement pour ${serviceLabelText} (${params.amount.toFixed(2)} €) n'a pas pu être finalisé.`,
       ``,
       `Causes fréquentes : carte refusée, plafond atteint, ou souci ponctuel avec votre banque.`,
       `Votre réservation n'est pas perdue, vous pouvez réessayer.`,

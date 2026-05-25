@@ -34,10 +34,10 @@ export type Recipient = {
 };
 
 export type TrialReminderVars = {
-  studentFirstname: string;
+  recipientFirstname: string;
   serviceName: string;
   facilitatorName: string;
-  trialDateLabel: string;
+  dateLabel: string;
   locationName: string;
   /** Reschedule link only included in the 48h reminder (past cutoff at 24h). */
   rescheduleUrl?: string;

@@ -124,6 +124,7 @@ enum Permission {
   EVENT_VIEW
   EVENT_MANAGE_ALL // any event in the org
   EVENT_MANAGE_SCOPED // only events on facilitators listed in UserPermissionScope
+  EVENT_CANCEL // separate from MANAGE — destructive ops decision, narrower default
   SERIES_MANAGE
   ENROLLMENT_MANAGE
 

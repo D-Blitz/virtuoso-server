@@ -104,7 +104,7 @@ export class ReminderService {
       }
 
       const facilitator = event.facilitators[0];
-      const trialDateLabel = formatTrialDateLabel(event.startTime);
+      const dateLabel = formatDateLabel(event.startTime);
 
       const rescheduleUrl =
         kind === 'first-48h'
@@ -121,12 +121,12 @@ export class ReminderService {
                   ? 'trial-reminder-48h'
                   : 'trial-reminder-24h',
               vars: {
-                studentFirstname: client.firstname,
+                recipientFirstname: client.firstname,
                 serviceName: event.service?.name ?? '',
                 facilitatorName: facilitator
                   ? `${facilitator.firstname} ${facilitator.lastname}`
                   : '',
-                trialDateLabel,
+                dateLabel,
                 locationName: event.location?.name ?? '',
                 rescheduleUrl,
               },
@@ -194,7 +194,7 @@ export class ReminderService {
   }
 }
 
-function formatTrialDateLabel(d: Date): string {
+function formatDateLabel(d: Date): string {
   return d.toLocaleString('fr-FR', {
     weekday: 'long',
     day: 'numeric',
