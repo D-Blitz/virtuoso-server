@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { ScheduledEventController } from '../controllers/scheduledEvent.controller';
+import { CancellationController } from '../controllers/cancellation.controller';
 import {
   requirePermission,
   requireEventManage,
@@ -7,6 +8,7 @@ import {
 
 const router = Router();
 const controller = new ScheduledEventController();
+const cancelController = new CancellationController();
 
 // Reads: EVENT_VIEW. Writes: gated by requireEventManage which prefers
 // EVENT_MANAGE_ALL but falls back to EVENT_MANAGE_SCOPED + a
@@ -25,6 +27,14 @@ router.put('/:id', requireEventManage(), (req, res) =>
 );
 router.delete('/:id', requireEventManage(), (req, res) =>
   controller.remove(req, res),
+);
+
+// Phase 1.1 — admin-initiated cancellation. Same EVENT_MANAGE gate
+// as PUT/DELETE; refund branch additionally checks REFUND_ISSUE in
+// the service (per-action permission rather than per-route since
+// the same endpoint serves both cancel-only and cancel-with-refund).
+router.post('/:id/cancel', requireEventManage(), (req, res) =>
+  cancelController.cancelEvent(req, res),
 );
 
 export default router;

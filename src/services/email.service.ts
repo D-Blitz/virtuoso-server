@@ -72,6 +72,28 @@ export type TrialRescheduleEmailParams = {
   locationName: string;
 };
 
+/** Phase 1.1 — sent when an admin cancels a booking. */
+export type EventCancellationEmailParams = {
+  to: string;
+  studentFirstname: string;
+  serviceName: string;
+  facilitatorName: string;
+  trialDateLabel: string;
+  reason: string | null;
+  refundIssued: boolean;
+  refundedAmount: number;
+};
+
+/** Phase 1.3 — sent on payment_intent.payment_failed. */
+export type PaymentFailureEmailParams = {
+  to: string;
+  studentFirstname: string;
+  serviceName: string;
+  amount: number;
+  /** Retry / contact URL the student can click to fix their payment. */
+  retryUrl?: string;
+};
+
 /**
  * Phase 1.2 — pre-event reminder email.
  * `hoursBefore` is the cron window (typically 24 or 48). Subject +
@@ -414,6 +436,166 @@ export class EmailService {
       console.log('To:', params.to);
       console.log('Subject:', subject);
       console.log('--------------------------------------------------');
+      return;
+    }
+
+    const { error } = await r.emails.send({
+      from: defaultFrom(),
+      to: params.to,
+      subject,
+      html,
+      text,
+    });
+    if (error) {
+      throw new Error(`Resend error: ${error.message || JSON.stringify(error)}`);
+    }
+  }
+
+  /**
+   * Phase 1.1 — student-facing notice that their booking was cancelled
+   * by the school. Tells them whether a refund was issued (and how
+   * much) so they don't have to ask.
+   */
+  async sendEventCancellation(
+    params: EventCancellationEmailParams,
+  ): Promise<void> {
+    const subject = `Votre cours du ${params.trialDateLabel} a été annulé`;
+
+    const refundLine = params.refundIssued
+      ? `<p style="line-height:1.55;color:#333">
+           Un remboursement de
+           <strong>${params.refundedAmount.toFixed(2)} €</strong>
+           a été lancé. Il devrait apparaître sur votre compte sous
+           quelques jours ouvrés.
+         </p>`
+      : '';
+
+    const reasonBlock = params.reason
+      ? `<div style="padding:16px;background:#f5f5f5;border-radius:8px;margin:16px 0;font-size:14px;color:#555">
+           <strong>Raison communiquée :</strong> ${escape(params.reason)}
+         </div>`
+      : '';
+
+    const html = `
+      <div style="font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;padding:24px;color:#111">
+        <h1 style="margin:0 0 16px 0;font-size:22px">Bonjour ${escape(params.studentFirstname)},</h1>
+        <p style="line-height:1.55;color:#333">
+          Votre cours <strong>${escape(params.serviceName)}</strong> avec
+          <strong>${escape(params.facilitatorName)}</strong>, prévu le
+          <strong>${escape(params.trialDateLabel)}</strong>, a été annulé.
+        </p>
+        ${reasonBlock}
+        ${refundLine}
+        <p style="line-height:1.55;color:#333">
+          Pour toute question, n&rsquo;hésitez pas à nous contacter.
+        </p>
+        <hr style="margin:32px 0;border:none;border-top:1px solid #eee" />
+        <p style="font-size:12px;color:#999">Désolés pour le dérangement.</p>
+      </div>
+    `.trim();
+
+    const refundText = params.refundIssued
+      ? `\nUn remboursement de ${params.refundedAmount.toFixed(2)} € a été lancé.\n`
+      : '';
+    const reasonText = params.reason ? `\nRaison : ${params.reason}\n` : '';
+
+    const text = [
+      `Bonjour ${params.studentFirstname},`,
+      ``,
+      `Votre cours ${params.serviceName} avec ${params.facilitatorName}, prévu le ${params.trialDateLabel}, a été annulé.`,
+      reasonText,
+      refundText,
+      `Pour toute question, contactez-nous.`,
+    ]
+      .filter((line) => line !== '')
+      .join('\n');
+
+    const r = getResend();
+    if (!r) {
+      console.log('--- [email-stub] event-cancellation ---');
+      console.log('To:', params.to);
+      console.log('Subject:', subject);
+      console.log('Refund issued:', params.refundIssued, params.refundedAmount);
+      console.log('---------------------------------------');
+      return;
+    }
+
+    const { error } = await r.emails.send({
+      from: defaultFrom(),
+      to: params.to,
+      subject,
+      html,
+      text,
+    });
+    if (error) {
+      throw new Error(`Resend error: ${error.message || JSON.stringify(error)}`);
+    }
+  }
+
+  /**
+   * Phase 1.3 — sent on `payment.failed`. Friendly "réessayez" email;
+   * doesn't expire the booking. Retry URL is optional.
+   */
+  async sendPaymentFailure(
+    params: PaymentFailureEmailParams,
+  ): Promise<void> {
+    const subject = `Le paiement de votre inscription n'a pas abouti`;
+
+    const retryBlock = params.retryUrl
+      ? `<p style="margin:32px 0">
+           <a href="${params.retryUrl}"
+              style="background:#111;color:#fff;text-decoration:none;padding:12px 22px;border-radius:8px;font-weight:600;display:inline-block">
+             Réessayer le paiement
+           </a>
+         </p>`
+      : '';
+    const retryText = params.retryUrl
+      ? `\nLien pour réessayer : ${params.retryUrl}\n`
+      : '';
+
+    const html = `
+      <div style="font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;padding:24px;color:#111">
+        <h1 style="margin:0 0 16px 0;font-size:22px">Bonjour ${escape(params.studentFirstname)},</h1>
+        <p style="line-height:1.55;color:#333">
+          Votre paiement pour
+          <strong>${escape(params.serviceName)}</strong>
+          (${params.amount.toFixed(2)} €) n&rsquo;a pas pu être finalisé.
+        </p>
+        <p style="line-height:1.55;color:#333">
+          Causes les plus fréquentes : carte bancaire refusée, plafond
+          atteint, ou problème ponctuel avec votre banque. Votre
+          réservation n&rsquo;est pas perdue, vous pouvez réessayer
+          immédiatement.
+        </p>
+        ${retryBlock}
+        <p style="line-height:1.55;color:#333">
+          Si le problème persiste, contactez-nous, nous trouverons une
+          solution ensemble.
+        </p>
+        <hr style="margin:32px 0;border:none;border-top:1px solid #eee" />
+        <p style="font-size:12px;color:#999">À très vite !</p>
+      </div>
+    `.trim();
+
+    const text = [
+      `Bonjour ${params.studentFirstname},`,
+      ``,
+      `Votre paiement pour ${params.serviceName} (${params.amount.toFixed(2)} €) n'a pas pu être finalisé.`,
+      ``,
+      `Causes fréquentes : carte refusée, plafond atteint, ou souci ponctuel avec votre banque.`,
+      `Votre réservation n'est pas perdue, vous pouvez réessayer.`,
+      retryText,
+      `Si le problème persiste, contactez-nous.`,
+    ]
+      .filter((line) => line !== '')
+      .join('\n');
+
+    const r = getResend();
+    if (!r) {
+      console.log('--- [email-stub] payment-failure ---');
+      console.log('To:', params.to);
+      console.log('Subject:', subject);
+      console.log('-----------------------------------');
       return;
     }
 

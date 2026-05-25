@@ -420,6 +420,14 @@ model ScheduledEvent {
   firstReminderSentAt  DateTime?
   secondReminderSentAt DateTime?
 
+  // Phase 1.1 — cancellation metadata. status='CANCELED' already
+  // exists; these columns capture the WHY + WHEN. canceledById is
+  // recoverable from the audit log too, but storing inline saves a
+  // join on the event-detail cancellation banner.
+  canceledAt          DateTime?
+  cancellationReason  String?
+  canceledById        String?
+
   // Relations
   roomId            String
   locationId        String

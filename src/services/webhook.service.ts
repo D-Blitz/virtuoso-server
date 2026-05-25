@@ -5,6 +5,7 @@ import { EmailService } from './email.service';
 import { generateOpaqueToken } from '../auth/tokens';
 import { auditLog } from './audit/audit.service';
 import { snapshotScheduledEvent } from './audit/snapshots';
+import * as bus from './events/bus';
 
 /** System actor for webhook-driven mutations. See AUDIT_LOG_DESIGN.md. */
 function webhookActor(eventType: string) {
@@ -358,6 +359,27 @@ export class WebhookService {
         data: { status: 'CONFIRMED' },
       });
     }
+
+    // Phase 2.0a — emit lifecycle event AFTER all transactional
+    // writes succeed. Subscribers (future engine, additional handlers)
+    // are fire-and-forget; nothing they do can affect the webhook
+    // response or roll back the DB changes above.
+    const orgId = await resolveOrgIdForPayment(paymentId);
+    bus.emit(
+      'payment.succeeded',
+      {
+        paymentId,
+        scheduledEventId: scheduledEventId ?? null,
+        submissionId: submissionId ?? null,
+        enrollmentInviteId: enrollmentInviteId ?? null,
+        purpose: purpose ?? null,
+        amount: typeof pi?.amount === 'number' ? pi.amount / 100 : 0,
+      },
+      {
+        actor: { userId: null, email: 'system:stripe-webhook', source: 'webhook' },
+        organizationId: orgId,
+      },
+    );
   }
 
   private async handlePaymentFailedOrCanceled(pi: any): Promise<void> {
@@ -405,6 +427,29 @@ export class WebhookService {
         data: { status: 'REJECTED' },
       });
     }
+
+    // Phase 2.0a — emit `payment.failed` so subscribers (recovery
+    // email, future engine triggers) can react. ENROLLMENT_BALANCE
+    // doesn't touch the ScheduledEvent path above but still emits;
+    // a "retry your enrollment payment" email is still relevant.
+    if (paymentId) {
+      const orgId = await resolveOrgIdForPayment(paymentId);
+      bus.emit(
+        'payment.failed',
+        {
+          paymentId,
+          scheduledEventId: scheduledEventId ?? null,
+          submissionId: submissionId ?? null,
+          enrollmentInviteId: undefined as any, // not extracted in this branch
+          purpose: purpose ?? null,
+          amount: typeof pi?.amount === 'number' ? pi.amount / 100 : 0,
+        },
+        {
+          actor: { userId: null, email: 'system:stripe-webhook', source: 'webhook' },
+          organizationId: orgId,
+        },
+      );
+    }
   }
 
   private async handleRefund(charge: any): Promise<void> {
@@ -414,9 +459,55 @@ export class WebhookService {
         : charge?.payment_intent?.id;
     if (!paymentIntentId) return;
 
+    const refunded = await prisma.payment.findFirst({
+      where: { stripePaymentIntentId: paymentIntentId },
+      select: {
+        id: true,
+        organizationId: true,
+        relatedScheduledEventId: true,
+      },
+    });
+
     await prisma.payment.updateMany({
       where: { stripePaymentIntentId: paymentIntentId },
       data: { status: 'REFUNDED' },
     });
+
+    // Phase 2.0a — emit so future engine triggers can react. Amount
+    // is in Stripe cents on the charge object; convert to EUR (or
+    // whatever the org currency is — Stripe handles the unit).
+    if (refunded) {
+      const refundedAmount =
+        typeof charge?.amount_refunded === 'number'
+          ? charge.amount_refunded / 100
+          : 0;
+      bus.emit(
+        'payment.refunded',
+        {
+          paymentId: refunded.id,
+          refundedAmount,
+          scheduledEventId: refunded.relatedScheduledEventId ?? null,
+        },
+        {
+          actor: { userId: null, email: 'system:stripe-webhook', source: 'webhook' },
+          organizationId: refunded.organizationId,
+        },
+      );
+    }
   }
+}
+
+/**
+ * Resolves the org id for a Payment by its app id. Used by the
+ * webhook to set `organizationId` on emitted events — the webhook
+ * runs with no RequestContext, so the bus can't derive it itself.
+ */
+async function resolveOrgIdForPayment(
+  paymentId: string,
+): Promise<string | null> {
+  const row = await prisma.payment.findFirst({
+    where: { id: paymentId },
+    select: { organizationId: true },
+  });
+  return row?.organizationId ?? null;
 }

@@ -48,6 +48,11 @@ import { startEnrollmentInviteJobs } from './jobs/enrollmentInvites';
 import { startTrashPurgeJob } from './jobs/trashPurge';
 import { startReminderJob } from './jobs/reminders';
 
+// Phase 2.0a — wire default bus subscribers on boot. Importing the
+// module is enough; subscribers register at top-level.
+import { registerSubscribers } from './services/events/subscribers';
+registerSubscribers();
+
 const app = express();
 const PORT = process.env.PORT || 3001;
 

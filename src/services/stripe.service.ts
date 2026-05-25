@@ -101,6 +101,38 @@ export class StripeService {
   }
 
   /**
+   * Issue a refund against a previous PaymentIntent. Amount in cents;
+   * omit for a full refund. Stripe handles partial-refund-of-partial,
+   * already-refunded detection, etc. natively.
+   *
+   * Throws on Stripe errors; the caller decides whether to surface as
+   * 400 (idempotent re-try, already-refunded) or 500 (unknown).
+   *
+   * The webhook will eventually fire `charge.refunded` → our
+   * handleRefund() updates Payment.status and emits the
+   * `payment.refunded` bus event. This method returns once the
+   * Stripe API confirms the refund was queued.
+   */
+  async refundPaymentIntent(args: {
+    paymentIntentId: string;
+    amountCents?: number;
+    reason?: 'duplicate' | 'fraudulent' | 'requested_by_customer';
+  }): Promise<{ id: string; status: string; amountRefundedCents: number }> {
+    const stripe = getStripe();
+    const refund = await stripe.refunds.create({
+      payment_intent: args.paymentIntentId,
+      amount: args.amountCents,
+      reason: args.reason ?? 'requested_by_customer',
+    });
+    return {
+      id: refund.id,
+      status: refund.status ?? 'unknown',
+      amountRefundedCents:
+        typeof refund.amount === 'number' ? refund.amount : 0,
+    };
+  }
+
+  /**
    * Verify the webhook signature and parse the event. Throws if invalid.
    * `rawBody` MUST be the unparsed request body (Buffer).
    */
