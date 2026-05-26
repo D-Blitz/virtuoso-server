@@ -243,6 +243,12 @@ export async function publishFlow(organizationId: string, flowId: string) {
       },
     });
 
+    // The draft has been consumed by this publish — delete it so the
+    // editor's "has unpublished changes" comparison can never go stale
+    // against a leftover draft that's actually identical to the live
+    // state. Next edit creates a fresh draft via the autosave PATCH.
+    await tx.widgetFlowDraft.delete({ where: { flowId } });
+
     return updated;
   });
 }
