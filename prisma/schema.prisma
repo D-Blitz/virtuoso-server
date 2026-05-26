@@ -923,6 +923,8 @@ model WidgetFlow {
   runs      WidgetRun[]
   draft     WidgetFlowDraft?
   snapshots WidgetFlowSnapshot[]
+  // Phase 2.2 — post-completion actions.
+  actions   WidgetAction[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1154,4 +1156,52 @@ model EngineActionEvent {
 
   @@index([organizationId, executedAt])
   @@index([organizationId, actionKind, executedAt])
+}
+
+// ─── Actions (Phase 2.2) ──────────────────────────────────────────
+//
+// Post-completion hooks fired after a BOOKING run reaches COMPLETED,
+// or as the body of an EVENT_REACTION flow triggered by an event.
+//
+// Self-referential tree via parentId so CONDITIONAL actions can wrap
+// child branches. Top-level (parentId = null) actions execute in
+// `order`. A CONDITIONAL evaluates its expression and dispatches to
+// its children based on the result (true → run children; false →
+// skip — for v1 we don't have an explicit else branch, the admin
+// can chain a second CONDITIONAL with the inverse expression).
+//
+// `kind` stays a String column (not an enum) so adding new action
+// kinds is a data migration, not a schema migration — the engine's
+// action registry is the authoritative whitelist.
+
+model WidgetAction {
+  id     String     @id @default(cuid())
+  flowId String
+  flow   WidgetFlow @relation(fields: [flowId], references: [id], onDelete: Cascade)
+
+  // null for top-level; references the parent CONDITIONAL action for
+  // child branches. Cascade-delete means removing a CONDITIONAL also
+  // removes its entire subtree (intended — the admin can drag children
+  // out before deleting the parent if they want to preserve them).
+  parentId String?
+  parent   WidgetAction?  @relation("ActionTree", fields: [parentId], references: [id], onDelete: Cascade)
+  children WidgetAction[] @relation("ActionTree")
+
+  order Int
+
+  // String not enum: see model header. v1 supported kinds (enforced
+  // by the engine's action registry, not the DB):
+  //   SEND_EMAIL   — sends a templated email (config: { to, subject,
+  //                  bodyHtml, bodyText? })
+  //   CONDITIONAL  — gates children (config: { condition: JSONLogic })
+  //   WAIT         — no-op stub for v1; future async delay (config:
+  //                  { ms } or { until: JSONLogic-date })
+  kind String
+
+  // Kind-specific shape. See services/engine/actionHandlers/* for the
+  // discriminated union and per-kind validators.
+  config Json @default("{}")
+
+  @@index([flowId, parentId])
+  @@index([flowId, order])
 }

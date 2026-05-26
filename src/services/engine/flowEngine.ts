@@ -28,6 +28,7 @@
 // `result.errors` so the client can re-render the form.
 
 import prisma from '../../prisma';
+import { fireFlowCompletionActions } from './actionExecutor';
 import { isStepVisible, type EvaluationContext } from './expressionEvaluator';
 import { recordEngineAction } from './metering';
 import { getStepHandler } from './stepHandlers';
@@ -387,6 +388,21 @@ export async function submitStep(params: {
       status: 'OK',
       durationMs: Date.now() - t0,
     });
+
+    // Phase 2.2: fire post-completion actions when the run lands in
+    // COMPLETED. Awaited so we DON'T return the response to the
+    // visitor until the actions have run (or failed) — gives the UI
+    // a chance to know if a critical action errored. If we ever need
+    // fire-and-forget semantics for slow actions, the WAIT handler
+    // (or a future ENQUEUE kind) is the right escape hatch.
+    if (completing) {
+      await fireFlowCompletionActions({
+        organizationId: run.organizationId,
+        flowId: run.flowId,
+        runId: run.id,
+        vars: newVars,
+      });
+    }
 
     return { run: updatedRun, nextStep, errors: [], replayed: false };
   } catch (err) {

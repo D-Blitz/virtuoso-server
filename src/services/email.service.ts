@@ -153,7 +153,69 @@ export type TeacherNewStudentEmailParams = {
   termName: string;
 };
 
+/**
+ * Phase 2.2 — generic email primitive used by the engine's SEND_EMAIL
+ * action. Distinct from the hardcoded template methods on EmailService
+ * because the engine composes subject + body at runtime from an admin-
+ * authored template + interpolated vars; there's no fixed shape to
+ * model with typed params.
+ */
+export type CustomEmailParams = {
+  to: string;
+  subject: string;
+  bodyHtml: string;
+  /** Optional plaintext fallback; auto-derived from html if omitted. */
+  bodyText?: string;
+};
+
 export class EmailService {
+  /**
+   * Send an arbitrary email — no template, no schema validation, no
+   * branding. Used by the engine's SEND_EMAIL action where the admin
+   * writes the subject + body inline and the engine interpolates
+   * `{vars.X}` placeholders at fire time.
+   *
+   * Falls through to console logging when RESEND_API_KEY is unset
+   * (same dev convenience as the typed template methods).
+   */
+  async sendCustomEmail(params: CustomEmailParams): Promise<void> {
+    const bodyText =
+      params.bodyText ??
+      // Crude html→text fallback: strip tags, collapse whitespace.
+      // Good enough for engine v1; admins who care about plaintext
+      // delivery should provide their own bodyText.
+      params.bodyHtml
+        .replace(/<style[\s\S]*?<\/style>/gi, '')
+        .replace(/<[^>]+>/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+    const r = getResend();
+    if (!r) {
+      console.log('--- [email-stub] engine SEND_EMAIL ---');
+      console.log('To:     ', params.to);
+      console.log('Subject:', params.subject);
+      console.log('Body:   ', bodyText.slice(0, 280) + (bodyText.length > 280 ? '…' : ''));
+      console.log('---------------------------------------');
+      return;
+    }
+
+    const bcc = adminBcc();
+    const { error } = await r.emails.send({
+      from: defaultFrom(),
+      to: params.to,
+      ...(bcc ? { bcc: [bcc] } : {}),
+      subject: params.subject,
+      html: params.bodyHtml,
+      text: bodyText,
+    });
+    if (error) {
+      throw new Error(
+        `Resend error: ${error.message || JSON.stringify(error)}`,
+      );
+    }
+  }
+
   async sendEnrollmentInvite(params: EnrollmentInviteEmailParams): Promise<void> {
     const subject = `Votre cours du ${params.trialDateLabel} — Inscription au trimestre`;
     const html = `

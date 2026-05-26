@@ -674,8 +674,209 @@ async function main() {
       await http('DELETE', `/api/widget-flows/${condFlowId}`);
     }
 
-    // ── Phase 14: clean up imported flow ──────────────────────
-    console.log('\n14. DELETE imported flow');
+    // ── Phase 14: Phase 2.2 — post-completion actions ─────────
+    // Build a flow with a SEND_EMAIL action gated by a CONDITIONAL.
+    // Walk it to completion, then inspect EngineActionEvent rows to
+    // verify both actions fired (or were correctly skipped).
+    console.log('\n14. Post-completion actions (Phase 2.2)');
+    {
+      // Create a minimal 2-step flow: collect an email, confirm.
+      const actionFlowBody = {
+        name: '[http-smoke] action flow',
+        kind: 'BOOKING' as const,
+      };
+      const create = await http('POST', '/api/widget-flows', actionFlowBody);
+      const actionFlowId = create.json.flow.id;
+
+      const actionPayload = {
+        name: '[http-smoke] action flow',
+        description: null,
+        kind: 'BOOKING' as const,
+        steps: [
+          {
+            order: 0,
+            kind: 'FORM' as const,
+            label: 'Coordonnées',
+            description: null,
+            config: {},
+            visibleWhen: null,
+            fields: [
+              {
+                order: 0,
+                kind: 'EMAIL' as const,
+                label: 'Email',
+                placeholder: null,
+                required: true,
+                binding: 'VAR' as const,
+                bindingTarget: 'email',
+                config: {},
+              },
+              {
+                order: 1,
+                kind: 'BOOLEAN' as const,
+                label: 'Recevoir un email de confirmation',
+                placeholder: null,
+                required: false,
+                binding: 'VAR' as const,
+                bindingTarget: 'wantsEmail',
+                config: {},
+              },
+            ],
+          },
+          {
+            order: 1,
+            kind: 'RECAP' as const,
+            label: 'Done',
+            description: null,
+            config: {},
+            visibleWhen: null,
+            fields: [],
+          },
+        ],
+      };
+
+      await http('PATCH', `/api/widget-flows/${actionFlowId}/draft`, actionPayload);
+      const pub = await http('POST', `/api/widget-flows/${actionFlowId}/publish`);
+      const actionKey = pub.json.flow.publishableKey;
+
+      // Insert actions directly via the DB (no admin route yet — that's
+      // Phase 2.2 Commit 3). Real flow: admin builds these in the UI.
+      const conditional = await prisma.widgetAction.create({
+        data: {
+          flowId: actionFlowId,
+          order: 0,
+          kind: 'CONDITIONAL',
+          config: { condition: { '==': [{ var: 'vars.wantsEmail' }, true] } },
+        },
+      });
+      await prisma.widgetAction.create({
+        data: {
+          flowId: actionFlowId,
+          parentId: conditional.id,
+          order: 0,
+          kind: 'SEND_EMAIL',
+          config: {
+            to: '{vars.email}',
+            subject: 'Smoke test — vous avez complété le flow',
+            bodyHtml: '<p>Bonjour, ceci est un email de test.</p>',
+          },
+        },
+      });
+      // Always-fire SEND_EMAIL with NO interpolation issue, to verify
+      // top-level (non-gated) actions run.
+      await prisma.widgetAction.create({
+        data: {
+          flowId: actionFlowId,
+          order: 1,
+          kind: 'SEND_EMAIL',
+          config: {
+            to: '{vars.email}',
+            subject: 'Smoke test — top-level action',
+            bodyHtml: '<p>Always fires.</p>',
+          },
+        },
+      });
+
+      // ─── Path A: wantsEmail=true — both actions should fire ──
+      const runA = await http(
+        'POST',
+        `/api/public/widget-flows/by-key/${actionKey}/runs`,
+        {},
+      );
+      const runAId = runA.json.run.id;
+      const stepAId = runA.json.firstStep.id;
+
+      const submitA = await http(
+        'POST',
+        `/api/public/widget-flows/by-key/${actionKey}/runs/${runAId}/steps/${stepAId}/submit`,
+        {
+          values: { email: 'smoke@example.com', wantsEmail: true },
+          clientSubmitId: randomUUID(),
+        },
+      );
+      assertEq(submitA.json?.errors?.length, 0, 'A FORM no errors');
+      const recapAId = submitA.json.nextStep.id;
+      const submitAR = await http(
+        'POST',
+        `/api/public/widget-flows/by-key/${actionKey}/runs/${runAId}/steps/${recapAId}/submit`,
+        { values: {}, clientSubmitId: randomUUID() },
+      );
+      assertEq(submitAR.json?.run?.status, 'COMPLETED', 'A run COMPLETED');
+
+      // Wait a tick for the actions to land — they're awaited in
+      // submitStep but the EngineActionEvent writes are async writes
+      // through the metering helper which we don't await directly.
+      // 50ms is plenty for the in-process Prisma round-trip.
+      await new Promise((r) => setTimeout(r, 50));
+
+      const eventsA = await prisma.engineActionEvent.findMany({
+        where: { runId: runAId },
+        orderBy: { executedAt: 'asc' },
+      });
+      const kindsA = eventsA.map((e) => `${e.actionKind}:${e.status}`);
+      assert(
+        kindsA.includes('CONDITIONAL:OK'),
+        'A CONDITIONAL fired with OK status',
+      );
+      // 2x SEND_EMAIL — one nested inside CONDITIONAL, one top-level.
+      // Status is either OK (no RESEND_API_KEY, stub path) or ERROR
+      // (Resend free-tier rejecting non-verified test recipients).
+      // EITHER outcome proves the action wiring works; both record an
+      // event, which is what matters for the assertion.
+      const sendEmailAttempts = eventsA.filter(
+        (e) => e.actionKind === 'SEND_EMAIL',
+      ).length;
+      assertEq(sendEmailAttempts, 2, 'A both SEND_EMAIL actions fired');
+
+      // ─── Path B: wantsEmail=false — CONDITIONAL skips child ──
+      const runB = await http(
+        'POST',
+        `/api/public/widget-flows/by-key/${actionKey}/runs`,
+        {},
+      );
+      const runBId = runB.json.run.id;
+      const stepBId = runB.json.firstStep.id;
+
+      const submitB = await http(
+        'POST',
+        `/api/public/widget-flows/by-key/${actionKey}/runs/${runBId}/steps/${stepBId}/submit`,
+        {
+          values: { email: 'smoke@example.com', wantsEmail: false },
+          clientSubmitId: randomUUID(),
+        },
+      );
+      const recapBId = submitB.json.nextStep.id;
+      await http(
+        'POST',
+        `/api/public/widget-flows/by-key/${actionKey}/runs/${runBId}/steps/${recapBId}/submit`,
+        { values: {}, clientSubmitId: randomUUID() },
+      );
+
+      await new Promise((r) => setTimeout(r, 50));
+
+      const eventsB = await prisma.engineActionEvent.findMany({
+        where: { runId: runBId },
+        orderBy: { executedAt: 'asc' },
+      });
+      const kindsB = eventsB.map((e) => `${e.actionKind}:${e.status}`);
+      assert(
+        kindsB.includes('CONDITIONAL:SKIPPED'),
+        'B CONDITIONAL was SKIPPED (gate=false)',
+      );
+      // Only the top-level (non-gated) SEND_EMAIL should be attempted.
+      // Same OK-or-ERROR tolerance as Path A — what matters is the
+      // CONDITIONAL gate correctly prevented the child SEND_EMAIL.
+      const sendEmailAttemptsB = eventsB.filter(
+        (e) => e.actionKind === 'SEND_EMAIL',
+      ).length;
+      assertEq(sendEmailAttemptsB, 1, 'B only top-level SEND_EMAIL fired');
+
+      // Cleanup
+      await http('DELETE', `/api/widget-flows/${actionFlowId}`);
+    }
+
+    // ── Phase 15: clean up imported flow ──────────────────────
+    console.log('\n15. DELETE imported flow');
     if (importedFlowId) {
       const r = await http('DELETE', `/api/widget-flows/${importedFlowId}`);
       assertEq(r.status, 204, 'delete status = 204');

@@ -20,7 +20,14 @@ export type RecordEngineActionParams = {
   organizationId: string;
   flowId?: string | null;
   runId?: string | null;
-  actionKind: EngineActionKind;
+  /**
+   * Action kind string. Includes the runtime kinds (EngineActionKind
+   * union) AND the post-completion action kinds (SEND_EMAIL,
+   * CONDITIONAL, WAIT, etc.) that ship as engine actions land in
+   * Phase 2.2+. Loose `string` here because the DB column is also
+   * String — the union narrowing was a stale v1 constraint.
+   */
+  actionKind: EngineActionKind | string;
   status: 'OK' | 'ERROR' | 'SKIPPED';
   /** Duration of the operation. Pass 0 for instantaneous markers. */
   durationMs: number;
