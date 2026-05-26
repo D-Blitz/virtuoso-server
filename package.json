@@ -15,11 +15,13 @@
   "dependencies": {
     "@auth/core": "^0.34.3",
     "@prisma/client": "^6.8.2",
+    "@types/json-logic-js": "^2.0.8",
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.5",
     "date-fns": "^4.1.0",
     "dotenv": "^16.5.0",
     "express": "^5.1.0",
+    "json-logic-js": "^2.0.5",
     "jsonwebtoken": "^9.0.3",
     "node": "^26.0.0",
     "pg": "^8.16.0",

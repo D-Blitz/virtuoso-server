@@ -531,8 +531,151 @@ async function main() {
       );
     }
 
-    // ── Phase 13: clean up imported flow ──────────────────────
-    console.log('\n13. DELETE imported flow');
+    // ── Phase 13: Phase 2.1 — conditional step visibility ─────
+    // Build a 4-step flow where step[2] is hidden when vars.skip == true.
+    // Walk it twice: once skipping (expect to land on step[3] directly)
+    // and once not skipping (expect step[2] to be shown).
+    console.log('\n13. Conditional step visibility (Phase 2.1)');
+    {
+      const condFlowBody = {
+        name: '[http-smoke] conditional flow',
+        kind: 'BOOKING' as const,
+      };
+      const create = await http('POST', '/api/widget-flows', condFlowBody);
+      assertEq(create.status, 201, 'cond flow created');
+      const condFlowId = create.json.flow.id;
+
+      const condPayload = {
+        name: '[http-smoke] conditional flow',
+        description: null,
+        kind: 'BOOKING' as const,
+        steps: [
+          {
+            order: 0,
+            kind: 'SINGLE_SELECT' as const,
+            label: 'Skip optional step?',
+            description: null,
+            config: {
+              varName: 'skip',
+              options: [
+                { value: 'yes', label: 'Skip' },
+                { value: 'no', label: 'Show' },
+              ],
+            },
+            visibleWhen: null,
+            fields: [],
+          },
+          {
+            order: 1,
+            kind: 'SINGLE_SELECT' as const,
+            label: 'Always visible (sentry)',
+            description: null,
+            config: {
+              varName: 'sentry',
+              options: [{ value: 'ok', label: 'OK' }],
+            },
+            visibleWhen: null,
+            fields: [],
+          },
+          {
+            order: 2,
+            kind: 'SINGLE_SELECT' as const,
+            label: 'Optional — hidden when skip=yes',
+            description: null,
+            config: {
+              varName: 'optional',
+              options: [{ value: 'picked', label: 'Pick' }],
+            },
+            // JSONLogic: != equality. Visible when vars.skip != "yes".
+            visibleWhen: {
+              '!=': [{ var: 'vars.skip' }, 'yes'],
+            },
+            fields: [],
+          },
+          {
+            order: 3,
+            kind: 'RECAP' as const,
+            label: 'Done',
+            description: null,
+            config: {},
+            visibleWhen: null,
+            fields: [],
+          },
+        ],
+      };
+
+      await http('PATCH', `/api/widget-flows/${condFlowId}/draft`, condPayload);
+      const pub = await http('POST', `/api/widget-flows/${condFlowId}/publish`);
+      assertEq(pub.status, 200, 'cond flow published');
+      const condKey = pub.json.flow.publishableKey;
+
+      // ─── Path A: skip=yes — optional step should be skipped ──
+      const runA = await http(
+        'POST',
+        `/api/public/widget-flows/by-key/${condKey}/runs`,
+        {},
+      );
+      const runAId = runA.json.run.id;
+      const step0AId = runA.json.firstStep.id;
+
+      const submitA0 = await http(
+        'POST',
+        `/api/public/widget-flows/by-key/${condKey}/runs/${runAId}/steps/${step0AId}/submit`,
+        { values: { selected: 'yes' }, clientSubmitId: randomUUID() },
+      );
+      assertEq(submitA0.json?.errors?.length, 0, 'A0 no errors');
+      assertEq(
+        submitA0.json?.nextStep?.label,
+        'Always visible (sentry)',
+        'A0 advances to sentry step',
+      );
+
+      const step1AId = submitA0.json.nextStep.id;
+      const submitA1 = await http(
+        'POST',
+        `/api/public/widget-flows/by-key/${condKey}/runs/${runAId}/steps/${step1AId}/submit`,
+        { values: { selected: 'ok' }, clientSubmitId: randomUUID() },
+      );
+      assertEq(
+        submitA1.json?.nextStep?.label,
+        'Done',
+        'A1 SKIPS optional step → lands on Done',
+      );
+
+      // ─── Path B: skip=no — optional step should appear ───────
+      const runB = await http(
+        'POST',
+        `/api/public/widget-flows/by-key/${condKey}/runs`,
+        {},
+      );
+      const runBId = runB.json.run.id;
+      const step0BId = runB.json.firstStep.id;
+
+      const submitB0 = await http(
+        'POST',
+        `/api/public/widget-flows/by-key/${condKey}/runs/${runBId}/steps/${step0BId}/submit`,
+        { values: { selected: 'no' }, clientSubmitId: randomUUID() },
+      );
+      assertEq(submitB0.json?.nextStep?.label, 'Always visible (sentry)', 'B0 advances to sentry');
+
+      const step1BId = submitB0.json.nextStep.id;
+      const submitB1 = await http(
+        'POST',
+        `/api/public/widget-flows/by-key/${condKey}/runs/${runBId}/steps/${step1BId}/submit`,
+        { values: { selected: 'ok' }, clientSubmitId: randomUUID() },
+      );
+      assertEq(
+        submitB1.json?.nextStep?.label,
+        'Optional — hidden when skip=yes',
+        'B1 SHOWS optional step (condition true)',
+      );
+
+      // Clean up the conditional flow.
+      await http('DELETE', `/api/widget-flows/${condFlowId}`);
+    }
+
+    // ── Phase 14: clean up imported flow ──────────────────────
+    console.log('\n14. DELETE imported flow');
     if (importedFlowId) {
       const r = await http('DELETE', `/api/widget-flows/${importedFlowId}`);
       assertEq(r.status, 204, 'delete status = 204');

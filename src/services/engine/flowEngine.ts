@@ -28,6 +28,7 @@
 // `result.errors` so the client can re-render the form.
 
 import prisma from '../../prisma';
+import { isStepVisible, type EvaluationContext } from './expressionEvaluator';
 import { recordEngineAction } from './metering';
 import { getStepHandler } from './stepHandlers';
 import type {
@@ -68,11 +69,70 @@ const FLOW_WITH_STEPS_INCLUDE = {
   },
 };
 
+/**
+ * Build the context object every visibility expression evaluates
+ * against. Stable contract — additions are backward compatible,
+ * removals break flows in the wild.
+ *
+ *   vars  = the run's captured values (vars.<varName>)
+ *   now   = current ISO timestamp (for time-based conditions like
+ *           "show step only if start > now + 48h")
+ *   org   = future hook for org-level constants (locale / timezone /
+ *           currency); empty for now until we plumb the org row down.
+ *
+ * organizationId is passed in so future ops (entityRef) can resolve
+ * scoped lookups without a separate context fetch.
+ */
+function buildEvaluationContext(
+  vars: Record<string, unknown>,
+  organizationId: string,
+): EvaluationContext {
+  return {
+    vars,
+    now: new Date().toISOString(),
+    org: { id: organizationId },
+  };
+}
+
+/**
+ * Find the first step AFTER `fromStep` (in order) whose visibleWhen
+ * expression evaluates truthy against the run's current vars. Steps
+ * with null visibleWhen are always visible. Returns null if there's
+ * no visible next step (= COMPLETED).
+ *
+ * Skipping hidden steps here (rather than at submitStep time) means
+ * the visitor never sees a step that's been gated out — the engine
+ * simply advances past it.
+ */
 function findNextStep(
   flow: FlowWithSteps,
   fromStep: StepWithFields,
+  vars: Record<string, unknown>,
+  organizationId: string,
 ): StepWithFields | null {
-  return flow.steps.find((s) => s.order > fromStep.order) ?? null;
+  const ctx = buildEvaluationContext(vars, organizationId);
+  for (const step of flow.steps) {
+    if (step.order <= fromStep.order) continue;
+    if (isStepVisible(step.visibleWhen, ctx)) return step;
+  }
+  return null;
+}
+
+/**
+ * Find the first visible step IN the flow (for startRun). Same skip
+ * rules as findNextStep — a flow whose entire first run of steps is
+ * gated out starts in COMPLETED immediately.
+ */
+function findFirstVisibleStep(
+  flow: FlowWithSteps,
+  vars: Record<string, unknown>,
+  organizationId: string,
+): StepWithFields | null {
+  const ctx = buildEvaluationContext(vars, organizationId);
+  for (const step of flow.steps) {
+    if (isStepVisible(step.visibleWhen, ctx)) return step;
+  }
+  return null;
 }
 
 function findStepById(flow: FlowWithSteps, stepId: string): StepWithFields | undefined {
@@ -113,7 +173,14 @@ export async function startRun(params: {
     );
   }
 
-  const firstStep = flow.steps[0] ?? null;
+  // Phase 2.1: respect visibleWhen on the first step too — a flow
+  // whose opener is gated out skips to the next visible step, or
+  // completes immediately if none are visible.
+  const firstStep = findFirstVisibleStep(
+    flow,
+    {},
+    params.organizationId,
+  );
 
   const run = await prisma.widgetRun.create({
     data: {
@@ -121,7 +188,10 @@ export async function startRun(params: {
       flowId: params.flowId,
       vars: {},
       currentStepId: firstStep?.id ?? null,
-      status: 'IN_PROGRESS' satisfies RunStatus,
+      status: firstStep
+        ? ('IN_PROGRESS' satisfies RunStatus)
+        : ('COMPLETED' satisfies RunStatus),
+      completedAt: firstStep ? null : new Date(),
       stepHistory: [],
     },
   });
@@ -269,8 +339,13 @@ export async function submitStep(params: {
     }
 
     // Validation passed — apply + advance.
+    // Phase 2.1: compute new vars FIRST, then evaluate the next
+    // visible step against THOSE vars. Visibility conditions on later
+    // steps frequently reference values just captured by this step
+    // (e.g. "show payment step only if vars.attendees > 0"), so
+    // evaluating against post-apply vars is the correct semantic.
     const newVars = handler.apply(submission, step, run.vars as Record<string, unknown>);
-    const nextStep = findNextStep(flow, step);
+    const nextStep = findNextStep(flow, step, newVars, run.organizationId);
     const completing = nextStep == null;
 
     const newHistory = [
