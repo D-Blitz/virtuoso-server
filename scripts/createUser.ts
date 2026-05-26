@@ -1,3 +1,15 @@
+// @ts-nocheck
+//
+// STALE — pre-Phase-0.3 auth model. Uses `User.role` freeform string;
+// the live schema has `User.roleId` → Role table since the
+// granular_permissions migration. Manage users via the admin UI's
+// /admin/utilisateurs page or rewrite this script to look up Role
+// rows by name (Propriétaire / Administrateur / Intervenant).
+//
+// Kept here for reference + future rewrite. @ts-nocheck so the
+// engine's `tsc --noEmit` (which now covers scripts/) doesn't trip
+// on the stale schema references.
+
 /**
  * Create or update a user in the default organization.
  *

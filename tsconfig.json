@@ -117,5 +117,5 @@
       "module": "CommonJS"
     }
   },
-  "include": ["src", "prisma"]
+  "include": ["src", "prisma", "scripts"]
 }

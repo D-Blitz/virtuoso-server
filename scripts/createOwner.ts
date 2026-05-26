@@ -1,3 +1,9 @@
+// @ts-nocheck
+//
+// STALE — pre-Phase-0.3 auth model. See scripts/createUser.ts for
+// the same drift notes. Use the admin UI's /admin/utilisateurs page
+// to bootstrap users instead. Kept for reference + future rewrite.
+
 /**
  * Create the first OWNER user for the default organization.
  *

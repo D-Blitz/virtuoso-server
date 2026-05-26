@@ -58,6 +58,10 @@ const DEMO_PAYLOAD: FlowPayload = {
   name: DEMO_NAME,
   description: DEMO_DESCRIPTION,
   kind: 'BOOKING',
+  // Phase 2.2 — empty by default. Admins layer SEND_EMAIL / CONDITIONAL
+  // / WAIT on top via the editor's Actions tab; the demo intentionally
+  // ships clean so you see the runtime works without any side effects.
+  actions: [],
   steps: [
     {
       order: 0,
