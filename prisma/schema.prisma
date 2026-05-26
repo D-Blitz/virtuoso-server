@@ -1039,8 +1039,41 @@ model WidgetRun {
   // For analytics: drop-off step, time per step, etc.
   stepHistory Json @default("[]")
 
+  // Idempotency log — one row per submit attempt. Replays return the
+  // cached response without re-applying side effects.
+  submits WidgetRunSubmit[]
+
   @@index([organizationId, startedAt])
   @@index([flowId, status])
+}
+
+// Idempotency log for step submissions (Phase 2.0 Commit 2).
+//
+// Every submitStep() call writes one row identified by a client-provided
+// `clientSubmitId` (UUIDv4 generated browser-side). A composite unique
+// on (runId, clientSubmitId) rejects double-submits at the DB level —
+// the engine catches the conflict and returns the cached response from
+// the original submit instead of re-applying side effects.
+//
+// The `response` Json caches validation errors + the post-submit
+// progression marker so retries see the exact same result the first
+// call returned. Cached responses are small (<1KB typical); no TTL —
+// rows live as long as the parent WidgetRun (Cascade delete).
+model WidgetRunSubmit {
+  id             String    @id @default(cuid())
+  runId          String
+  run            WidgetRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  stepId         String
+  clientSubmitId String
+
+  // { errors: ValidationError[], advancedToStepId: string | null }
+  // See services/engine/types.ts for the shape.
+  response Json
+
+  submittedAt DateTime @default(now())
+
+  @@unique([runId, clientSubmitId])
+  @@index([runId, stepId])
 }
 
 // Draft / Published split (locked 2026-05-26).
