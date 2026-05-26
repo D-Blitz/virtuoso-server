@@ -21,7 +21,9 @@ import {
   exportFlow,
   getDraft,
   getFlow,
+  getUsageSummary,
   importFlow,
+  listFlowRuns,
   listFlows,
   patchDraft,
   publishFlow,
@@ -219,6 +221,39 @@ export class WidgetFlowController {
       res.status(201).json({ flow });
     } catch (err) {
       handleFlowAdminError(res, err, 'Failed to import flow');
+    }
+  }
+
+  /** GET /api/widget-flows/:id/runs?limit=&offset= */
+  async listRuns(req: Request, res: Response) {
+    const orgId = requireOrgId(res);
+    if (!orgId) return;
+    try {
+      const limit = req.query.limit
+        ? Number.parseInt(req.query.limit as string, 10)
+        : undefined;
+      const offset = req.query.offset
+        ? Number.parseInt(req.query.offset as string, 10)
+        : undefined;
+      const result = await listFlowRuns(orgId, req.params.id, {
+        limit: Number.isFinite(limit) ? limit : undefined,
+        offset: Number.isFinite(offset) ? offset : undefined,
+      });
+      res.json(result);
+    } catch (err) {
+      handleFlowAdminError(res, err, 'Failed to list runs');
+    }
+  }
+
+  /** GET /api/widget-flows/usage/summary */
+  async usageSummary(req: Request, res: Response) {
+    const orgId = requireOrgId(res);
+    if (!orgId) return;
+    try {
+      const summary = await getUsageSummary(orgId);
+      res.json(summary);
+    } catch (err) {
+      handleFlowAdminError(res, err, 'Failed to fetch usage summary');
     }
   }
 }

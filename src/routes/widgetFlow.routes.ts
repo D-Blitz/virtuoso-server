@@ -17,6 +17,14 @@ router.post('/import', requirePermission('WIDGET_MANAGE'), (req, res) =>
   controller.importFlow(req, res),
 );
 
+// Phase 2.0 Commit 4.5 — usage summary. Mounted BEFORE /:id so the
+// literal "usage" segment doesn't get matched as an id parameter.
+router.get(
+  '/usage/summary',
+  requirePermission('WIDGET_MANAGE'),
+  (req, res) => controller.usageSummary(req, res),
+);
+
 router.get('/', requirePermission('WIDGET_MANAGE'), (req, res) =>
   controller.list(req, res),
 );
@@ -44,6 +52,11 @@ router.post('/:id/publish', requirePermission('WIDGET_MANAGE'), (req, res) =>
 
 router.get('/:id/export', requirePermission('WIDGET_MANAGE'), (req, res) =>
   controller.exportFlow(req, res),
+);
+
+// Phase 2.0 Commit 4.5 — runs feed per flow (Activity tab).
+router.get('/:id/runs', requirePermission('WIDGET_MANAGE'), (req, res) =>
+  controller.listRuns(req, res),
 );
 
 export default router;

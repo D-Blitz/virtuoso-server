@@ -466,8 +466,60 @@ async function main() {
       assertEq(r.status, 404, 'bogus key returns 404');
     }
 
-    // ── Phase 11: clean up imported flow ──────────────────────
-    console.log('\n11. DELETE imported flow');
+    // ── Phase 11: Activity tab — GET runs for a flow ──────────
+    console.log('\n11. GET /api/widget-flows/:id/runs');
+    {
+      const r = await http('GET', `/api/widget-flows/${createdFlowId}/runs`);
+      assertEq(r.status, 200, 'runs status = 200');
+      assert(Array.isArray(r.json?.runs), 'runs array returned');
+      assert(typeof r.json?.total === 'number', 'total is a number');
+      // The Phase 9 walkthrough created exactly one run that completed.
+      assert(
+        r.json.runs.some((run: any) => run.status === 'COMPLETED'),
+        'has at least one COMPLETED run',
+      );
+      // Public PII fields must NOT appear in the admin response either
+      // (vars are sensitive; the admin opens a per-run detail surface
+      // for full data later).
+      const sample = r.json.runs[0];
+      assertEq(sample?.vars, undefined, 'runs do not include vars');
+      // Pagination params are echoed.
+      assertEq(typeof r.json?.limit, 'number', 'limit echoed');
+      assertEq(typeof r.json?.offset, 'number', 'offset echoed');
+    }
+    {
+      // Pagination — limit=1 should return at most one row.
+      const r = await http(
+        'GET',
+        `/api/widget-flows/${createdFlowId}/runs?limit=1`,
+      );
+      assertEq(r.status, 200, 'runs limit=1 status = 200');
+      assert(r.json.runs.length <= 1, 'runs.length ≤ 1 under limit=1');
+      assertEq(r.json.limit, 1, 'limit echoed as 1');
+    }
+
+    // ── Phase 12: Usage summary ───────────────────────────────
+    console.log('\n12. GET /api/widget-flows/usage/summary');
+    {
+      const r = await http('GET', '/api/widget-flows/usage/summary');
+      assertEq(r.status, 200, 'usage summary status = 200');
+      assertEq(typeof r.json?.thisMonth, 'number', 'thisMonth is a number');
+      assertEq(typeof r.json?.last30Days, 'number', 'last30Days is a number');
+      assert(typeof r.json?.byKind === 'object', 'byKind is an object');
+      // The Phase 9 run fired ≥ 4 metering events (RUN_START / 2×
+      // STEP_SUBMIT / STEP_VALIDATION_FAILED / RUN_COMPLETE) so the
+      // monthly count must be positive.
+      assert(r.json.thisMonth > 0, 'thisMonth > 0');
+      // RUN_START should be present in byKind.
+      assert(
+        typeof r.json.byKind.RUN_START === 'number' &&
+          r.json.byKind.RUN_START > 0,
+        'byKind.RUN_START > 0',
+      );
+    }
+
+    // ── Phase 13: clean up imported flow ──────────────────────
+    console.log('\n13. DELETE imported flow');
     if (importedFlowId) {
       const r = await http('DELETE', `/api/widget-flows/${importedFlowId}`);
       assertEq(r.status, 204, 'delete status = 204');

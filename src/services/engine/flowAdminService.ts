@@ -300,3 +300,124 @@ export async function importFlow(
     });
   });
 }
+
+// ─── Activity / runs feed ─────────────────────────────────────────
+
+const RUNS_PAGE_DEFAULT = 20;
+const RUNS_PAGE_MAX = 100;
+
+/**
+ * List runs for a flow, newest first. Pagination via offset/limit.
+ *
+ * Public-safe shape: deliberately OMITS `vars` (visitor PII — emails,
+ * names, free-form input) and `stepHistory` (heavy + only useful for
+ * drop-off analytics). The admin Activity tab only needs status +
+ * timing for v1; a future "run detail" endpoint can return the full
+ * vars + history when the admin clicks into a specific run.
+ */
+export async function listFlowRuns(
+  organizationId: string,
+  flowId: string,
+  opts: { limit?: number; offset?: number } = {},
+) {
+  // Ownership check first so cross-tenant probes can't enumerate
+  // runs via a known flow id from another org.
+  const flow = await prisma.widgetFlow.findFirst({
+    where: { id: flowId, organizationId },
+    select: { id: true },
+  });
+  if (!flow) throw new FlowAdminError(`Flow ${flowId} not found`, 'NOT_FOUND');
+
+  const limit = Math.min(opts.limit ?? RUNS_PAGE_DEFAULT, RUNS_PAGE_MAX);
+  const offset = Math.max(opts.offset ?? 0, 0);
+
+  const [runs, total] = await Promise.all([
+    prisma.widgetRun.findMany({
+      where: { flowId },
+      select: {
+        id: true,
+        status: true,
+        startedAt: true,
+        completedAt: true,
+        currentStepId: true,
+        // stepHistory is JSON — pulling .length out of it requires the
+        // app layer. Returning the raw stepHistory would balloon
+        // the payload + leak more than the admin needs.
+        // For now, surface a derived "stepsSubmitted" count.
+        stepHistory: true,
+      },
+      orderBy: { startedAt: 'desc' },
+      skip: offset,
+      take: limit,
+    }),
+    prisma.widgetRun.count({ where: { flowId } }),
+  ]);
+
+  return {
+    runs: runs.map((r) => ({
+      id: r.id,
+      status: r.status,
+      startedAt: r.startedAt,
+      completedAt: r.completedAt,
+      currentStepId: r.currentStepId,
+      stepsSubmitted: Array.isArray(r.stepHistory)
+        ? r.stepHistory.length
+        : 0,
+    })),
+    total,
+    limit,
+    offset,
+  };
+}
+
+// ─── Usage summary (engine action metering) ───────────────────────
+
+/**
+ * Build the per-org engine usage summary surfaced in /admin/parametres
+ * (and eventually the per-org billing dashboard).
+ *
+ * Two windows for the headline numbers:
+ *   - thisMonth: counts since the 1st of the current month
+ *   - last30Days: trailing 30-day rolling window
+ *
+ * Plus a per-kind breakdown for the current month so the admin can
+ * see what's driving the count (mostly RUN_START + STEP_SUBMIT today;
+ * SEND_EMAIL / ISSUE_REFUND etc. land in Phase 2.2+).
+ *
+ * No quota / budget enforcement in v1 — purely measurement. The UI
+ * uses a soft visual threshold to indicate scale, but every action
+ * still fires.
+ */
+export async function getUsageSummary(organizationId: string) {
+  const now = new Date();
+  const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+  const startOf30DayWindow = new Date(now);
+  startOf30DayWindow.setDate(startOf30DayWindow.getDate() - 30);
+
+  const [thisMonthRows, last30Rows, byKindRows] = await Promise.all([
+    prisma.engineActionEvent.count({
+      where: { organizationId, executedAt: { gte: startOfMonth } },
+    }),
+    prisma.engineActionEvent.count({
+      where: { organizationId, executedAt: { gte: startOf30DayWindow } },
+    }),
+    prisma.engineActionEvent.groupBy({
+      by: ['actionKind'],
+      where: { organizationId, executedAt: { gte: startOfMonth } },
+      _count: { _all: true },
+    }),
+  ]);
+
+  const byKind: Record<string, number> = {};
+  for (const row of byKindRows) {
+    byKind[row.actionKind] = row._count._all;
+  }
+
+  return {
+    thisMonth: thisMonthRows,
+    last30Days: last30Rows,
+    byKind,
+    windowStart: startOfMonth.toISOString(),
+    last30WindowStart: startOf30DayWindow.toISOString(),
+  };
+}
