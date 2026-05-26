@@ -18,9 +18,10 @@
 //   - every field references a known kind / binding
 
 import { Prisma } from '@prisma/client';
-import type { PrismaClient, WidgetStepKind } from '@prisma/client';
+import type { PrismaClient, WidgetAction, WidgetStepKind } from '@prisma/client';
 
 import prisma from '../../prisma';
+import { getActionHandler } from './actionHandlers';
 import { stepHandlers } from './stepHandlers';
 import type { FlowPayload } from '../../validations/widgetFlow.validation';
 
@@ -52,6 +53,49 @@ export type PublishIssue = {
  */
 export function validatePublishable(payload: FlowPayload): PublishIssue[] {
   const issues: PublishIssue[] = [];
+
+  // Validate the action tree (Phase 2.2). Done first so action issues
+  // surface even for flows with zero steps. Walks the tree depth-first
+  // so paths render with full nesting context: actions[0].children[2].kind
+  function walkActions(
+    actions: Array<{ kind: string; config: unknown; children?: unknown[] }>,
+    pathPrefix: string,
+  ): void {
+    for (const [i, action] of actions.entries()) {
+      const path = `${pathPrefix}[${i}]`;
+      const handler = getActionHandler(action.kind);
+      if (!handler) {
+        issues.push({
+          path: `${path}.kind`,
+          message:
+            `Le type d'action "${action.kind}" n'est pas pris en charge. ` +
+            `Types supportés : SEND_EMAIL, CONDITIONAL, WAIT.`,
+        });
+        continue; // can't validate config without a handler
+      }
+      const configError = handler.validateConfig(action.config as Prisma.JsonValue);
+      if (configError) {
+        issues.push({
+          path: `${path}.config`,
+          message: configError,
+        });
+      }
+      const children = action.children as
+        | Array<{ kind: string; config: unknown; children?: unknown[] }>
+        | undefined;
+      if (children && children.length > 0) {
+        walkActions(children, `${path}.children`);
+      }
+    }
+  }
+  walkActions(
+    (payload.actions ?? []) as Array<{
+      kind: string;
+      config: unknown;
+      children?: unknown[];
+    }>,
+    'actions',
+  );
 
   if (payload.steps.length === 0) {
     issues.push({
@@ -112,13 +156,59 @@ export function validatePublishable(payload: FlowPayload): PublishIssue[] {
 // ─── Normalize → Payload ──────────────────────────────────────────
 
 type NormalizedFlow = Prisma.WidgetFlowGetPayload<{
-  include: { steps: { include: { fields: true } } };
+  include: { steps: { include: { fields: true } }; actions: true };
 }>;
 
+type ActionPayloadNode = {
+  order: number;
+  kind: string;
+  config: Record<string, unknown>;
+  children: ActionPayloadNode[];
+};
+
 /**
- * Read the normalized WidgetFlow + WidgetStep + WidgetField rows back
- * into a FlowPayload. Used to seed the draft on first edit and to
- * build export JSON.
+ * Build the nested actions tree from the flat WidgetAction rows.
+ * Two-pass O(n) build keyed by id. Children are sorted by order.
+ */
+function actionsToPayload(actions: WidgetAction[]): ActionPayloadNode[] {
+  const nodes = new Map<string, ActionPayloadNode & { _id: string }>();
+  for (const a of actions) {
+    nodes.set(a.id, {
+      _id: a.id,
+      order: a.order,
+      kind: a.kind,
+      config: (a.config ?? {}) as Record<string, unknown>,
+      children: [],
+    });
+  }
+  const roots: ActionPayloadNode[] = [];
+  for (const a of actions) {
+    const node = nodes.get(a.id)!;
+    if (a.parentId == null) {
+      roots.push(node);
+    } else {
+      const parent = nodes.get(a.parentId);
+      if (parent) parent.children.push(node);
+      else roots.push(node); // orphan promoted
+    }
+  }
+  // Sort children per-parent.
+  for (const node of nodes.values()) {
+    node.children.sort((a, b) => a.order - b.order);
+  }
+  // Strip the internal _id helper before returning.
+  const strip = (n: ActionPayloadNode & { _id?: string }): ActionPayloadNode => {
+    delete n._id;
+    n.children.forEach(strip);
+    return n;
+  };
+  return roots.sort((a, b) => a.order - b.order).map(strip);
+}
+
+/**
+ * Read the normalized WidgetFlow + WidgetStep + WidgetField +
+ * WidgetAction rows back into a FlowPayload. Used to seed the draft
+ * on first edit and to build export JSON.
  *
  * Strips all system-managed fields (ids, timestamps, publishableKey,
  * version, isPublished) so the output round-trips cleanly through the
@@ -151,6 +241,7 @@ export function flowToPayload(flow: NormalizedFlow): FlowPayload {
             config: (field.config ?? {}) as Record<string, unknown>,
           })),
       })),
+    actions: actionsToPayload(flow.actions ?? []),
   };
 }
 
@@ -214,6 +305,53 @@ export async function writePayloadToFlow(
         },
       },
     });
+  }
+
+  // Phase 2.2 — actions. Delete + recreate (same strategy as steps)
+  // so removing an action via the editor doesn't leave an orphan row.
+  // Cascade-delete on WidgetAction.parentId handles the tree wipe.
+  await tx.widgetAction.deleteMany({ where: { flowId } });
+  await writeActionTree(tx, flowId, null, payload.actions ?? []);
+}
+
+/**
+ * Recursively write an action subtree. Parent ids are resolved on the
+ * fly because cuid() ids are assigned at create time — Prisma's
+ * nested `create: { children: { create: [...] } }` shorthand wouldn't
+ * give us back the parent id between create calls in a way that
+ * scales past depth 2. Manual recursion is simpler + supports any
+ * depth.
+ */
+async function writeActionTree(
+  tx: ExtendedTransactionClient,
+  flowId: string,
+  parentId: string | null,
+  actions: Array<{
+    order: number;
+    kind: string;
+    config: Record<string, unknown>;
+    children?: Array<{ order: number; kind: string; config: Record<string, unknown>; children?: unknown[] }>;
+  }>,
+): Promise<void> {
+  for (const action of actions) {
+    const created = await tx.widgetAction.create({
+      data: {
+        flowId,
+        parentId,
+        order: action.order,
+        kind: action.kind,
+        config: (action.config ?? {}) as Prisma.InputJsonValue,
+      },
+    });
+    const children = action.children ?? [];
+    if (children.length > 0) {
+      await writeActionTree(
+        tx,
+        flowId,
+        created.id,
+        children as Parameters<typeof writeActionTree>[3],
+      );
+    }
   }
 }
 

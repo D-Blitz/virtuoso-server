@@ -85,6 +85,13 @@ const FLOW_DETAIL_INCLUDE = {
     orderBy: { order: 'asc' as const },
     include: { fields: { orderBy: { order: 'asc' as const } } },
   },
+  // Phase 2.2 — actions ship with the flow detail so the editor can
+  // round-trip them through draft/publish/export without a separate
+  // fetch. Returned as a flat list; flowToPayload() reshapes into the
+  // nested tree the admin UI consumes.
+  actions: {
+    orderBy: { order: 'asc' as const },
+  },
 };
 
 // ─── Service methods ──────────────────────────────────────────────

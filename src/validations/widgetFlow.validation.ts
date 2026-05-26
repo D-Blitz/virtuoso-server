@@ -115,6 +115,32 @@ const flowStepSchema = z.object({
   fields: z.array(flowFieldSchema).default([]),
 });
 
+// Phase 2.2 — actions live in the payload too, alongside steps. This
+// keeps them snapshotted on Publish, round-trippable through export/
+// import, and atomic-replaced by writePayloadToFlow. Action kinds
+// stay as plain strings here (the action handler registry is the
+// authoritative whitelist; new kinds add without schema churn).
+//
+// The recursive `children` field is the tree for CONDITIONAL actions
+// (and any future composite kind). z.lazy() handles the self-reference;
+// z.array(flowActionSchema) inside the lazy means the schema validates
+// arbitrarily deep nesting (capped at the engine's runtime depth, not
+// here).
+type FlowActionPayload = {
+  order: number;
+  kind: string;
+  config: Record<string, unknown>;
+  children?: FlowActionPayload[];
+};
+const flowActionSchema: z.ZodType<FlowActionPayload> = z.lazy(() =>
+  z.object({
+    order: z.number().int().min(0),
+    kind: z.string().min(1),
+    config: z.record(z.string(), jsonValueSchema).default({}),
+    children: z.array(flowActionSchema).default([]),
+  }),
+);
+
 /**
  * Canonical flow payload shape. Used by:
  *   - WidgetFlowDraft.payload   (autosave target)
@@ -131,6 +157,10 @@ export const flowPayloadSchema = z.object({
   description: z.string().nullable().optional(),
   kind: widgetFlowKindEnum,
   steps: z.array(flowStepSchema),
+  // Phase 2.2 — optional for backward compat with pre-2.2 drafts that
+  // were saved before this field existed. Empty array (= no actions)
+  // is the safe default.
+  actions: z.array(flowActionSchema).default([]),
 });
 
 export type FlowPayload = z.infer<typeof flowPayloadSchema>;

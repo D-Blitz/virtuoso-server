@@ -735,47 +735,60 @@ async function main() {
         ],
       };
 
-      await http('PATCH', `/api/widget-flows/${actionFlowId}/draft`, actionPayload);
+      // Include the action tree in the payload so it round-trips
+      // through draft → publish → snapshot → re-load. This is the
+      // real admin path; using raw prisma.widgetAction.create would
+      // bypass the FlowPayload integration we want to verify.
+      const actionPayloadWithActions = {
+        ...actionPayload,
+        actions: [
+          {
+            order: 0,
+            kind: 'CONDITIONAL',
+            config: {
+              condition: { '==': [{ var: 'vars.wantsEmail' }, true] },
+            },
+            children: [
+              {
+                order: 0,
+                kind: 'SEND_EMAIL',
+                config: {
+                  to: '{vars.email}',
+                  subject: 'Smoke test — vous avez complété le flow',
+                  bodyHtml: '<p>Bonjour, ceci est un email de test.</p>',
+                },
+                children: [],
+              },
+            ],
+          },
+          {
+            order: 1,
+            kind: 'SEND_EMAIL',
+            config: {
+              to: '{vars.email}',
+              subject: 'Smoke test — top-level action',
+              bodyHtml: '<p>Always fires.</p>',
+            },
+            children: [],
+          },
+        ],
+      };
+
+      await http(
+        'PATCH',
+        `/api/widget-flows/${actionFlowId}/draft`,
+        actionPayloadWithActions,
+      );
       const pub = await http('POST', `/api/widget-flows/${actionFlowId}/publish`);
+      assertEq(pub.status, 200, 'action flow published');
       const actionKey = pub.json.flow.publishableKey;
 
-      // Insert actions directly via the DB (no admin route yet — that's
-      // Phase 2.2 Commit 3). Real flow: admin builds these in the UI.
-      const conditional = await prisma.widgetAction.create({
-        data: {
-          flowId: actionFlowId,
-          order: 0,
-          kind: 'CONDITIONAL',
-          config: { condition: { '==': [{ var: 'vars.wantsEmail' }, true] } },
-        },
+      // Verify actions actually wrote to the normalized table via
+      // writePayloadToFlow's recursive insert.
+      const actionsInDb = await prisma.widgetAction.findMany({
+        where: { flowId: actionFlowId },
       });
-      await prisma.widgetAction.create({
-        data: {
-          flowId: actionFlowId,
-          parentId: conditional.id,
-          order: 0,
-          kind: 'SEND_EMAIL',
-          config: {
-            to: '{vars.email}',
-            subject: 'Smoke test — vous avez complété le flow',
-            bodyHtml: '<p>Bonjour, ceci est un email de test.</p>',
-          },
-        },
-      });
-      // Always-fire SEND_EMAIL with NO interpolation issue, to verify
-      // top-level (non-gated) actions run.
-      await prisma.widgetAction.create({
-        data: {
-          flowId: actionFlowId,
-          order: 1,
-          kind: 'SEND_EMAIL',
-          config: {
-            to: '{vars.email}',
-            subject: 'Smoke test — top-level action',
-            bodyHtml: '<p>Always fires.</p>',
-          },
-        },
-      });
+      assertEq(actionsInDb.length, 3, 'actions persisted (1 CONDITIONAL + 2 SEND_EMAIL)');
 
       // ─── Path A: wantsEmail=true — both actions should fire ──
       const runA = await http(
