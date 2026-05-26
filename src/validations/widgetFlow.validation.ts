@@ -141,6 +141,17 @@ const flowActionSchema: z.ZodType<FlowActionPayload> = z.lazy(() =>
   }),
 );
 
+// Phase 2.3 — event-bus triggers. Only meaningful for EVENT_REACTION
+// flows; BOOKING flows ignore them (the visitor's submit drives them
+// instead). Stored on the payload so they snapshot + round-trip with
+// the rest of the flow definition.
+const flowTriggerSchema = z.object({
+  eventName: z.string().min(1),
+  // Optional JSONLogic gate evaluated against `event.<X>` payload.
+  // Null/missing = "fire on every event of this name".
+  filter: jsonValueSchema.nullable().optional(),
+});
+
 /**
  * Canonical flow payload shape. Used by:
  *   - WidgetFlowDraft.payload   (autosave target)
@@ -161,6 +172,9 @@ export const flowPayloadSchema = z.object({
   // were saved before this field existed. Empty array (= no actions)
   // is the safe default.
   actions: z.array(flowActionSchema).default([]),
+  // Phase 2.3 — same back-compat treatment. Most flows have no
+  // triggers (BOOKING flows ignore them entirely).
+  triggers: z.array(flowTriggerSchema).default([]),
 });
 
 export type FlowPayload = z.infer<typeof flowPayloadSchema>;

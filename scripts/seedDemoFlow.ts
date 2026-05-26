@@ -62,6 +62,9 @@ const DEMO_PAYLOAD: FlowPayload = {
   // / WAIT on top via the editor's Actions tab; the demo intentionally
   // ships clean so you see the runtime works without any side effects.
   actions: [],
+  // Phase 2.3 — BOOKING flows ignore triggers; ship an empty array
+  // for type compliance with FlowPayload.
+  triggers: [],
   steps: [
     {
       order: 0,

@@ -18,7 +18,12 @@
 //   - every field references a known kind / binding
 
 import { Prisma } from '@prisma/client';
-import type { PrismaClient, WidgetAction, WidgetStepKind } from '@prisma/client';
+import type {
+  PrismaClient,
+  WidgetAction,
+  WidgetStepKind,
+  WidgetTrigger,
+} from '@prisma/client';
 
 import prisma from '../../prisma';
 import { getActionHandler } from './actionHandlers';
@@ -97,12 +102,55 @@ export function validatePublishable(payload: FlowPayload): PublishIssue[] {
     'actions',
   );
 
-  if (payload.steps.length === 0) {
+  // Phase 2.3 — trigger validation. Each trigger MUST reference an
+  // event name the dispatcher knows about. Filter syntax isn't deeply
+  // checked here — the expression evaluator's size/depth limits fire
+  // at trigger time and the dispatcher logs failures separately.
+  const knownEventNames = new Set([
+    'payment.succeeded',
+    'payment.failed',
+    'payment.refunded',
+    'event.cancelled',
+  ]);
+  for (const [i, trigger] of (payload.triggers ?? []).entries()) {
+    if (!knownEventNames.has(trigger.eventName)) {
+      issues.push({
+        path: `triggers[${i}].eventName`,
+        message:
+          `Événement "${trigger.eventName}" inconnu du dispatcher. ` +
+          `Valeurs supportées : ${Array.from(knownEventNames).join(', ')}.`,
+      });
+    }
+  }
+
+  // EVENT_REACTION flows must have at least one trigger to be useful
+  // (otherwise they never fire). BOOKING flows can have zero — they're
+  // driven by visitor submits.
+  if (
+    payload.kind === 'EVENT_REACTION' &&
+    (payload.triggers ?? []).length === 0
+  ) {
+    issues.push({
+      path: 'triggers',
+      message:
+        'Un flow de type EVENT_REACTION doit avoir au moins un déclencheur, ' +
+        'sinon il ne s’exécutera jamais.',
+    });
+  }
+
+  // EVENT_REACTION flows DON'T need steps (their action tree is the
+  // whole behavior). BOOKING flows still need at least one step.
+  if (payload.kind === 'BOOKING' && payload.steps.length === 0) {
     issues.push({
       path: 'steps',
-      message: 'Le flow doit contenir au moins une étape.',
+      message: 'Le flow BOOKING doit contenir au moins une étape.',
     });
-    return issues; // can't validate per-step shape with zero steps
+    return issues;
+  }
+
+  // EVENT_REACTION with no steps is fine — skip per-step validation.
+  if (payload.steps.length === 0) {
+    return issues;
   }
 
   // step.order uniqueness
@@ -156,7 +204,11 @@ export function validatePublishable(payload: FlowPayload): PublishIssue[] {
 // ─── Normalize → Payload ──────────────────────────────────────────
 
 type NormalizedFlow = Prisma.WidgetFlowGetPayload<{
-  include: { steps: { include: { fields: true } }; actions: true };
+  include: {
+    steps: { include: { fields: true } };
+    actions: true;
+    triggers: true;
+  };
 }>;
 
 type ActionPayloadNode = {
@@ -242,6 +294,10 @@ export function flowToPayload(flow: NormalizedFlow): FlowPayload {
           })),
       })),
     actions: actionsToPayload(flow.actions ?? []),
+    triggers: (flow.triggers ?? []).map((t: WidgetTrigger) => ({
+      eventName: t.eventName,
+      filter: t.filter as unknown,
+    })),
   };
 }
 
@@ -312,6 +368,22 @@ export async function writePayloadToFlow(
   // Cascade-delete on WidgetAction.parentId handles the tree wipe.
   await tx.widgetAction.deleteMany({ where: { flowId } });
   await writeActionTree(tx, flowId, null, payload.actions ?? []);
+
+  // Phase 2.3 — triggers. Flat list, no tree. Same delete + recreate
+  // strategy so removing a trigger via the editor drops it cleanly.
+  await tx.widgetTrigger.deleteMany({ where: { flowId } });
+  for (const trigger of payload.triggers ?? []) {
+    await tx.widgetTrigger.create({
+      data: {
+        flowId,
+        eventName: trigger.eventName,
+        filter:
+          trigger.filter == null
+            ? Prisma.JsonNull
+            : (trigger.filter as Prisma.InputJsonValue),
+      },
+    });
+  }
 }
 
 /**

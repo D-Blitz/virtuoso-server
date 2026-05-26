@@ -888,8 +888,152 @@ async function main() {
       await http('DELETE', `/api/widget-flows/${actionFlowId}`);
     }
 
-    // ── Phase 15: clean up imported flow ──────────────────────
-    console.log('\n15. DELETE imported flow');
+    // ── Phase 15: Phase 2.3 — triggers + EVENT_REACTION flows ─
+    // Create an EVENT_REACTION flow with a payment.succeeded
+    // trigger + a single SEND_EMAIL action. Dispatch a fake event
+    // directly via the dispatcher (bypassing the bus) and verify
+    // the run materializes + the action records a metering event.
+    console.log('\n15. Triggers + EVENT_REACTION (Phase 2.3)');
+    {
+      const reactionFlowResp = await http('POST', '/api/widget-flows', {
+        name: '[http-smoke] reaction flow',
+        kind: 'EVENT_REACTION',
+      });
+      const reactionFlowId = reactionFlowResp.json.flow.id;
+
+      const reactionPayload = {
+        name: '[http-smoke] reaction flow',
+        description: null,
+        kind: 'EVENT_REACTION' as const,
+        steps: [],
+        actions: [
+          {
+            order: 0,
+            kind: 'SEND_EMAIL',
+            config: {
+              to: 'admin@example.com',
+              subject: 'Smoke test — payment {vars.paymentId} succeeded',
+              bodyHtml:
+                '<p>Payment {vars.paymentId} for {vars.amount} succeeded.</p>',
+            },
+            children: [],
+          },
+        ],
+        triggers: [
+          { eventName: 'payment.succeeded', filter: null },
+        ],
+      };
+
+      await http(
+        'PATCH',
+        `/api/widget-flows/${reactionFlowId}/draft`,
+        reactionPayload,
+      );
+      const pubR = await http(
+        'POST',
+        `/api/widget-flows/${reactionFlowId}/publish`,
+      );
+      assertEq(pubR.status, 200, 'reaction flow published');
+      assertEq(
+        pubR.json?.flow?.publishableKey,
+        null,
+        'EVENT_REACTION flow has NO publishableKey',
+      );
+
+      // Verify the trigger row persisted.
+      const triggers = await prisma.widgetTrigger.findMany({
+        where: { flowId: reactionFlowId },
+      });
+      assertEq(triggers.length, 1, 'trigger row persisted');
+      assertEq(
+        triggers[0].eventName,
+        'payment.succeeded',
+        'trigger eventName saved correctly',
+      );
+
+      // Drive the dispatcher with a synthetic envelope. Bypasses the
+      // bus so the test isn't sensitive to in-process subscriber
+      // ordering (defaults vs engine).
+      const { _dispatchForTests } = await import(
+        '../src/services/engine/triggerDispatcher'
+      );
+      await _dispatchForTests('payment.succeeded', {
+        organizationId,
+        payload: {
+          paymentId: 'pi_test_smoke',
+          scheduledEventId: null,
+          submissionId: null,
+          enrollmentInviteId: null,
+          purpose: null,
+          amount: 4200,
+        },
+      });
+
+      // Allow a tick for the async run to land.
+      await new Promise((r) => setTimeout(r, 100));
+
+      const runs = await prisma.widgetRun.findMany({
+        where: { flowId: reactionFlowId },
+        orderBy: { startedAt: 'desc' },
+      });
+      assertEq(runs.length, 1, 'one EVENT_REACTION run materialized');
+      assertEq(runs[0].status, 'COMPLETED', 'run reached COMPLETED');
+      assertEq(
+        (runs[0].vars as any)?.paymentId,
+        'pi_test_smoke',
+        'event payload seeded vars.paymentId',
+      );
+
+      const events = await prisma.engineActionEvent.findMany({
+        where: { runId: runs[0].id },
+        orderBy: { executedAt: 'asc' },
+      });
+      const kinds = events.map((e) => `${e.actionKind}:${e.status}`);
+      assert(kinds.includes('RUN_START:OK'), 'RUN_START fired');
+      assert(
+        kinds.some((k) => k.startsWith('SEND_EMAIL:')),
+        'SEND_EMAIL fired (OK or ERROR — either proves wiring)',
+      );
+      assert(kinds.includes('RUN_COMPLETE:OK'), 'RUN_COMPLETE fired');
+
+      // Filter test: dispatch an event with payload that should be
+      // filtered OUT by a new trigger. Update the trigger to require
+      // amount > 10000 and verify no new run materializes for a
+      // smaller amount.
+      await prisma.widgetTrigger.update({
+        where: { id: triggers[0].id },
+        data: { filter: { '>': [{ var: 'amount' }, 10000] } as any },
+      });
+      const runsBefore = await prisma.widgetRun.count({
+        where: { flowId: reactionFlowId },
+      });
+      await _dispatchForTests('payment.succeeded', {
+        organizationId,
+        payload: {
+          paymentId: 'pi_test_smoke_below',
+          scheduledEventId: null,
+          submissionId: null,
+          enrollmentInviteId: null,
+          purpose: null,
+          amount: 100, // below the filter threshold
+        },
+      });
+      await new Promise((r) => setTimeout(r, 100));
+      const runsAfter = await prisma.widgetRun.count({
+        where: { flowId: reactionFlowId },
+      });
+      assertEq(
+        runsAfter,
+        runsBefore,
+        'filter blocked the trigger (no new run)',
+      );
+
+      // Cleanup
+      await http('DELETE', `/api/widget-flows/${reactionFlowId}`);
+    }
+
+    // ── Phase 16: clean up imported flow ──────────────────────
+    console.log('\n16. DELETE imported flow');
     if (importedFlowId) {
       const r = await http('DELETE', `/api/widget-flows/${importedFlowId}`);
       assertEq(r.status, 204, 'delete status = 204');

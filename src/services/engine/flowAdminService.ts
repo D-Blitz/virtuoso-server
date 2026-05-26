@@ -93,6 +93,11 @@ const FLOW_DETAIL_INCLUDE = {
   actions: {
     orderBy: { order: 'asc' as const },
   },
+  // Phase 2.3 — triggers. Flat list ordered by event name for stable
+  // editor rendering.
+  triggers: {
+    orderBy: { eventName: 'asc' as const },
+  },
 };
 
 // ─── Service methods ──────────────────────────────────────────────
@@ -311,8 +316,15 @@ export async function publishFlow(organizationId: string, flowId: string) {
   }
 
   // 3. Apply atomically: normalized writes + flow update + snapshot.
+  // EVENT_REACTION flows never serve a public URL — they fire via
+  // the trigger dispatcher — so they don't need a publishableKey.
+  // BOOKING flows assign one on first publish and keep it across
+  // re-publishes (so admins can paste the URL once and trust it).
   const nextVersion = flow.version + 1;
-  const publishableKey = flow.publishableKey ?? generatePublishableKey();
+  const publishableKey =
+    payload.kind === 'BOOKING'
+      ? (flow.publishableKey ?? generatePublishableKey())
+      : null;
 
   return prisma.$transaction(async (tx) => {
     await writePayloadToFlow(tx, flowId, payload);

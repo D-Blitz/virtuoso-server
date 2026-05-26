@@ -925,6 +925,8 @@ model WidgetFlow {
   snapshots WidgetFlowSnapshot[]
   // Phase 2.2 — post-completion actions.
   actions   WidgetAction[]
+  // Phase 2.3 — event-bus triggers (EVENT_REACTION flows only).
+  triggers  WidgetTrigger[]
 
   // Phase 2.2 follow-up — same trash + archive semantics as the rest
   // of the soft-deletable models. Deleting a flow from the editor or
@@ -1216,4 +1218,37 @@ model WidgetAction {
 
   @@index([flowId, parentId])
   @@index([flowId, order])
+}
+
+// ─── Triggers (Phase 2.3) ─────────────────────────────────────────
+//
+// Subscriber rows for the platform's typed EventBus. When an event
+// fires (payment.succeeded, event.cancelled, etc.), the trigger
+// dispatcher looks up every WidgetTrigger matching the event name +
+// kicks off a WidgetRun for each flow whose `filter` evaluates true
+// against the event payload.
+//
+// `eventName` is a plain String column (not an enum) — adding a new
+// bus event becomes a data fact, not a schema migration. The engine
+// keeps the authoritative whitelist of allowed names in
+// services/engine/triggerDispatcher.ts.
+//
+// `filter` is optional JSONLogic. When null, every event of that
+// kind fires the trigger. When set, evaluated against an
+// EvaluationContext with `event.<X>` mirroring the bus payload.
+//
+// Unique on (flowId, eventName): a flow can have at most one
+// trigger per event kind. Splitting a single event into multiple
+// branches is done in the action tree (CONDITIONAL), not by
+// stacking triggers.
+model WidgetTrigger {
+  id        String     @id @default(cuid())
+  flowId    String
+  flow      WidgetFlow @relation(fields: [flowId], references: [id], onDelete: Cascade)
+
+  eventName String // e.g. "payment.succeeded", "event.cancelled"
+  filter    Json?
+
+  @@unique([flowId, eventName])
+  @@index([eventName])
 }

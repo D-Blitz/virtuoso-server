@@ -1,6 +1,7 @@
 import prisma from '../../prisma';
 import * as bus from './bus';
 import { EmailService } from '../email.service';
+import { registerEngineTriggers } from '../engine/triggerDispatcher';
 
 /**
  * Phase 2.0a — default bus subscribers.
@@ -129,8 +130,13 @@ bus.on('payment.failed', async (env) => {
  * `registerSubscribers()` exists as an explicit hook for callers who
  * prefer not to rely on import side-effects (tests, future engine
  * code that conditionally enables defaults).
+ *
+ * Phase 2.3 — also registers the engine's trigger dispatcher so
+ * admin-configured EVENT_REACTION flows receive bus events alongside
+ * the hardcoded defaults above. Defaults still fire first (registered
+ * at module load); the engine's subscribers fire after them in
+ * subscription order.
  */
 export function registerSubscribers(): void {
-  // No-op — subscribers register at module load above. Calling this
-  // function just ensures the module gets imported.
+  registerEngineTriggers();
 }
