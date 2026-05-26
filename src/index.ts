@@ -11,6 +11,7 @@ import cors from 'cors';
 import { requireUser } from './middleware/auth';
 import authRoutes from './routes/auth.routes';
 import publicWidgetRoutes from './routes/publicWidget.routes';
+import publicWidgetFlowRoutes from './routes/publicWidgetFlow.routes';
 import publicInviteRoutes from './routes/publicInvite.routes';
 import publicRescheduleRoutes from './routes/publicReschedule.routes';
 import webhookRoutes from './routes/webhook.routes';
@@ -41,6 +42,7 @@ import anonymizeRoutes from './routes/anonymize.routes';
 import roleRoutes from './routes/role.routes';
 import userRoutes from './routes/user.routes';
 import organizationRoutes from './routes/organization.routes';
+import widgetFlowRoutes from './routes/widgetFlow.routes';
 
 // jobs
 import { startSlotHoldSweep } from './jobs/sweepSlotHolds';
@@ -88,6 +90,11 @@ app.use('/api/auth', authRoutes);
 // Public widget endpoints — no user auth, gated by publishable key + Origin check.
 app.use('/api/public/widgets', publicWidgetRoutes);
 
+// Public workflow-engine endpoints — Phase 2.0 Commit 3. Each route
+// resolves a WidgetFlow by :publishableKey and runs inside its org
+// context. Coexists with /public/widgets (legacy BookingWidget).
+app.use('/api/public/widget-flows', publicWidgetFlowRoutes);
+
 // Public invite endpoints — no user auth, gated by single-use opaque token.
 app.use('/api/public/invites', publicInviteRoutes);
 
@@ -113,6 +120,10 @@ app.use('/api/terms', termRoutes);
 app.use('/api/enrollments', enrollmentRoutes);
 app.use('/api/enrollments', enrollmentEngineRoutes);
 app.use('/api/widgets', widgetRoutes);
+// Phase 2.0 Commit 3 — admin CRUD for the workflow engine. Separate
+// top-level path so /:id routes don't collide with /api/widgets/:id
+// (legacy BookingWidget).
+app.use('/api/widget-flows', widgetFlowRoutes);
 app.use('/api/payments', paymentRoutes);
 app.use('/api/jobs', jobsRoutes);
 app.use('/api/closures', closureRoutes);
