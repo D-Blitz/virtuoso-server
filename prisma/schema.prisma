@@ -48,19 +48,24 @@ model Organization {
   rescheduleTokens  ScheduledEventRescheduleToken[]
   recurrenceSeries  RecurrenceSeries[]
   auditLogEntries   AuditLogEntry[]
+
+  // Phase 2.0 — workflow engine
+  widgetFlows        WidgetFlow[]
+  widgetRuns         WidgetRun[]
+  engineActionEvents EngineActionEvent[]
 }
 
 model User {
-  id             String       @id @default(cuid())
-  email          String
-  passwordHash   String?
+  id           String  @id @default(cuid())
+  email        String
+  passwordHash String?
 
   // Phase 0.3: role is now a FK to a per-org Role row carrying a
   // Permission[] array. Nullable so deleting a role doesn't cascade
   // -delete its users (admins reassign instead). The freeform
   // `role` string was dropped by 20260526000000_granular_permissions.
-  roleId         String?
-  roleRef        Role?        @relation(fields: [roleId], references: [id], onDelete: SetNull)
+  roleId  String?
+  roleRef Role?   @relation(fields: [roleId], references: [id], onDelete: SetNull)
 
   // Per-user resource-scoped grants — e.g. "this user can EVENT_MANAGE_SCOPED
   // for facilitator-ids [x, y]". Admin-picked at user create/edit time.
@@ -425,9 +430,9 @@ model ScheduledEvent {
   // exists; these columns capture the WHY + WHEN. canceledById is
   // recoverable from the audit log too, but storing inline saves a
   // join on the event-detail cancellation banner.
-  canceledAt          DateTime?
-  cancellationReason  String?
-  canceledById        String?
+  canceledAt         DateTime?
+  cancellationReason String?
+  canceledById       String?
 
   // Relations
   roomId            String
@@ -873,4 +878,247 @@ model AuditLogEntry {
   @@index([organizationId, createdAt]) // recent activity feed
   @@index([entityType, entityId]) // per-entity history
   @@index([actorId]) // "what did this user do?"
+}
+
+// ─── Workflow engine (Phase 2.0) ──────────────────────────────────
+//
+// Commit 1 of Phase 2.0 lands the storage layer for the engine.
+// We're shipping the FLOW shape (WidgetFlow + WidgetStep +
+// WidgetField), the RUNTIME shape (WidgetRun), the draft/publish
+// split (WidgetFlowDraft + WidgetFlowSnapshot), and the metering
+// table (EngineActionEvent).
+//
+// Deferred to later commits — explicitly NOT in this schema:
+//   • WidgetAction / WidgetActionKind  → Commit 2.2 (action engine)
+//   • WidgetTrigger / TriggerEventName → Commit 2.2 (event bus wiring)
+//   • WidgetCron                       → Commit 2.4 (time-based triggers)
+//   • WidgetEmailTemplate              → Commit 2.3 (email migration)
+//   • CustomFieldDefinition + JSONB    → Commit 2.5a (custom fields)
+//
+// See artcetera_admin/docs/WORKFLOW_ENGINE_DESIGN.md for the full
+// design rationale and how these models compose.
+
+enum WidgetFlowKind {
+  BOOKING // public-facing widget flow
+  EVENT_REACTION // triggered by a lifecycle event, no UI
+}
+
+model WidgetFlow {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  name           String
+  description    String?
+  kind           WidgetFlowKind @default(BOOKING)
+  isTemplate     Boolean        @default(false) // platform-shipped seed; admin clones
+  isPublished    Boolean        @default(false) // BOOKING only; gates the public URL
+  publishableKey String?        @unique // BOOKING only; appears in widget URL
+
+  // Versioning — bump on every Publish; old versions retained in
+  // WidgetFlowSnapshot for rollback. Active version is the highest.
+  version Int @default(1)
+
+  steps     WidgetStep[]
+  runs      WidgetRun[]
+  draft     WidgetFlowDraft?
+  snapshots WidgetFlowSnapshot[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([organizationId])
+  @@index([organizationId, isPublished])
+}
+
+enum WidgetStepKind {
+  // UI step kinds (BOOKING flows only)
+  SINGLE_SELECT
+  MULTI_SELECT
+  RADIO
+  CHECKBOX
+  TEXT_INPUT
+  TEXTAREA
+  NUMBER
+  EMAIL
+  PHONE
+  DATE_PICKER
+  TIME_PICKER
+  SLOT_PICKER // calendar-aware, facilitator-scoped
+  FORM // composite step with multiple WidgetField children
+  TEXT_BLOCK // read-only, supports {var} interpolation
+  RECAP // auto-summary of captured vars
+  STRIPE_CHECKOUT
+  VALIDATION // final confirmation render
+}
+
+model WidgetStep {
+  id     String     @id @default(cuid())
+  flowId String
+  flow   WidgetFlow @relation(fields: [flowId], references: [id], onDelete: Cascade)
+
+  order       Int
+  kind        WidgetStepKind
+  label       String // visible to the visitor
+  description String?
+
+  // Per-step config (kind-specific shape). See `flowConfig.ts` in the
+  // app layer for the discriminated union.
+  config Json @default("{}")
+
+  // Visibility expression (JSONLogic). Null = always visible.
+  // Example: { "==": [{ "var": "vars.level" }, "ADVANCED"] }
+  visibleWhen Json?
+
+  fields WidgetField[] // populated for FORM kind
+
+  @@unique([flowId, order])
+  @@index([flowId])
+}
+
+enum WidgetFieldKind {
+  TEXT
+  TEXTAREA
+  EMAIL
+  PHONE
+  NUMBER
+  DATE
+  BOOLEAN
+  SELECT
+  MULTI_SELECT
+}
+
+enum WidgetFieldBinding {
+  VAR // stores into vars.<name>
+  DB_COLUMN // writes to a hardcoded column (e.g. Client.email)
+  CUSTOM_FIELD // writes to a customFields.<key> on a target entity
+}
+
+model WidgetField {
+  id     String     @id @default(cuid())
+  stepId String
+  step   WidgetStep @relation(fields: [stepId], references: [id], onDelete: Cascade)
+
+  order       Int
+  kind        WidgetFieldKind
+  label       String
+  placeholder String?
+  required    Boolean         @default(false)
+
+  // Binding determines where the captured value lands at submit time.
+  //   VAR          → bindingTarget = "<varName>" (free namespace)
+  //   DB_COLUMN    → bindingTarget = "Client.email" | "Client.firstname" | ...
+  //   CUSTOM_FIELD → bindingTarget = "Client.customFields.preferredInstrument"
+  //                  (engine resolves to the CustomFieldDefinition by key)
+  binding       WidgetFieldBinding
+  bindingTarget String
+
+  // SELECT / MULTI_SELECT options, validation rules, etc.
+  config Json @default("{}")
+
+  @@unique([stepId, order])
+  @@index([stepId])
+}
+
+model WidgetRun {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  flowId         String
+  flow           WidgetFlow   @relation(fields: [flowId], references: [id])
+
+  // All captured values from the visitor's session — `vars.X` namespace.
+  vars Json @default("{}")
+
+  currentStepId String?
+  status        String // IN_PROGRESS | COMPLETED | ABANDONED | ERRORED
+
+  startedAt   DateTime  @default(now())
+  completedAt DateTime?
+
+  // For analytics: drop-off step, time per step, etc.
+  stepHistory Json @default("[]")
+
+  @@index([organizationId, startedAt])
+  @@index([flowId, status])
+}
+
+// Draft / Published split (locked 2026-05-26).
+//
+// WidgetFlow is the source of truth for the LIVE serving state —
+// only ever updated via the explicit Publish action, validated
+// before write. WidgetFlowDraft is the admin's working copy that
+// the editor autosaves to on a 2-3s debounce.
+//
+// The split solves two problems at once:
+//   1. Invalid intermediate states (mid-edit conditional with no
+//      children, broken var bindings, etc.) never reach the public
+//      widget URL.
+//   2. Admins never lose work — autosave fires within seconds of
+//      any keystroke.
+//
+// Publish validates the draft, copies into WidgetFlow, bumps
+// `version`, and writes a WidgetFlowSnapshot. Snapshots only happen
+// on Publish, not on every autosave, keeping the snapshot table small
+// and every snapshot meaningful.
+model WidgetFlowDraft {
+  id     String     @id @default(cuid())
+  flowId String     @unique
+  flow   WidgetFlow @relation(fields: [flowId], references: [id], onDelete: Cascade)
+
+  // Full draft state — serialized in the same shape as a snapshot
+  // payload. Single JSON blob rather than normalized rows because
+  // we never query INTO the draft; the editor reads it whole.
+  payload Json
+
+  updatedAt DateTime @updatedAt
+}
+
+model WidgetFlowSnapshot {
+  id        String     @id @default(cuid())
+  flowId    String
+  flow      WidgetFlow @relation(fields: [flowId], references: [id], onDelete: Cascade)
+  version   Int
+  // Full serialized flow (steps + actions + crons + templates +
+  // triggers) for rollback. JSON blob; no FK relations into the
+  // normalized tables.
+  payload   Json
+  createdAt DateTime   @default(now())
+
+  @@unique([flowId, version])
+  @@index([flowId])
+}
+
+// Usage metering (locked 2026-05-26).
+//
+// One row per non-trivial engine action execution. Aggregates feed
+// the per-org usage panel in /admin/parametres ("X actions ce mois")
+// and the future pricing/quota system (Phase 8). No pricing in v1 —
+// purely measurement.
+//
+// What counts as non-trivial: SEND_EMAIL, ISSUE_REFUND,
+// CREATE_SCHEDULED_EVENT, UPDATE_ENTITY, AI generation. Cheap ops
+// (variable assignment, condition eval, WAIT) are not logged.
+//
+// Index strategy: (orgId, executedAt) for daily aggregates,
+// (orgId, actionKind, executedAt) for per-kind breakdowns.
+model EngineActionEvent {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  flowId String? // null for cron-triggered standalone actions
+  runId  String? // null for cron-triggered or event-triggered actions
+
+  actionKind String // SEND_EMAIL | ISSUE_REFUND | ...
+  status     String // OK | ERROR | SKIPPED
+  durationMs Int    @default(0)
+
+  // Free-text reason on ERROR or SKIPPED. Truncated to 500 chars.
+  errorMessage String?
+
+  executedAt DateTime @default(now())
+
+  @@index([organizationId, executedAt])
+  @@index([organizationId, actionKind, executedAt])
 }
