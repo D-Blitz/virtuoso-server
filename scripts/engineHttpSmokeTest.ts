@@ -402,13 +402,26 @@ async function main() {
       assertEq(r.json?.replayed, true, 'replayed = true');
     }
 
-    // submit FORM with invalid email
-    const formStepId: string = (
-      await http(
-        'GET',
-        `/api/public/widget-flows/by-key/${publishableKey}/runs/${runId}`,
-      )
-    ).json?.currentStep?.id;
+    // submit FORM with invalid email — first verify the public field
+    // shape includes bindingTarget (the visitor renderer needs it to
+    // key the submission values correctly).
+    const currentStepResp = await http(
+      'GET',
+      `/api/public/widget-flows/by-key/${publishableKey}/runs/${runId}`,
+    );
+    const formStepId: string = currentStepResp.json?.currentStep?.id;
+    {
+      const fields = currentStepResp.json?.currentStep?.fields ?? [];
+      assert(
+        fields.length > 0 && fields.every((f: any) => typeof f.bindingTarget === 'string'),
+        'public field shape includes bindingTarget',
+      );
+      // binding kind itself MUST NOT be exposed — implementation detail.
+      assert(
+        fields.every((f: any) => f.binding === undefined),
+        'public field shape does NOT include binding kind',
+      );
+    }
     {
       const r = await http(
         'POST',

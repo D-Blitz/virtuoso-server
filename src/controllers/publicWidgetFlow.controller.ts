@@ -97,6 +97,8 @@ function publicStep(step: {
     label: string;
     placeholder: string | null;
     required: boolean;
+    binding: string;
+    bindingTarget: string;
     config: unknown;
   }>;
 }) {
@@ -117,6 +119,14 @@ function publicStep(step: {
         label: f.label,
         placeholder: f.placeholder,
         required: f.required,
+        // bindingTarget IS exposed publicly: the client needs it to
+        // construct the `values` object the engine expects on submit
+        // (the FORM handler looks up incoming values by bindingTarget).
+        // Not sensitive — it's a variable-name string, never an org id.
+        // `binding` kind itself is kept opaque to the client because
+        // only the server cares whether a value goes to vars vs a DB
+        // column vs a custom field.
+        bindingTarget: f.bindingTarget,
         config: f.config,
       })),
   };
