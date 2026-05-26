@@ -926,11 +926,23 @@ model WidgetFlow {
   // Phase 2.2 — post-completion actions.
   actions   WidgetAction[]
 
+  // Phase 2.2 follow-up — same trash + archive semantics as the rest
+  // of the soft-deletable models. Deleting a flow from the editor or
+  // list now soft-deletes (deletedAt stamp), recoverable from
+  // /admin/corbeille. Archiving (archivedAt) is the "keep forever,
+  // just hide" counterpart for retired flows.
+  deletedAt    DateTime?
+  deletedById  String?
+  archivedAt   DateTime?
+  archivedById String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([organizationId])
   @@index([organizationId, isPublished])
+  @@index([deletedAt])
+  @@index([archivedAt])
 }
 
 enum WidgetStepKind {

@@ -19,6 +19,7 @@ import {
   snapshotScheduledEvent,
   snapshotService,
   snapshotTerm,
+  snapshotWidgetFlow,
 } from '../services/audit/snapshots';
 import { sendError } from './httpErrors';
 
@@ -42,6 +43,8 @@ function snapshotterForArchive(
       return snapshotRoom;
     case 'ScheduledEvent':
       return snapshotScheduledEvent;
+    case 'WidgetFlow':
+      return snapshotWidgetFlow;
   }
 }
 

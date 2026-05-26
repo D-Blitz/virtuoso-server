@@ -28,6 +28,7 @@
 import { randomBytes } from 'node:crypto';
 import { Prisma } from '@prisma/client';
 
+import { getContext } from '../../auth/context';
 import prisma from '../../prisma';
 import {
   flowToPayload,
@@ -134,22 +135,106 @@ export async function createFlow(params: {
   });
 }
 
+/**
+ * Soft-delete a flow into the trash. Uses the platform's standard
+ * `deletedAt` stamp pattern (Phase 0.5 + 2.2-fu) so it appears in
+ * /admin/corbeille like every other deletable entity. Recoverable
+ * via restoreFlow() until the TTL purge or the admin explicitly
+ * empties the trash.
+ *
+ * Runs + metering events are NOT touched here — they stay attached
+ * so admin can still see the historical activity if they restore
+ * the flow. Hard purge (TrashService.purge → hardPurgeTrashed) is
+ * the path that wipes the WidgetFlow row + its dependencies.
+ */
 export async function deleteFlow(organizationId: string, flowId: string) {
-  // Verify ownership first to avoid leaking cross-tenant existence
-  // via timing on the .delete() error.
+  // Verify ownership first so a cross-tenant probe gets a 404 with
+  // the same timing as a genuine miss.
   const existing = await prisma.widgetFlow.findFirst({
     where: { id: flowId, organizationId },
     select: { id: true },
   });
   if (!existing) throw new FlowAdminError(`Flow ${flowId} not found`, 'NOT_FOUND');
 
-  // WidgetRun has onDelete: Restrict for analytics retention. We
-  // explicitly wipe runs first when the admin asks to delete — the
-  // intent is "remove this flow entirely". A future commit may add
-  // a "deactivate but keep runs" flag.
-  await prisma.engineActionEvent.deleteMany({ where: { flowId } });
-  await prisma.widgetRun.deleteMany({ where: { flowId } });
-  await prisma.widgetFlow.delete({ where: { id: flowId } });
+  const ctx = getContext();
+  await prisma.widgetFlow.update({
+    where: { id: flowId },
+    data: {
+      deletedAt: new Date(),
+      deletedById: ctx?.userId ?? null,
+    },
+  });
+}
+
+/**
+ * Restore a soft-deleted flow. Bypasses the default scope by
+ * filtering on deletedAt: { not: null }. Returns the freshly-restored
+ * flow detail; the admin's list query then re-includes it.
+ */
+export async function restoreFlow(organizationId: string, flowId: string) {
+  // updateMany bypasses the default deletedAt: null scoping.
+  const result = await prisma.widgetFlow.updateMany({
+    where: {
+      id: flowId,
+      organizationId,
+      deletedAt: { not: null },
+    },
+    data: {
+      deletedAt: null,
+      deletedById: null,
+    },
+  });
+  if (result.count === 0) {
+    throw new FlowAdminError(
+      `Flow ${flowId} not found in trash`,
+      'NOT_FOUND',
+    );
+  }
+}
+
+/**
+ * Archive a flow — same stamp pattern as the rest of the archivable
+ * entities. Hides from the live list while preserving full state for
+ * later recall. Counterpart to deleteFlow (trash) but distinct
+ * semantically: archive = "I'm done with this for now"; trash =
+ * "this was a mistake or no longer needed."
+ */
+export async function archiveFlow(organizationId: string, flowId: string) {
+  const existing = await prisma.widgetFlow.findFirst({
+    where: { id: flowId, organizationId },
+    select: { id: true },
+  });
+  if (!existing) throw new FlowAdminError(`Flow ${flowId} not found`, 'NOT_FOUND');
+
+  const ctx = getContext();
+  await prisma.widgetFlow.update({
+    where: { id: flowId },
+    data: {
+      archivedAt: new Date(),
+      archivedById: ctx?.userId ?? null,
+    },
+  });
+}
+
+export async function unarchiveFlow(organizationId: string, flowId: string) {
+  // updateMany bypasses the default archivedAt: null scoping.
+  const result = await prisma.widgetFlow.updateMany({
+    where: {
+      id: flowId,
+      organizationId,
+      archivedAt: { not: null },
+    },
+    data: {
+      archivedAt: null,
+      archivedById: null,
+    },
+  });
+  if (result.count === 0) {
+    throw new FlowAdminError(
+      `Flow ${flowId} not found in archive`,
+      'NOT_FOUND',
+    );
+  }
 }
 
 // ─── Draft ────────────────────────────────────────────────────────

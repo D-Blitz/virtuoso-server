@@ -8,6 +8,7 @@ import {
   snapshotScheduledEvent,
   snapshotService,
   snapshotTerm,
+  snapshotWidgetFlow,
 } from '../audit/snapshots';
 import {
   archive,
@@ -36,7 +37,8 @@ export type ArchivableEntityType =
   | 'Service'
   | 'Location'
   | 'Room'
-  | 'ScheduledEvent';
+  | 'ScheduledEvent'
+  | 'WidgetFlow';
 
 export const ARCHIVABLE_ENTITY_TYPES: ArchivableEntityType[] = [
   'Client',
@@ -46,6 +48,7 @@ export const ARCHIVABLE_ENTITY_TYPES: ArchivableEntityType[] = [
   'Location',
   'Room',
   'ScheduledEvent',
+  'WidgetFlow',
 ];
 
 function modelName(entityType: ArchivableEntityType): string {
@@ -70,6 +73,8 @@ function snapshotterFor(
       return snapshotRoom;
     case 'ScheduledEvent':
       return snapshotScheduledEvent;
+    case 'WidgetFlow':
+      return snapshotWidgetFlow;
   }
 }
 
@@ -114,6 +119,8 @@ function labelFor(entityType: ArchivableEntityType, row: any): string {
         hour: '2-digit',
         minute: '2-digit',
       });
+    case 'WidgetFlow':
+      return row.name;
   }
 }
 

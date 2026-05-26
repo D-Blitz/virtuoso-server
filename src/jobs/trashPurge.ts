@@ -19,6 +19,7 @@ import {
   snapshotServiceCategory,
   snapshotTag,
   snapshotTerm,
+  snapshotWidgetFlow,
 } from '../services/audit/snapshots';
 
 /**
@@ -90,6 +91,8 @@ function snapshotterFor(
       return snapshotClosure;
     case 'Enrollment':
       return snapshotEnrollment;
+    case 'WidgetFlow':
+      return snapshotWidgetFlow;
   }
 }
 

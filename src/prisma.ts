@@ -40,6 +40,11 @@ const SOFT_DELETE_MODELS = new Set<string>([
   'Term',
   'Enrollment',
   'Closure',
+  // Phase 2.2 follow-up — flows trash with the rest of the org's
+  // soft-deletable entities. Public engine routes auto-skip trashed
+  // flows because the extension scopes findUnique/findFirst by
+  // deletedAt: null by default.
+  'WidgetFlow',
 ]);
 
 /**
@@ -68,6 +73,10 @@ const ARCHIVABLE_MODELS = new Set<string>([
   'Location',
   'Room',
   'ScheduledEvent',
+  // Phase 2.2 follow-up — archive a retired flow without deleting it.
+  // Useful for seasonal flows (holiday booking, summer camp) the admin
+  // wants to recall later without keeping in the active list.
+  'WidgetFlow',
 ]);
 
 /**

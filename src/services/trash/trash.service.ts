@@ -13,6 +13,7 @@ import {
   snapshotServiceCategory,
   snapshotTag,
   snapshotTerm,
+  snapshotWidgetFlow,
 } from '../audit/snapshots';
 import { hardPurgeTrashed, restoreSoftDeleted } from './softDelete';
 
@@ -33,7 +34,8 @@ export type SoftDeletableEntityType =
   | 'Tag'
   | 'Term'
   | 'Closure'
-  | 'Enrollment';
+  | 'Enrollment'
+  | 'WidgetFlow';
 
 export const SOFT_DELETABLE_ENTITY_TYPES: SoftDeletableEntityType[] = [
   'ScheduledEvent',
@@ -48,6 +50,7 @@ export const SOFT_DELETABLE_ENTITY_TYPES: SoftDeletableEntityType[] = [
   'Term',
   'Closure',
   'Enrollment',
+  'WidgetFlow',
 ];
 
 /**
@@ -90,6 +93,8 @@ function snapshotterFor(
       return snapshotClosure;
     case 'Enrollment':
       return snapshotEnrollment;
+    case 'WidgetFlow':
+      return snapshotWidgetFlow;
   }
 }
 
@@ -149,6 +154,8 @@ function labelFor(entityType: SoftDeletableEntityType, row: any): string {
       return row.name;
     case 'Enrollment':
       return `Inscription ${row.id.slice(0, 8)}`;
+    case 'WidgetFlow':
+      return row.name;
   }
 }
 

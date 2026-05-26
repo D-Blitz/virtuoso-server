@@ -204,6 +204,25 @@ export function snapshotEnrollment(e: Nullable<any>): object | null {
 }
 
 /**
+ * Phase 2.2 — WidgetFlow snapshotter for trash + archive entries.
+ * Surfaces the audit-relevant scalars: name, kind, version, and the
+ * publishable key (useful in the trash list — admin can spot the
+ * specific flow they're hunting for vs. an unrelated demo).
+ */
+export function snapshotWidgetFlow(f: Nullable<any>): object | null {
+  if (!f) return null;
+  return {
+    id: f.id,
+    name: f.name,
+    description: f.description,
+    kind: f.kind,
+    isPublished: f.isPublished,
+    publishableKey: f.publishableKey,
+    version: f.version,
+  };
+}
+
+/**
  * Compute the set of scalar fields that differ between two snapshots.
  * Used on the read side so the admin UI doesn't need to recompute
  * diffs client-side.
