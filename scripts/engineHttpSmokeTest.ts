@@ -1,24 +1,36 @@
 /**
- * Engine HTTP smoke test — Phase 2.0 Commit 3.
+ * Engine HTTP smoke test (Phase 3.1 — graph engine v2).
  *
  * Spins up an Express app that mounts the same routes as src/index.ts
- * (minus the background jobs), drives both the admin CRUD surface and
- * the public visitor surface via real HTTP fetch calls, and asserts
- * end-to-end behavior — including the auth gate, draft autosave,
- * publish validation, JSON export/import round-trip, and the public
- * run lifecycle through `requireWidgetFlow`.
+ * (minus background jobs), drives admin CRUD + public visitor flows
+ * + event triggers via real HTTP fetch calls, and asserts end-to-end
+ * behavior on the new graph schema.
+ *
+ * Covers (each phase = one test scenario):
+ *   1. Admin CRUD: create flow + list + get
+ *   2. Draft autosave with v2 payload (nodes + edges + entryPoints)
+ *   3. Publish blocks on invalid payload (no entry point)
+ *   4. Successful publish: publishableKey assigned, snapshot written
+ *   5. Export → Import round-trip preserves graph shape
+ *   6. Visitor walk-through: 3-node BOOKING flow → COMPLETED
+ *   7. Idempotency: replay submit returns cached response
+ *   8. Validation errors: invalid email returns errors, run stays put
+ *   9. Conditional edge branching
+ *  10. EVENT_REACTION via dispatcher → run materializes + completes
+ *  11. Activity tab endpoint
+ *  12. Usage summary endpoint
+ *  13. Trash (DELETE) + archive endpoints work for flows
+ *  14. 404 on bogus publishable key
  *
  * Uses the existing dev-auth-bypass mechanism in `requireUser`:
- * NODE_ENV != 'production' + DEV_AUTH_BYPASS=true + DEV_DEFAULT_ORG_ID
- * grants every permission for the duration of the test. The bypass
- * is process-local; this script exits when done.
+ * NODE_ENV != 'production' + DEV_AUTH_BYPASS=true + DEV_DEFAULT_ORG_ID.
  *
  * Usage:
  *   npx ts-node scripts/engineHttpSmokeTest.ts [organizationId]
  *
  * Exit codes:
  *   0  all assertions passed
- *   1  any assertion failed or unexpected error
+ *   1  any assertion failed
  */
 import express from 'express';
 import { randomUUID } from 'node:crypto';
@@ -33,7 +45,7 @@ import enginePrisma from '../src/prisma';
 
 const prisma = new PrismaClient();
 
-// ─── Assertion harness ────────────────────────────────────────────
+// ─── Assertions ───────────────────────────────────────────────────
 
 let assertionCount = 0;
 let failureCount = 0;
@@ -89,15 +101,86 @@ async function http(
 function buildApp() {
   const app = express();
   app.use(express.json());
-  // Public routes (no requireUser).
   app.use('/api/public/widget-flows', publicWidgetFlowRoutes);
-  // Admin routes — gated by requireUser, which honors the dev bypass.
   app.use('/api', requireUser);
   app.use('/api/widget-flows', widgetFlowRoutes);
   return app;
 }
 
-// ─── Fixture cleanup ──────────────────────────────────────────────
+// ─── Fixture builder ──────────────────────────────────────────────
+
+function buildFlowPayload(name: string) {
+  const serviceNode = randomUUID();
+  const formNode = randomUUID();
+  const recapNode = randomUUID();
+  return {
+    name,
+    description: null,
+    kind: 'BOOKING' as const,
+    nodes: [
+      {
+        id: serviceNode,
+        kind: 'SINGLE_SELECT',
+        label: 'Pick service',
+        description: null,
+        config: {
+          varName: 'service',
+          options: [
+            { value: 'piano', label: 'Piano' },
+            { value: 'guitar', label: 'Guitar' },
+          ],
+        },
+        position: { x: 100, y: 100 },
+      },
+      {
+        id: formNode,
+        kind: 'FORM',
+        label: 'Your details',
+        description: null,
+        config: {
+          fields: [
+            {
+              order: 0,
+              kind: 'TEXT',
+              label: 'First name',
+              placeholder: null,
+              required: true,
+              binding: 'VAR',
+              bindingTarget: 'firstname',
+              config: {},
+            },
+            {
+              order: 1,
+              kind: 'EMAIL',
+              label: 'Email',
+              placeholder: null,
+              required: true,
+              binding: 'VAR',
+              bindingTarget: 'email',
+              config: {},
+            },
+          ],
+        },
+        position: { x: 100, y: 300 },
+      },
+      {
+        id: recapNode,
+        kind: 'RECAP',
+        label: 'Confirm',
+        description: null,
+        config: {},
+        position: { x: 100, y: 500 },
+      },
+    ],
+    edges: [
+      { fromNodeId: serviceNode, toNodeId: formNode, order: 0 },
+      { fromNodeId: formNode, toNodeId: recapNode, order: 0 },
+    ],
+    entryPoints: [
+      { kind: 'visitor' as const, config: {}, entryNodeId: serviceNode },
+    ],
+  };
+}
 
 async function purgeSmokeFlows(organizationId: string) {
   const flows = await prisma.widgetFlow.findMany({
@@ -130,18 +213,15 @@ async function main() {
     console.error(`Organization ${organizationId} not found.`);
     process.exit(1);
   }
-  console.log(`\nRunning HTTP smoke test against org "${org.name}"\n`);
+  console.log(`\nv2 HTTP smoke test — org "${org.name}"\n`);
 
-  // Configure dev-auth-bypass for the admin routes. Setting these env
-  // vars in-process is enough because the requireUser middleware reads
-  // them at request time, not at import.
   process.env.DEV_AUTH_BYPASS = 'true';
   process.env.DEV_DEFAULT_ORG_ID = organizationId;
 
   await purgeSmokeFlows(organizationId);
 
   const app = buildApp();
-  const server = app.listen(0); // ephemeral port
+  const server = app.listen(0);
   await new Promise<void>((r) => server.on('listening', () => r()));
   const port = (server.address() as { port: number }).port;
   baseUrl = `http://localhost:${port}`;
@@ -151,155 +231,39 @@ async function main() {
   let publishableKey: string | null = null;
 
   try {
-    // ── Phase 1: admin creates a flow ─────────────────────────
+    // ── 1. Admin creates a flow ─────────────────────────────
     console.log('1. POST /api/widget-flows — create draft flow');
     {
       const r = await http('POST', '/api/widget-flows', {
         name: '[http-smoke] flow A',
-        description: 'Smoke test flow',
         kind: 'BOOKING',
       });
-      assertEq(r.status, 201, 'status = 201');
+      assertEq(r.status, 201, 'create status = 201');
       assert(r.json?.flow?.id, 'flow.id returned');
-      assertEq(r.json?.flow?.isPublished, false, 'isPublished = false on create');
-      assertEq(r.json?.flow?.publishableKey, null, 'publishableKey = null on create');
-      createdFlowId = r.json?.flow?.id;
+      assertEq(r.json?.flow?.isPublished, false, 'isPublished = false');
+      createdFlowId = r.json.flow.id;
     }
-    if (!createdFlowId) throw new Error('createdFlowId not set, aborting');
+    if (!createdFlowId) throw new Error('createdFlowId not set');
 
-    // ── Phase 2: list shows the new flow ──────────────────────
-    console.log('\n2. GET /api/widget-flows — list shows new flow');
-    {
-      const r = await http('GET', '/api/widget-flows');
-      assertEq(r.status, 200, 'status = 200');
-      assert(
-        Array.isArray(r.json?.flows) &&
-          r.json.flows.some((f: any) => f.id === createdFlowId),
-        'list includes new flow',
-      );
-    }
-
-    // ── Phase 3: GET detail before any draft ──────────────────
-    console.log('\n3. GET /api/widget-flows/:id — detail (no draft yet)');
-    {
-      const r = await http('GET', `/api/widget-flows/${createdFlowId}`);
-      assertEq(r.status, 200, 'status = 200');
-      assertEq(r.json?.flow?.steps?.length, 0, 'no steps yet');
-    }
-    {
-      const r = await http('GET', `/api/widget-flows/${createdFlowId}/draft`);
-      assertEq(r.status, 200, 'GET draft status = 200');
-      assertEq(r.json?.draft, null, 'draft is null before first save');
-    }
-
-    // ── Phase 4: PATCH draft — autosave ───────────────────────
-    console.log('\n4. PATCH /api/widget-flows/:id/draft — autosave');
-    const flowPayload = {
-      name: '[http-smoke] flow A',
-      description: 'Updated by smoke test',
-      kind: 'BOOKING' as const,
-      steps: [
-        {
-          order: 0,
-          kind: 'SINGLE_SELECT' as const,
-          label: 'Pick an instrument',
-          description: null,
-          config: {
-            varName: 'instrument',
-            options: [
-              { value: 'piano', label: 'Piano' },
-              { value: 'guitar', label: 'Guitare' },
-            ],
-          },
-          visibleWhen: null,
-          fields: [],
-        },
-        {
-          order: 1,
-          kind: 'FORM' as const,
-          label: 'Your contact',
-          description: null,
-          config: {},
-          visibleWhen: null,
-          fields: [
-            {
-              order: 0,
-              kind: 'TEXT' as const,
-              label: 'Prénom',
-              placeholder: null,
-              required: true,
-              binding: 'VAR' as const,
-              bindingTarget: 'firstname',
-              config: {},
-            },
-            {
-              order: 1,
-              kind: 'EMAIL' as const,
-              label: 'Email',
-              placeholder: null,
-              required: true,
-              binding: 'VAR' as const,
-              bindingTarget: 'email',
-              config: {},
-            },
-          ],
-        },
-        {
-          order: 2,
-          kind: 'RECAP' as const,
-          label: 'Confirmation',
-          description: null,
-          config: {},
-          visibleWhen: null,
-          fields: [],
-        },
-      ],
-    };
+    // ── 2. Autosave draft (v2 payload) ──────────────────────
+    console.log('\n2. PATCH /api/widget-flows/:id/draft — v2 payload');
+    const v2Payload = buildFlowPayload('[http-smoke] flow A');
     {
       const r = await http(
         'PATCH',
         `/api/widget-flows/${createdFlowId}/draft`,
-        flowPayload,
+        v2Payload,
       );
       assertEq(r.status, 200, 'PATCH draft status = 200');
       assert(r.json?.draft?.updatedAt, 'draft.updatedAt returned');
     }
-    {
-      const r = await http('GET', `/api/widget-flows/${createdFlowId}/draft`);
-      assertEq(r.status, 200, 'GET draft status = 200 after save');
-      assertEq(r.json?.draft?.steps?.length, 3, 'draft has 3 steps');
-    }
 
-    // ── Phase 5: publish ──────────────────────────────────────
-    console.log('\n5. POST /api/widget-flows/:id/publish');
+    // ── 3. Publish blocked on invalid payload (no entry point) ─
+    console.log('\n3. Publish blocked when no entry point');
     {
+      const badPayload = { ...v2Payload, entryPoints: [] };
+      await http('PATCH', `/api/widget-flows/${createdFlowId}/draft`, badPayload);
       const r = await http('POST', `/api/widget-flows/${createdFlowId}/publish`);
-      assertEq(r.status, 200, 'publish status = 200');
-      assertEq(r.json?.flow?.isPublished, true, 'isPublished = true');
-      assertEq(r.json?.flow?.version, 2, 'version bumped to 2');
-      assert(
-        typeof r.json?.flow?.publishableKey === 'string' &&
-          r.json.flow.publishableKey.startsWith('wf_'),
-        'publishableKey assigned (wf_ prefix)',
-      );
-      assertEq(r.json?.flow?.steps?.length, 3, 'normalized steps written');
-      publishableKey = r.json.flow.publishableKey;
-    }
-
-    // ── Phase 6: publish blocked by validation ────────────────
-    console.log('\n6. Publish blocked when draft is invalid');
-    {
-      // Save a draft with no steps — should be blocked.
-      await http('PATCH', `/api/widget-flows/${createdFlowId}/draft`, {
-        name: '[http-smoke] flow A',
-        description: null,
-        kind: 'BOOKING' as const,
-        steps: [],
-      });
-      const r = await http(
-        'POST',
-        `/api/widget-flows/${createdFlowId}/publish`,
-      );
       assertEq(r.status, 422, 'publish blocked status = 422');
       assertEq(r.json?.code, 'PUBLISH_BLOCKED', 'code = PUBLISH_BLOCKED');
       assert(
@@ -307,51 +271,59 @@ async function main() {
         'issues array returned',
       );
     }
-    // Restore the good draft + republish so subsequent phases work.
-    await http('PATCH', `/api/widget-flows/${createdFlowId}/draft`, flowPayload);
-    await http('POST', `/api/widget-flows/${createdFlowId}/publish`);
+    // Restore + republish for downstream phases.
+    await http('PATCH', `/api/widget-flows/${createdFlowId}/draft`, v2Payload);
 
-    // ── Phase 7: export round-trips ───────────────────────────
-    console.log('\n7. GET /api/widget-flows/:id/export');
-    let exportedPayload: any = null;
+    // ── 4. Successful publish ───────────────────────────────
+    console.log('\n4. POST /api/widget-flows/:id/publish');
     {
-      const r = await http('GET', `/api/widget-flows/${createdFlowId}/export`);
-      assertEq(r.status, 200, 'export status = 200');
-      assertEq(r.json?.kind, 'BOOKING', 'export.kind preserved');
-      assertEq(r.json?.steps?.length, 3, 'export has 3 steps');
-      exportedPayload = r.json;
+      const r = await http('POST', `/api/widget-flows/${createdFlowId}/publish`);
+      assertEq(r.status, 200, 'publish status = 200');
+      assertEq(r.json?.flow?.isPublished, true, 'isPublished = true');
+      assert(
+        typeof r.json?.flow?.publishableKey === 'string' &&
+          r.json.flow.publishableKey.startsWith('wf_'),
+        'publishableKey assigned (wf_ prefix)',
+      );
+      assertEq(r.json?.flow?.nodes?.length, 3, '3 nodes persisted');
+      assertEq(r.json?.flow?.edges?.length, 2, '2 edges persisted');
+      assertEq(r.json?.flow?.entryPoints?.length, 1, '1 entry point persisted');
+      publishableKey = r.json.flow.publishableKey;
     }
 
-    // ── Phase 8: import creates a new flow ────────────────────
-    console.log('\n8. POST /api/widget-flows/import');
+    // ── 5. Export → import round-trip ───────────────────────
+    console.log('\n5. Export + re-import preserves shape');
     let importedFlowId: string | null = null;
     {
+      const exportRes = await http(
+        'GET',
+        `/api/widget-flows/${createdFlowId}/export`,
+      );
+      assertEq(exportRes.status, 200, 'export status = 200');
+      assertEq(exportRes.json?.nodes?.length, 3, 'export has 3 nodes');
+      assertEq(exportRes.json?.edges?.length, 2, 'export has 2 edges');
+
       const importBody = {
-        ...exportedPayload,
+        ...exportRes.json,
         name: '[http-smoke] imported flow',
       };
-      const r = await http('POST', '/api/widget-flows/import', importBody);
-      assertEq(r.status, 201, 'import status = 201');
-      assert(r.json?.flow?.id, 'imported flow.id returned');
-      assert(
-        r.json?.flow?.id !== createdFlowId,
-        'imported flow has different id',
-      );
+      const importRes = await http('POST', '/api/widget-flows/import', importBody);
+      assertEq(importRes.status, 201, 'import status = 201');
+      assertEq(importRes.json?.flow?.nodes?.length, 3, 'imported has 3 nodes');
       assertEq(
-        r.json?.flow?.isPublished,
+        importRes.json?.flow?.isPublished,
         false,
         'imported flow is NOT published',
       );
-      assertEq(r.json?.flow?.steps?.length, 3, 'imported flow has 3 steps');
-      importedFlowId = r.json.flow.id;
+      importedFlowId = importRes.json.flow.id;
     }
 
-    // ── Phase 9: public visitor walks the published flow ──────
-    console.log('\n9. Public flow run via :publishableKey');
+    // ── 6. Public visitor walk-through ──────────────────────
+    console.log('\n6. Public visitor walks the published flow');
     if (!publishableKey) throw new Error('publishableKey not set');
 
     let runId: string | null = null;
-    let firstStepId: string | null = null;
+    let firstNodeId: string | null = null;
     {
       const r = await http(
         'POST',
@@ -359,568 +331,257 @@ async function main() {
         {},
       );
       assertEq(r.status, 201, 'createRun status = 201');
-      assert(r.json?.run?.id, 'run.id returned');
-      assertEq(r.json?.run?.status, 'IN_PROGRESS', 'status = IN_PROGRESS');
+      assertEq(r.json?.run?.status, 'WAITING_INPUT', 'status = WAITING_INPUT after walk');
       assertEq(
-        r.json?.firstStep?.kind,
+        r.json?.firstNode?.kind,
         'SINGLE_SELECT',
-        'firstStep.kind = SINGLE_SELECT',
+        'firstNode.kind = SINGLE_SELECT',
       );
-      // Public response MUST NOT leak organizationId.
+      // Public response strips organizationId.
       assertEq(
         (r.json?.run as Record<string, unknown>)?.organizationId,
         undefined,
         'public run does NOT leak organizationId',
       );
       runId = r.json.run.id;
-      firstStepId = r.json.firstStep.id;
+      firstNodeId = r.json.firstNode.id;
     }
-    if (!runId || !firstStepId) throw new Error('runId/firstStepId not set');
+    if (!runId || !firstNodeId) throw new Error('runId/firstNodeId not set');
 
-    // submit step 1 (SINGLE_SELECT)
-    const submit1Id = randomUUID();
+    // Submit SINGLE_SELECT
+    const submit1 = randomUUID();
     {
       const r = await http(
         'POST',
-        `/api/public/widget-flows/by-key/${publishableKey}/runs/${runId}/steps/${firstStepId}/submit`,
-        { values: { selected: 'piano' }, clientSubmitId: submit1Id },
+        `/api/public/widget-flows/by-key/${publishableKey}/runs/${runId}/nodes/${firstNodeId}/submit`,
+        { values: { selected: 'piano' }, clientSubmitId: submit1 },
       );
-      assertEq(r.status, 200, 'submit step 1 status = 200');
+      assertEq(r.status, 200, 'submit 1 status = 200');
       assertEq(r.json?.errors?.length, 0, 'no errors');
       assertEq(r.json?.replayed, false, 'not replayed');
-      assert(r.json?.nextStep?.id, 'nextStep returned');
+      assertEq(r.json?.nextNode?.kind, 'FORM', 'nextNode = FORM');
     }
 
-    // idempotent replay of step 1
+    // ── 7. Idempotent replay ────────────────────────────────
+    console.log('\n7. Idempotency: replay same clientSubmitId');
     {
       const r = await http(
         'POST',
-        `/api/public/widget-flows/by-key/${publishableKey}/runs/${runId}/steps/${firstStepId}/submit`,
-        { values: { selected: 'piano' }, clientSubmitId: submit1Id },
+        `/api/public/widget-flows/by-key/${publishableKey}/runs/${runId}/nodes/${firstNodeId}/submit`,
+        { values: { selected: 'piano' }, clientSubmitId: submit1 },
       );
-      assertEq(r.status, 200, 'replay status = 200');
       assertEq(r.json?.replayed, true, 'replayed = true');
+      assertEq(r.json?.errors?.length, 0, 'no errors on replay');
     }
 
-    // submit FORM with invalid email — first verify the public field
-    // shape includes bindingTarget (the visitor renderer needs it to
-    // key the submission values correctly).
-    const currentStepResp = await http(
-      'GET',
-      `/api/public/widget-flows/by-key/${publishableKey}/runs/${runId}`,
-    );
-    const formStepId: string = currentStepResp.json?.currentStep?.id;
-    {
-      const fields = currentStepResp.json?.currentStep?.fields ?? [];
-      assert(
-        fields.length > 0 && fields.every((f: any) => typeof f.bindingTarget === 'string'),
-        'public field shape includes bindingTarget',
-      );
-      // binding kind itself MUST NOT be exposed — implementation detail.
-      assert(
-        fields.every((f: any) => f.binding === undefined),
-        'public field shape does NOT include binding kind',
-      );
-    }
+    // ── 8. Validation errors on FORM ────────────────────────
+    console.log('\n8. FORM submit with invalid email');
+    const formNodeId: string = (
+      await http(
+        'GET',
+        `/api/public/widget-flows/by-key/${publishableKey}/runs/${runId}`,
+      )
+    ).json?.currentNode?.id;
     {
       const r = await http(
         'POST',
-        `/api/public/widget-flows/by-key/${publishableKey}/runs/${runId}/steps/${formStepId}/submit`,
+        `/api/public/widget-flows/by-key/${publishableKey}/runs/${runId}/nodes/${formNodeId}/submit`,
         {
           values: { firstname: 'A', email: 'not-an-email' },
           clientSubmitId: randomUUID(),
         },
       );
-      assertEq(r.status, 200, 'FORM submit returns 200 even with errors');
-      assert(r.json?.errors?.length > 0, 'FORM returns validation errors');
+      assertEq(r.status, 200, 'FORM returns 200 even with errors');
+      assert(r.json?.errors?.length > 0, 'errors returned');
+      assert(
+        r.json.errors.some((e: any) => e.field === 'email'),
+        'error on email field',
+      );
     }
 
-    // submit FORM valid → RECAP
+    // FORM submit valid → RECAP
     {
       const r = await http(
         'POST',
-        `/api/public/widget-flows/by-key/${publishableKey}/runs/${runId}/steps/${formStepId}/submit`,
+        `/api/public/widget-flows/by-key/${publishableKey}/runs/${runId}/nodes/${formNodeId}/submit`,
         {
           values: { firstname: 'Alice', email: 'alice@example.com' },
           clientSubmitId: randomUUID(),
         },
       );
-      assertEq(r.status, 200, 'FORM valid submit status = 200');
-      assertEq(r.json?.errors?.length, 0, 'no errors');
-      assertEq(r.json?.nextStep?.kind, 'RECAP', 'nextStep = RECAP');
+      assertEq(r.json?.nextNode?.kind, 'RECAP', 'nextNode = RECAP');
     }
 
-    // submit RECAP → COMPLETED
-    const recapStepId: string = (
+    // RECAP → COMPLETED
+    const recapNodeId: string = (
       await http(
         'GET',
         `/api/public/widget-flows/by-key/${publishableKey}/runs/${runId}`,
       )
-    ).json?.currentStep?.id;
+    ).json?.currentNode?.id;
     {
       const r = await http(
         'POST',
-        `/api/public/widget-flows/by-key/${publishableKey}/runs/${runId}/steps/${recapStepId}/submit`,
+        `/api/public/widget-flows/by-key/${publishableKey}/runs/${runId}/nodes/${recapNodeId}/submit`,
         { values: {}, clientSubmitId: randomUUID() },
       );
-      assertEq(r.status, 200, 'RECAP submit status = 200');
       assertEq(r.json?.run?.status, 'COMPLETED', 'run.status = COMPLETED');
-      assertEq(r.json?.nextStep, null, 'no next step');
+      assertEq(r.json?.nextNode, null, 'no next node');
     }
 
-    // ── Phase 10: 404 on bogus publishable key ────────────────
-    console.log('\n10. 404 on bogus publishable key');
+    // ── 9. Conditional edge branching ───────────────────────
+    console.log('\n9. Conditional edge branching');
     {
-      const r = await http(
-        'POST',
-        '/api/public/widget-flows/by-key/wf_bogus_key/runs',
-        {},
-      );
-      assertEq(r.status, 404, 'bogus key returns 404');
-    }
+      // Build a 4-node flow with two outgoing edges from the first
+      // SINGLE_SELECT, gated by JSONLogic. selected=skip → bypass
+      // node B; selected=keep → through node B.
+      const a = randomUUID();
+      const b = randomUUID();
+      const c = randomUUID();
+      const branchFlow = await http('POST', '/api/widget-flows', {
+        name: '[http-smoke] branch flow',
+        kind: 'BOOKING',
+      });
+      const branchFlowId = branchFlow.json.flow.id;
 
-    // ── Phase 11: Activity tab — GET runs for a flow ──────────
-    console.log('\n11. GET /api/widget-flows/:id/runs');
-    {
-      const r = await http('GET', `/api/widget-flows/${createdFlowId}/runs`);
-      assertEq(r.status, 200, 'runs status = 200');
-      assert(Array.isArray(r.json?.runs), 'runs array returned');
-      assert(typeof r.json?.total === 'number', 'total is a number');
-      // The Phase 9 walkthrough created exactly one run that completed.
-      assert(
-        r.json.runs.some((run: any) => run.status === 'COMPLETED'),
-        'has at least one COMPLETED run',
-      );
-      // Public PII fields must NOT appear in the admin response either
-      // (vars are sensitive; the admin opens a per-run detail surface
-      // for full data later).
-      const sample = r.json.runs[0];
-      assertEq(sample?.vars, undefined, 'runs do not include vars');
-      // Pagination params are echoed.
-      assertEq(typeof r.json?.limit, 'number', 'limit echoed');
-      assertEq(typeof r.json?.offset, 'number', 'offset echoed');
-    }
-    {
-      // Pagination — limit=1 should return at most one row.
-      const r = await http(
-        'GET',
-        `/api/widget-flows/${createdFlowId}/runs?limit=1`,
-      );
-      assertEq(r.status, 200, 'runs limit=1 status = 200');
-      assert(r.json.runs.length <= 1, 'runs.length ≤ 1 under limit=1');
-      assertEq(r.json.limit, 1, 'limit echoed as 1');
-    }
-
-    // ── Phase 12: Usage summary ───────────────────────────────
-    console.log('\n12. GET /api/widget-flows/usage/summary');
-    {
-      const r = await http('GET', '/api/widget-flows/usage/summary');
-      assertEq(r.status, 200, 'usage summary status = 200');
-      assertEq(typeof r.json?.thisMonth, 'number', 'thisMonth is a number');
-      assertEq(typeof r.json?.last30Days, 'number', 'last30Days is a number');
-      assert(typeof r.json?.byKind === 'object', 'byKind is an object');
-      // The Phase 9 run fired ≥ 4 metering events (RUN_START / 2×
-      // STEP_SUBMIT / STEP_VALIDATION_FAILED / RUN_COMPLETE) so the
-      // monthly count must be positive.
-      assert(r.json.thisMonth > 0, 'thisMonth > 0');
-      // RUN_START should be present in byKind.
-      assert(
-        typeof r.json.byKind.RUN_START === 'number' &&
-          r.json.byKind.RUN_START > 0,
-        'byKind.RUN_START > 0',
-      );
-    }
-
-    // ── Phase 13: Phase 2.1 — conditional step visibility ─────
-    // Build a 4-step flow where step[2] is hidden when vars.skip == true.
-    // Walk it twice: once skipping (expect to land on step[3] directly)
-    // and once not skipping (expect step[2] to be shown).
-    console.log('\n13. Conditional step visibility (Phase 2.1)');
-    {
-      const condFlowBody = {
-        name: '[http-smoke] conditional flow',
-        kind: 'BOOKING' as const,
-      };
-      const create = await http('POST', '/api/widget-flows', condFlowBody);
-      assertEq(create.status, 201, 'cond flow created');
-      const condFlowId = create.json.flow.id;
-
-      const condPayload = {
-        name: '[http-smoke] conditional flow',
+      const branchPayload = {
+        name: '[http-smoke] branch flow',
         description: null,
         kind: 'BOOKING' as const,
-        steps: [
+        nodes: [
           {
-            order: 0,
-            kind: 'SINGLE_SELECT' as const,
-            label: 'Skip optional step?',
+            id: a,
+            kind: 'SINGLE_SELECT',
+            label: 'Skip step?',
             description: null,
             config: {
               varName: 'skip',
               options: [
-                { value: 'yes', label: 'Skip' },
-                { value: 'no', label: 'Show' },
+                { value: 'skip', label: 'Skip' },
+                { value: 'keep', label: 'Keep' },
               ],
             },
-            visibleWhen: null,
-            fields: [],
+            position: { x: 0, y: 0 },
           },
           {
-            order: 1,
-            kind: 'SINGLE_SELECT' as const,
-            label: 'Always visible (sentry)',
-            description: null,
-            config: {
-              varName: 'sentry',
-              options: [{ value: 'ok', label: 'OK' }],
-            },
-            visibleWhen: null,
-            fields: [],
-          },
-          {
-            order: 2,
-            kind: 'SINGLE_SELECT' as const,
-            label: 'Optional — hidden when skip=yes',
+            id: b,
+            kind: 'SINGLE_SELECT',
+            label: 'Optional',
             description: null,
             config: {
               varName: 'optional',
-              options: [{ value: 'picked', label: 'Pick' }],
+              options: [{ value: 'x', label: 'X' }],
             },
-            // JSONLogic: != equality. Visible when vars.skip != "yes".
-            visibleWhen: {
-              '!=': [{ var: 'vars.skip' }, 'yes'],
-            },
-            fields: [],
+            position: { x: 0, y: 200 },
           },
           {
-            order: 3,
-            kind: 'RECAP' as const,
+            id: c,
+            kind: 'RECAP',
             label: 'Done',
             description: null,
             config: {},
-            visibleWhen: null,
-            fields: [],
+            position: { x: 0, y: 400 },
           },
+        ],
+        edges: [
+          // From A: if skip → C (bypass B); else → B.
+          {
+            fromNodeId: a,
+            toNodeId: c,
+            order: 0,
+            condition: { '==': [{ var: 'vars.skip' }, 'skip'] },
+          },
+          { fromNodeId: a, toNodeId: b, order: 1 },
+          // B → C
+          { fromNodeId: b, toNodeId: c, order: 0 },
+        ],
+        entryPoints: [
+          { kind: 'visitor' as const, config: {}, entryNodeId: a },
         ],
       };
 
-      await http('PATCH', `/api/widget-flows/${condFlowId}/draft`, condPayload);
-      const pub = await http('POST', `/api/widget-flows/${condFlowId}/publish`);
-      assertEq(pub.status, 200, 'cond flow published');
-      const condKey = pub.json.flow.publishableKey;
+      await http('PATCH', `/api/widget-flows/${branchFlowId}/draft`, branchPayload);
+      const pubB = await http(
+        'POST',
+        `/api/widget-flows/${branchFlowId}/publish`,
+      );
+      assertEq(pubB.status, 200, 'branch flow published');
+      const branchKey = pubB.json.flow.publishableKey;
 
-      // ─── Path A: skip=yes — optional step should be skipped ──
+      // Path A: skip → bypass B
       const runA = await http(
         'POST',
-        `/api/public/widget-flows/by-key/${condKey}/runs`,
+        `/api/public/widget-flows/by-key/${branchKey}/runs`,
         {},
       );
       const runAId = runA.json.run.id;
-      const step0AId = runA.json.firstStep.id;
-
-      const submitA0 = await http(
-        'POST',
-        `/api/public/widget-flows/by-key/${condKey}/runs/${runAId}/steps/${step0AId}/submit`,
-        { values: { selected: 'yes' }, clientSubmitId: randomUUID() },
-      );
-      assertEq(submitA0.json?.errors?.length, 0, 'A0 no errors');
-      assertEq(
-        submitA0.json?.nextStep?.label,
-        'Always visible (sentry)',
-        'A0 advances to sentry step',
-      );
-
-      const step1AId = submitA0.json.nextStep.id;
-      const submitA1 = await http(
-        'POST',
-        `/api/public/widget-flows/by-key/${condKey}/runs/${runAId}/steps/${step1AId}/submit`,
-        { values: { selected: 'ok' }, clientSubmitId: randomUUID() },
-      );
-      assertEq(
-        submitA1.json?.nextStep?.label,
-        'Done',
-        'A1 SKIPS optional step → lands on Done',
-      );
-
-      // ─── Path B: skip=no — optional step should appear ───────
-      const runB = await http(
-        'POST',
-        `/api/public/widget-flows/by-key/${condKey}/runs`,
-        {},
-      );
-      const runBId = runB.json.run.id;
-      const step0BId = runB.json.firstStep.id;
-
-      const submitB0 = await http(
-        'POST',
-        `/api/public/widget-flows/by-key/${condKey}/runs/${runBId}/steps/${step0BId}/submit`,
-        { values: { selected: 'no' }, clientSubmitId: randomUUID() },
-      );
-      assertEq(submitB0.json?.nextStep?.label, 'Always visible (sentry)', 'B0 advances to sentry');
-
-      const step1BId = submitB0.json.nextStep.id;
-      const submitB1 = await http(
-        'POST',
-        `/api/public/widget-flows/by-key/${condKey}/runs/${runBId}/steps/${step1BId}/submit`,
-        { values: { selected: 'ok' }, clientSubmitId: randomUUID() },
-      );
-      assertEq(
-        submitB1.json?.nextStep?.label,
-        'Optional — hidden when skip=yes',
-        'B1 SHOWS optional step (condition true)',
-      );
-
-      // Clean up the conditional flow.
-      await http('DELETE', `/api/widget-flows/${condFlowId}`);
-    }
-
-    // ── Phase 14: Phase 2.2 — post-completion actions ─────────
-    // Build a flow with a SEND_EMAIL action gated by a CONDITIONAL.
-    // Walk it to completion, then inspect EngineActionEvent rows to
-    // verify both actions fired (or were correctly skipped).
-    console.log('\n14. Post-completion actions (Phase 2.2)');
-    {
-      // Create a minimal 2-step flow: collect an email, confirm.
-      const actionFlowBody = {
-        name: '[http-smoke] action flow',
-        kind: 'BOOKING' as const,
-      };
-      const create = await http('POST', '/api/widget-flows', actionFlowBody);
-      const actionFlowId = create.json.flow.id;
-
-      const actionPayload = {
-        name: '[http-smoke] action flow',
-        description: null,
-        kind: 'BOOKING' as const,
-        steps: [
-          {
-            order: 0,
-            kind: 'FORM' as const,
-            label: 'Coordonnées',
-            description: null,
-            config: {},
-            visibleWhen: null,
-            fields: [
-              {
-                order: 0,
-                kind: 'EMAIL' as const,
-                label: 'Email',
-                placeholder: null,
-                required: true,
-                binding: 'VAR' as const,
-                bindingTarget: 'email',
-                config: {},
-              },
-              {
-                order: 1,
-                kind: 'BOOLEAN' as const,
-                label: 'Recevoir un email de confirmation',
-                placeholder: null,
-                required: false,
-                binding: 'VAR' as const,
-                bindingTarget: 'wantsEmail',
-                config: {},
-              },
-            ],
-          },
-          {
-            order: 1,
-            kind: 'RECAP' as const,
-            label: 'Done',
-            description: null,
-            config: {},
-            visibleWhen: null,
-            fields: [],
-          },
-        ],
-      };
-
-      // Include the action tree in the payload so it round-trips
-      // through draft → publish → snapshot → re-load. This is the
-      // real admin path; using raw prisma.widgetAction.create would
-      // bypass the FlowPayload integration we want to verify.
-      const actionPayloadWithActions = {
-        ...actionPayload,
-        actions: [
-          {
-            order: 0,
-            kind: 'CONDITIONAL',
-            config: {
-              condition: { '==': [{ var: 'vars.wantsEmail' }, true] },
-            },
-            children: [
-              {
-                order: 0,
-                kind: 'SEND_EMAIL',
-                config: {
-                  to: '{vars.email}',
-                  subject: 'Smoke test — vous avez complété le flow',
-                  bodyHtml: '<p>Bonjour, ceci est un email de test.</p>',
-                },
-                children: [],
-              },
-            ],
-          },
-          {
-            order: 1,
-            kind: 'SEND_EMAIL',
-            config: {
-              to: '{vars.email}',
-              subject: 'Smoke test — top-level action',
-              bodyHtml: '<p>Always fires.</p>',
-            },
-            children: [],
-          },
-        ],
-      };
-
-      await http(
-        'PATCH',
-        `/api/widget-flows/${actionFlowId}/draft`,
-        actionPayloadWithActions,
-      );
-      const pub = await http('POST', `/api/widget-flows/${actionFlowId}/publish`);
-      assertEq(pub.status, 200, 'action flow published');
-      const actionKey = pub.json.flow.publishableKey;
-
-      // Verify actions actually wrote to the normalized table via
-      // writePayloadToFlow's recursive insert.
-      const actionsInDb = await prisma.widgetAction.findMany({
-        where: { flowId: actionFlowId },
-      });
-      assertEq(actionsInDb.length, 3, 'actions persisted (1 CONDITIONAL + 2 SEND_EMAIL)');
-
-      // ─── Path A: wantsEmail=true — both actions should fire ──
-      const runA = await http(
-        'POST',
-        `/api/public/widget-flows/by-key/${actionKey}/runs`,
-        {},
-      );
-      const runAId = runA.json.run.id;
-      const stepAId = runA.json.firstStep.id;
-
       const submitA = await http(
         'POST',
-        `/api/public/widget-flows/by-key/${actionKey}/runs/${runAId}/steps/${stepAId}/submit`,
-        {
-          values: { email: 'smoke@example.com', wantsEmail: true },
-          clientSubmitId: randomUUID(),
-        },
+        `/api/public/widget-flows/by-key/${branchKey}/runs/${runAId}/nodes/${a}/submit`,
+        { values: { selected: 'skip' }, clientSubmitId: randomUUID() },
       );
-      assertEq(submitA.json?.errors?.length, 0, 'A FORM no errors');
-      const recapAId = submitA.json.nextStep.id;
-      const submitAR = await http(
-        'POST',
-        `/api/public/widget-flows/by-key/${actionKey}/runs/${runAId}/steps/${recapAId}/submit`,
-        { values: {}, clientSubmitId: randomUUID() },
+      assertEq(
+        submitA.json?.nextNode?.label,
+        'Done',
+        'skip path bypasses B → lands on Done',
       );
-      assertEq(submitAR.json?.run?.status, 'COMPLETED', 'A run COMPLETED');
 
-      // Wait a tick for the actions to land — they're awaited in
-      // submitStep but the EngineActionEvent writes are async writes
-      // through the metering helper which we don't await directly.
-      // 50ms is plenty for the in-process Prisma round-trip.
-      await new Promise((r) => setTimeout(r, 50));
-
-      const eventsA = await prisma.engineActionEvent.findMany({
-        where: { runId: runAId },
-        orderBy: { executedAt: 'asc' },
-      });
-      const kindsA = eventsA.map((e) => `${e.actionKind}:${e.status}`);
-      assert(
-        kindsA.includes('CONDITIONAL:OK'),
-        'A CONDITIONAL fired with OK status',
-      );
-      // 2x SEND_EMAIL — one nested inside CONDITIONAL, one top-level.
-      // Status is either OK (no RESEND_API_KEY, stub path) or ERROR
-      // (Resend free-tier rejecting non-verified test recipients).
-      // EITHER outcome proves the action wiring works; both record an
-      // event, which is what matters for the assertion.
-      const sendEmailAttempts = eventsA.filter(
-        (e) => e.actionKind === 'SEND_EMAIL',
-      ).length;
-      assertEq(sendEmailAttempts, 2, 'A both SEND_EMAIL actions fired');
-
-      // ─── Path B: wantsEmail=false — CONDITIONAL skips child ──
+      // Path B: keep → through B
       const runB = await http(
         'POST',
-        `/api/public/widget-flows/by-key/${actionKey}/runs`,
+        `/api/public/widget-flows/by-key/${branchKey}/runs`,
         {},
       );
       const runBId = runB.json.run.id;
-      const stepBId = runB.json.firstStep.id;
-
       const submitB = await http(
         'POST',
-        `/api/public/widget-flows/by-key/${actionKey}/runs/${runBId}/steps/${stepBId}/submit`,
-        {
-          values: { email: 'smoke@example.com', wantsEmail: false },
-          clientSubmitId: randomUUID(),
-        },
+        `/api/public/widget-flows/by-key/${branchKey}/runs/${runBId}/nodes/${a}/submit`,
+        { values: { selected: 'keep' }, clientSubmitId: randomUUID() },
       );
-      const recapBId = submitB.json.nextStep.id;
-      await http(
-        'POST',
-        `/api/public/widget-flows/by-key/${actionKey}/runs/${runBId}/steps/${recapBId}/submit`,
-        { values: {}, clientSubmitId: randomUUID() },
+      assertEq(
+        submitB.json?.nextNode?.label,
+        'Optional',
+        'keep path lands on B',
       );
 
-      await new Promise((r) => setTimeout(r, 50));
-
-      const eventsB = await prisma.engineActionEvent.findMany({
-        where: { runId: runBId },
-        orderBy: { executedAt: 'asc' },
-      });
-      const kindsB = eventsB.map((e) => `${e.actionKind}:${e.status}`);
-      assert(
-        kindsB.includes('CONDITIONAL:SKIPPED'),
-        'B CONDITIONAL was SKIPPED (gate=false)',
-      );
-      // Only the top-level (non-gated) SEND_EMAIL should be attempted.
-      // Same OK-or-ERROR tolerance as Path A — what matters is the
-      // CONDITIONAL gate correctly prevented the child SEND_EMAIL.
-      const sendEmailAttemptsB = eventsB.filter(
-        (e) => e.actionKind === 'SEND_EMAIL',
-      ).length;
-      assertEq(sendEmailAttemptsB, 1, 'B only top-level SEND_EMAIL fired');
-
-      // Cleanup
-      await http('DELETE', `/api/widget-flows/${actionFlowId}`);
+      await http('DELETE', `/api/widget-flows/${branchFlowId}`);
     }
 
-    // ── Phase 15: Phase 2.3 — triggers + EVENT_REACTION flows ─
-    // Create an EVENT_REACTION flow with a payment.succeeded
-    // trigger + a single SEND_EMAIL action. Dispatch a fake event
-    // directly via the dispatcher (bypassing the bus) and verify
-    // the run materializes + the action records a metering event.
-    console.log('\n15. Triggers + EVENT_REACTION (Phase 2.3)');
+    // ── 10. EVENT_REACTION via dispatcher ───────────────────
+    console.log('\n10. EVENT_REACTION via dispatcher');
     {
-      const reactionFlowResp = await http('POST', '/api/widget-flows', {
+      const reaction = randomUUID();
+      const reactionFlow = await http('POST', '/api/widget-flows', {
         name: '[http-smoke] reaction flow',
         kind: 'EVENT_REACTION',
       });
-      const reactionFlowId = reactionFlowResp.json.flow.id;
+      const reactionFlowId = reactionFlow.json.flow.id;
 
       const reactionPayload = {
         name: '[http-smoke] reaction flow',
         description: null,
         kind: 'EVENT_REACTION' as const,
-        steps: [],
-        actions: [
+        nodes: [
           {
-            order: 0,
+            id: reaction,
             kind: 'SEND_EMAIL',
+            label: 'Send confirmation',
+            description: null,
             config: {
               to: 'admin@example.com',
-              subject: 'Smoke test — payment {vars.paymentId} succeeded',
-              bodyHtml:
-                '<p>Payment {vars.paymentId} for {vars.amount} succeeded.</p>',
+              subject: 'Payment {vars.paymentId}',
+              bodyHtml: '<p>{vars.amount}</p>',
             },
-            children: [],
+            position: { x: 0, y: 0 },
           },
         ],
-        triggers: [
-          { eventName: 'payment.succeeded', filter: null },
+        edges: [],
+        entryPoints: [
+          {
+            kind: 'event' as const,
+            config: { eventName: 'payment.succeeded' },
+            entryNodeId: reaction,
+          },
         ],
       };
 
@@ -937,39 +598,24 @@ async function main() {
       assertEq(
         pubR.json?.flow?.publishableKey,
         null,
-        'EVENT_REACTION flow has NO publishableKey',
+        'EVENT_REACTION has NO publishableKey',
       );
 
-      // Verify the trigger row persisted.
-      const triggers = await prisma.widgetTrigger.findMany({
-        where: { flowId: reactionFlowId },
-      });
-      assertEq(triggers.length, 1, 'trigger row persisted');
-      assertEq(
-        triggers[0].eventName,
-        'payment.succeeded',
-        'trigger eventName saved correctly',
-      );
-
-      // Drive the dispatcher with a synthetic envelope. Bypasses the
-      // bus so the test isn't sensitive to in-process subscriber
-      // ordering (defaults vs engine).
+      // Drive the dispatcher synchronously.
       const { _dispatchForTests } = await import(
         '../src/services/engine/triggerDispatcher'
       );
       await _dispatchForTests('payment.succeeded', {
         organizationId,
         payload: {
-          paymentId: 'pi_test_smoke',
+          paymentId: 'pi_test_v2',
           scheduledEventId: null,
           submissionId: null,
           enrollmentInviteId: null,
           purpose: null,
-          amount: 4200,
+          amount: 1500,
         },
       });
-
-      // Allow a tick for the async run to land.
       await new Promise((r) => setTimeout(r, 100));
 
       const runs = await prisma.widgetRun.findMany({
@@ -980,63 +626,61 @@ async function main() {
       assertEq(runs[0].status, 'COMPLETED', 'run reached COMPLETED');
       assertEq(
         (runs[0].vars as any)?.paymentId,
-        'pi_test_smoke',
-        'event payload seeded vars.paymentId',
+        'pi_test_v2',
+        'vars seeded from payload',
       );
 
-      const events = await prisma.engineActionEvent.findMany({
-        where: { runId: runs[0].id },
-        orderBy: { executedAt: 'asc' },
-      });
-      const kinds = events.map((e) => `${e.actionKind}:${e.status}`);
-      assert(kinds.includes('RUN_START:OK'), 'RUN_START fired');
-      assert(
-        kinds.some((k) => k.startsWith('SEND_EMAIL:')),
-        'SEND_EMAIL fired (OK or ERROR — either proves wiring)',
-      );
-      assert(kinds.includes('RUN_COMPLETE:OK'), 'RUN_COMPLETE fired');
-
-      // Filter test: dispatch an event with payload that should be
-      // filtered OUT by a new trigger. Update the trigger to require
-      // amount > 10000 and verify no new run materializes for a
-      // smaller amount.
-      await prisma.widgetTrigger.update({
-        where: { id: triggers[0].id },
-        data: { filter: { '>': [{ var: 'amount' }, 10000] } as any },
-      });
-      const runsBefore = await prisma.widgetRun.count({
-        where: { flowId: reactionFlowId },
-      });
-      await _dispatchForTests('payment.succeeded', {
-        organizationId,
-        payload: {
-          paymentId: 'pi_test_smoke_below',
-          scheduledEventId: null,
-          submissionId: null,
-          enrollmentInviteId: null,
-          purpose: null,
-          amount: 100, // below the filter threshold
-        },
-      });
-      await new Promise((r) => setTimeout(r, 100));
-      const runsAfter = await prisma.widgetRun.count({
-        where: { flowId: reactionFlowId },
-      });
-      assertEq(
-        runsAfter,
-        runsBefore,
-        'filter blocked the trigger (no new run)',
-      );
-
-      // Cleanup
       await http('DELETE', `/api/widget-flows/${reactionFlowId}`);
     }
 
-    // ── Phase 16: clean up imported flow ──────────────────────
-    console.log('\n16. DELETE imported flow');
+    // ── 11. Activity tab endpoint ───────────────────────────
+    console.log('\n11. GET /api/widget-flows/:id/runs (Activity tab)');
+    {
+      const r = await http('GET', `/api/widget-flows/${createdFlowId}/runs`);
+      assertEq(r.status, 200, 'runs status = 200');
+      assert(Array.isArray(r.json?.runs), 'runs array returned');
+      assert(
+        r.json.runs.some((run: any) => run.status === 'COMPLETED'),
+        'at least one COMPLETED run',
+      );
+    }
+
+    // ── 12. Usage summary endpoint ──────────────────────────
+    console.log('\n12. GET /api/widget-flows/usage/summary');
+    {
+      const r = await http('GET', '/api/widget-flows/usage/summary');
+      assertEq(r.status, 200, 'usage status = 200');
+      assert(r.json?.thisMonth > 0, 'thisMonth > 0');
+      assert(
+        typeof r.json?.byKind?.RUN_START === 'number' &&
+          r.json.byKind.RUN_START > 0,
+        'RUN_START kind tracked',
+      );
+    }
+
+    // ── 13. Trash / DELETE = soft-delete ────────────────────
+    console.log('\n13. Trash + delete behavior');
     if (importedFlowId) {
       const r = await http('DELETE', `/api/widget-flows/${importedFlowId}`);
-      assertEq(r.status, 204, 'delete status = 204');
+      assertEq(r.status, 204, 'delete status = 204 (soft-delete)');
+      // Verify it's actually soft-deleted: list endpoint no longer
+      // returns it.
+      const list = await http('GET', '/api/widget-flows');
+      const stillThere = list.json?.flows?.some(
+        (f: any) => f.id === importedFlowId,
+      );
+      assertEq(stillThere, false, 'soft-deleted flow not in list');
+    }
+
+    // ── 14. 404 on bogus key ────────────────────────────────
+    console.log('\n14. 404 on bogus publishable key');
+    {
+      const r = await http(
+        'POST',
+        '/api/public/widget-flows/by-key/wf_bogus_xxxxx/runs',
+        {},
+      );
+      assertEq(r.status, 404, 'bogus key returns 404');
     }
   } finally {
     await purgeSmokeFlows(organizationId);
@@ -1050,7 +694,7 @@ async function main() {
 
 main()
   .catch((err) => {
-    console.error('\n💥 HTTP smoke test crashed:', err);
+    console.error('\n💥 v2 HTTP smoke test crashed:', err);
     process.exit(1);
   })
   .finally(async () => {

@@ -1,13 +1,15 @@
 // Request validation schemas for the workflow engine API
-// (Phase 2.0 Commit 3).
+// (Phase 3.1 — graph engine v2).
 //
-// Each schema covers one route. Public-surface schemas are stricter on
-// what visitors can send. Admin-surface schemas accept the full
-// FlowPayload shape (draft autosave + import).
+// REPLACED in Phase 3.1: the v1 shape (steps + actions + triggers as
+// separate arrays) was unified into a single nodes + edges graph.
+// Entry points (visitor URL / event / cron) became first-class
+// descriptors that reference an entry node.
 //
-// Step / field kind enums are kept in sync with the Prisma schema —
-// any addition there should be mirrored here so the validator catches
-// stale clients.
+// Step / action / trigger / wait kind values are kept as plain
+// strings (not Zod enums) so adding a new node kind is purely
+// app-layer work — the handler registry is the authoritative
+// whitelist.
 
 import { z } from 'zod';
 
@@ -23,13 +25,12 @@ import { z } from 'zod';
 export const startRunBodySchema = z.object({}).passthrough();
 
 /**
- * `POST /api/public/widget-flows/by-key/:publishableKey/runs/:runId/steps/:stepId/submit`
+ * `POST /api/public/widget-flows/by-key/:publishableKey/runs/:runId/nodes/:nodeId/submit`
  *
- * The `values` object is per-step-kind and validated server-side by
- * the handler (see services/engine/stepHandlers/). We only enforce
- * the wrapper shape here.
+ * The `values` object is per-node-kind and validated server-side by
+ * the handler. We only enforce the wrapper shape here.
  */
-export const submitStepBodySchema = z.object({
+export const submitNodeBodySchema = z.object({
   values: z.record(z.string(), z.unknown()).default({}),
   // clientSubmitId MUST be a v4 UUID (the engine treats it as opaque
   // but enforcing format here catches buggy clients early).
@@ -40,45 +41,12 @@ export const submitStepBodySchema = z.object({
 
 // ─── Admin-surface schemas ────────────────────────────────────────
 
-const widgetStepKindEnum = z.enum([
-  'SINGLE_SELECT',
-  'MULTI_SELECT',
-  'RADIO',
-  'CHECKBOX',
-  'TEXT_INPUT',
-  'TEXTAREA',
-  'NUMBER',
-  'EMAIL',
-  'PHONE',
-  'DATE_PICKER',
-  'TIME_PICKER',
-  'SLOT_PICKER',
-  'FORM',
-  'TEXT_BLOCK',
-  'RECAP',
-  'STRIPE_CHECKOUT',
-  'VALIDATION',
-]);
-
-const widgetFieldKindEnum = z.enum([
-  'TEXT',
-  'TEXTAREA',
-  'EMAIL',
-  'PHONE',
-  'NUMBER',
-  'DATE',
-  'BOOLEAN',
-  'SELECT',
-  'MULTI_SELECT',
-]);
-
-const widgetFieldBindingEnum = z.enum(['VAR', 'DB_COLUMN', 'CUSTOM_FIELD']);
-
 const widgetFlowKindEnum = z.enum(['BOOKING', 'EVENT_REACTION']);
 
 /**
- * JSON-serializable value. Used for step/field config bodies which are
- * arbitrary user-shaped data (option lists, regex hints, etc.).
+ * JSON-serializable value. Used for node/edge/entrypoint config
+ * payloads which are arbitrary user-shaped data (option lists,
+ * JSONLogic expressions, etc.).
  */
 const jsonValueSchema: z.ZodType<unknown> = z.lazy(() =>
   z.union([
@@ -91,99 +59,96 @@ const jsonValueSchema: z.ZodType<unknown> = z.lazy(() =>
   ]),
 );
 
-// One field inside a FORM step.
-const flowFieldSchema = z.object({
-  order: z.number().int().min(0),
-  kind: widgetFieldKindEnum,
-  label: z.string().min(1),
-  placeholder: z.string().nullable().optional(),
-  required: z.boolean().default(false),
-  binding: widgetFieldBindingEnum,
-  bindingTarget: z.string().min(1),
-  config: z.record(z.string(), jsonValueSchema).default({}),
-});
+// ─── Graph payload (v2) ───────────────────────────────────────────
 
-// One step inside a flow.
-const flowStepSchema = z.object({
-  order: z.number().int().min(0),
-  kind: widgetStepKindEnum,
-  label: z.string().min(1),
+/**
+ * One node in the flow graph. `id` is the stable identifier the
+ * canvas editor invents (crypto.randomUUID()) and survives across
+ * autosaves + publish round-trips — same id at every layer.
+ *
+ * `kind` is a plain string from the node-handler registry. v2 ships:
+ *   UI:     SINGLE_SELECT | MULTI_SELECT | FORM | TEXT_BLOCK | RECAP
+ *   ACTION: SEND_EMAIL | (future: ISSUE_REFUND | UPDATE_ENTITY | …)
+ *   WAIT:   WAIT_DURATION | WAIT_UNTIL | WAIT_TOKEN
+ *
+ * `config` is kind-specific (validated by the node handler at publish
+ * time via validateConfig + at runtime via the handler's own checks).
+ */
+const flowNodeSchema = z.object({
+  id: z.string().min(1),
+  kind: z.string().min(1),
+  label: z.string(), // can be empty during draft editing
   description: z.string().nullable().optional(),
   config: z.record(z.string(), jsonValueSchema).default({}),
-  // JSONLogic-shaped expression; stored as opaque JSON for v1.
-  visibleWhen: jsonValueSchema.nullable().optional(),
-  fields: z.array(flowFieldSchema).default([]),
-});
-
-// Phase 2.2 — actions live in the payload too, alongside steps. This
-// keeps them snapshotted on Publish, round-trippable through export/
-// import, and atomic-replaced by writePayloadToFlow. Action kinds
-// stay as plain strings here (the action handler registry is the
-// authoritative whitelist; new kinds add without schema churn).
-//
-// The recursive `children` field is the tree for CONDITIONAL actions
-// (and any future composite kind). z.lazy() handles the self-reference;
-// z.array(flowActionSchema) inside the lazy means the schema validates
-// arbitrarily deep nesting (capped at the engine's runtime depth, not
-// here).
-type FlowActionPayload = {
-  order: number;
-  kind: string;
-  config: Record<string, unknown>;
-  children?: FlowActionPayload[];
-};
-const flowActionSchema: z.ZodType<FlowActionPayload> = z.lazy(() =>
-  z.object({
-    order: z.number().int().min(0),
-    kind: z.string().min(1),
-    config: z.record(z.string(), jsonValueSchema).default({}),
-    children: z.array(flowActionSchema).default([]),
-  }),
-);
-
-// Phase 2.3 — event-bus triggers. Only meaningful for EVENT_REACTION
-// flows; BOOKING flows ignore them (the visitor's submit drives them
-// instead). Stored on the payload so they snapshot + round-trip with
-// the rest of the flow definition.
-const flowTriggerSchema = z.object({
-  eventName: z.string().min(1),
-  // Optional JSONLogic gate evaluated against `event.<X>` payload.
-  // Null/missing = "fire on every event of this name".
-  filter: jsonValueSchema.nullable().optional(),
+  position: z
+    .object({
+      x: z.number(),
+      y: z.number(),
+    })
+    .default({ x: 0, y: 0 }),
 });
 
 /**
- * Canonical flow payload shape. Used by:
+ * Directed edge between two nodes. Multiple outgoing edges from one
+ * node form a branch — the engine picks the first whose `condition`
+ * evaluates truthy in `order`. A null condition always matches
+ * (useful as a catch-all last edge).
+ */
+const flowEdgeSchema = z.object({
+  fromNodeId: z.string().min(1),
+  toNodeId: z.string().min(1),
+  order: z.number().int().min(0).default(0),
+  condition: jsonValueSchema.nullable().optional(),
+  label: z.string().nullable().optional(),
+});
+
+/**
+ * Entry point descriptor — replaces the v1 WidgetTrigger model.
+ * Tells the engine WHERE a run starts (entryNodeId) and HOW it's
+ * triggered (kind: visitor | event | cron). Multiple per flow if
+ * the same flow handles e.g. both a visitor URL and a bus event.
+ */
+const flowEntryPointSchema = z.object({
+  kind: z.enum(['visitor', 'event', 'cron']),
+  /**
+   * Kind-specific config:
+   *   visitor: {}                        — the flow's publishableKey IS the URL
+   *   event:   { eventName, filter? }    — bus event name + optional JSONLogic
+   *   cron:    { schedule }              — cron expression (Phase 3.2+)
+   */
+  config: z.record(z.string(), jsonValueSchema).default({}),
+  entryNodeId: z.string().nullable(),
+});
+
+/**
+ * Canonical flow payload shape (v2). Used by:
  *   - WidgetFlowDraft.payload   (autosave target)
  *   - WidgetFlowSnapshot.payload (immutable per-Publish copy)
  *   - export JSON                (admin download)
  *   - import JSON                (admin upload)
  *
- * Deliberately excludes id / publishableKey / version / isPublished /
- * timestamps — those are system-managed and would defeat the
- * "round-trippable" property if encoded into the payload.
+ * Excludes system-managed fields: id / publishableKey / version /
+ * isPublished / timestamps / soft-delete + archive stamps.
  */
 export const flowPayloadSchema = z.object({
   name: z.string().min(1),
   description: z.string().nullable().optional(),
   kind: widgetFlowKindEnum,
-  steps: z.array(flowStepSchema),
-  // Phase 2.2 — optional for backward compat with pre-2.2 drafts that
-  // were saved before this field existed. Empty array (= no actions)
-  // is the safe default.
-  actions: z.array(flowActionSchema).default([]),
-  // Phase 2.3 — same back-compat treatment. Most flows have no
-  // triggers (BOOKING flows ignore them entirely).
-  triggers: z.array(flowTriggerSchema).default([]),
+  nodes: z.array(flowNodeSchema).default([]),
+  edges: z.array(flowEdgeSchema).default([]),
+  entryPoints: z.array(flowEntryPointSchema).default([]),
 });
 
 export type FlowPayload = z.infer<typeof flowPayloadSchema>;
+export type FlowNodePayload = z.infer<typeof flowNodeSchema>;
+export type FlowEdgePayload = z.infer<typeof flowEdgeSchema>;
+export type FlowEntryPointPayload = z.infer<typeof flowEntryPointSchema>;
 
 /**
  * `POST /api/widget-flows` — create a fresh flow.
  *
  * Name + kind are required; everything else is optional (the admin
- * starts with an empty draft they fill in via the editor).
+ * starts with an empty graph they fill in via the canvas editor).
  */
 export const createFlowBodySchema = z.object({
   name: z.string().min(1),
@@ -194,9 +159,9 @@ export const createFlowBodySchema = z.object({
 /**
  * `PATCH /api/widget-flows/:id/draft` — autosave target.
  *
- * Accepts the full FlowPayload. The admin's editor sends the whole
- * working copy on each debounced save (we never query INTO the draft
- * — single JSON blob, no normalization while editing).
+ * Accepts the full FlowPayload. The admin's canvas editor sends the
+ * whole working copy on each debounced save (we never query INTO the
+ * draft; single JSON blob, no normalization while editing).
  */
 export const patchDraftBodySchema = flowPayloadSchema;
 

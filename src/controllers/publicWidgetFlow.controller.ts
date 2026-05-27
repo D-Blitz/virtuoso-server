@@ -1,21 +1,22 @@
 // Public-surface controller for the workflow engine
-// (Phase 2.0 Commit 3).
+// (Phase 3.1 — graph engine v2).
 //
 // Three endpoints, all gated by requireWidgetFlow middleware which
 // resolves the flow + attaches it to req. Responses are deliberately
-// narrow — we never leak internal fields (organizationId, draft
-// state, raw stepHistory) to public callers.
+// narrow — we never leak internal fields (organizationId, full edge
+// definitions, etc.) to public callers.
 
 import type { Request, Response } from 'express';
+
+import prisma from '../prisma';
 import {
-  EngineError,
-  advanceStep,
+  GraphRuntimeError,
   startRun,
-  submitStep,
-} from '../services/engine/flowEngine';
+  submitNode,
+} from '../services/engine/graphRuntime';
 import {
   startRunBodySchema,
-  submitStepBodySchema,
+  submitNodeBodySchema,
 } from '../validations/widgetFlow.validation';
 import { sendError } from './httpErrors';
 
@@ -32,19 +33,19 @@ type ReqWithFlow = Request & {
 };
 
 /**
- * Translate an EngineError code to an HTTP status. Defaults to 500
+ * Translate a GraphRuntimeError code to HTTP status. Defaults to 500
  * because an unmapped code is a server bug, not a client issue.
  */
-function engineErrorStatus(code: EngineError['code']): number {
+function runtimeErrorStatus(code: GraphRuntimeError['code']): number {
   switch (code) {
     case 'FLOW_NOT_FOUND':
-    case 'RUN_NOT_FOUND':
-    case 'STEP_NOT_FOUND':
-      return 404;
     case 'FLOW_NOT_PUBLISHED':
+    case 'RUN_NOT_FOUND':
+    case 'NODE_NOT_FOUND':
+    case 'ENTRY_NOT_FOUND':
       return 404;
     case 'RUN_NOT_IN_PROGRESS':
-    case 'STEP_NOT_CURRENT':
+    case 'NODE_NOT_CURRENT':
       return 409;
     case 'NO_HANDLER':
       return 500;
@@ -53,15 +54,11 @@ function engineErrorStatus(code: EngineError['code']): number {
   }
 }
 
-/**
- * Strip the run shape down to public-safe fields. organizationId
- * and stepHistory are deliberately omitted — visitors don't need to
- * see the org id or internal analytics breadcrumbs.
- */
+/** Public-safe projection of a run. */
 function publicRun(run: {
   id: string;
   flowId: string;
-  currentStepId: string | null;
+  currentNodeId: string | null;
   status: string;
   vars: unknown;
   startedAt: Date;
@@ -70,7 +67,7 @@ function publicRun(run: {
   return {
     id: run.id,
     flowId: run.flowId,
-    currentStepId: run.currentStepId,
+    currentNodeId: run.currentNodeId,
     status: run.status,
     vars: run.vars,
     startedAt: run.startedAt.toISOString(),
@@ -79,56 +76,24 @@ function publicRun(run: {
 }
 
 /**
- * Strip the step shape to the bare minimum the client renderer needs.
- * config + fields are preserved (the client needs them to render the
- * step), but order is normalized to a stable shape.
+ * Strip a node to the public-safe shape the renderer needs. For UI
+ * kinds this includes the kind-specific config (option list, field
+ * definitions, etc.). bindingTarget on FORM fields IS exposed so the
+ * client can construct submission keys.
  */
-function publicStep(step: {
+function publicNode(node: {
   id: string;
-  order: number;
   kind: string;
   label: string;
   description: string | null;
   config: unknown;
-  fields: Array<{
-    id: string;
-    order: number;
-    kind: string;
-    label: string;
-    placeholder: string | null;
-    required: boolean;
-    binding: string;
-    bindingTarget: string;
-    config: unknown;
-  }>;
 }) {
   return {
-    id: step.id,
-    order: step.order,
-    kind: step.kind,
-    label: step.label,
-    description: step.description,
-    config: step.config,
-    fields: step.fields
-      .slice()
-      .sort((a, b) => a.order - b.order)
-      .map((f) => ({
-        id: f.id,
-        order: f.order,
-        kind: f.kind,
-        label: f.label,
-        placeholder: f.placeholder,
-        required: f.required,
-        // bindingTarget IS exposed publicly: the client needs it to
-        // construct the `values` object the engine expects on submit
-        // (the FORM handler looks up incoming values by bindingTarget).
-        // Not sensitive — it's a variable-name string, never an org id.
-        // `binding` kind itself is kept opaque to the client because
-        // only the server cares whether a value goes to vars vs a DB
-        // column vs a custom field.
-        bindingTarget: f.bindingTarget,
-        config: f.config,
-      })),
+    id: node.id,
+    kind: node.kind,
+    label: node.label,
+    description: node.description,
+    config: node.config,
   };
 }
 
@@ -136,8 +101,9 @@ export class PublicWidgetFlowController {
   /**
    * POST /api/public/widget-flows/by-key/:publishableKey/runs
    *
-   * Creates a fresh WidgetRun for the published flow. Returns the
-   * runId + the first step the visitor should render.
+   * Resolves the visitor entry point for the flow, then materializes
+   * a run + walks until it pauses on a UI node (or completes).
+   * Returns runId + the first node to render.
    */
   async createRun(req: Request, res: Response) {
     try {
@@ -156,18 +122,37 @@ export class PublicWidgetFlowController {
         return;
       }
 
-      const { run, firstStep } = await startRun({
+      // Find the visitor entry point — there should be exactly one.
+      // Multiple visitor entry points are illegal (publish validation
+      // could enforce this future); for now, pick the first.
+      const visitorEntry = await prisma.widgetEntryPoint.findFirst({
+        where: { flowId: flow.id, kind: 'visitor' },
+        select: { entryNodeId: true },
+      });
+      if (!visitorEntry?.entryNodeId) {
+        res.status(404).json({
+          error: 'Flow has no visitor entry point',
+        });
+        return;
+      }
+
+      const { run, currentNode } = await startRun({
         flowId: flow.id,
         organizationId: flow.organizationId,
+        entryNodeId: visitorEntry.entryNodeId,
       });
 
       res.status(201).json({
         run: publicRun(run),
-        firstStep: firstStep ? publicStep(firstStep) : null,
+        // Preserve `firstStep` name for backward compatibility with
+        // the existing visitor renderer; mirrors as firstNode going
+        // forward. Either is valid.
+        firstStep: currentNode ? publicNode(currentNode) : null,
+        firstNode: currentNode ? publicNode(currentNode) : null,
       });
     } catch (err) {
-      if (err instanceof EngineError) {
-        res.status(engineErrorStatus(err.code)).json({
+      if (err instanceof GraphRuntimeError) {
+        res.status(runtimeErrorStatus(err.code)).json({
           error: err.message,
           code: err.code,
         });
@@ -180,8 +165,8 @@ export class PublicWidgetFlowController {
   /**
    * GET /api/public/widget-flows/by-key/:publishableKey/runs/:runId
    *
-   * Resume / poll. Returns the run + current step for clients that
-   * lost their in-memory state (page reload, navigation away, etc.).
+   * Resume / poll. Returns the run + current node for clients that
+   * lost their in-memory state (page reload, etc.).
    */
   async getRun(req: Request, res: Response) {
     try {
@@ -192,44 +177,44 @@ export class PublicWidgetFlowController {
       }
 
       const { runId } = req.params;
-      const { run, currentStep } = await advanceStep({ runId });
-
-      // Cross-flow safety: the runId could exist but belong to a
-      // different flow's publishableKey. 404 instead of leaking the
-      // mismatch.
+      const run = await prisma.widgetRun.findUnique({
+        where: { id: runId },
+      });
+      if (!run) {
+        res.status(404).json({ error: 'Run not found' });
+        return;
+      }
+      // Cross-flow safety.
       if (run.flowId !== flow.id) {
         res.status(404).json({ error: 'Run not found' });
         return;
       }
 
+      const currentNode = run.currentNodeId
+        ? await prisma.widgetNode.findUnique({
+            where: { id: run.currentNodeId },
+          })
+        : null;
+
       res.json({
         run: publicRun(run),
-        currentStep: currentStep ? publicStep(currentStep) : null,
+        currentStep: currentNode ? publicNode(currentNode) : null,
+        currentNode: currentNode ? publicNode(currentNode) : null,
       });
     } catch (err) {
-      if (err instanceof EngineError) {
-        res.status(engineErrorStatus(err.code)).json({
-          error: err.message,
-          code: err.code,
-        });
-        return;
-      }
       sendError(res, err, 'Failed to fetch run');
     }
   }
 
   /**
-   * POST /api/public/widget-flows/by-key/:publishableKey/runs/:runId/steps/:stepId/submit
+   * POST /api/public/widget-flows/by-key/:publishableKey/runs/:runId/nodes/:nodeId/submit
+   * Also accepts (legacy): .../steps/:stepId/submit — same handler.
    *
-   * Submit values for the current step. Idempotent via clientSubmitId
-   * — the engine handles dedupe at the DB level.
-   *
-   * Returns the (possibly-updated) run, the next step to render, and
-   * any validation errors. Validation failures are NOT HTTP errors —
-   * they return 200 with `errors: [...]` so the client can re-render
-   * the form.
+   * Submit values for the current UI node. Idempotent via
+   * clientSubmitId. Validation failures return 200 with errors so
+   * the client can re-render the form inline.
    */
-  async submitStep(req: Request, res: Response) {
+  async submitNode(req: Request, res: Response) {
     try {
       const flow = (req as ReqWithFlow).widgetFlow;
       if (!flow) {
@@ -237,7 +222,7 @@ export class PublicWidgetFlowController {
         return;
       }
 
-      const parsed = submitStepBodySchema.safeParse(req.body);
+      const parsed = submitNodeBodySchema.safeParse(req.body);
       if (!parsed.success) {
         res.status(400).json({
           error: 'Invalid input',
@@ -246,18 +231,19 @@ export class PublicWidgetFlowController {
         return;
       }
 
-      const { runId, stepId } = req.params;
+      // Accept either `nodeId` (v2) or `stepId` (v1 legacy URL).
+      const nodeId = (req.params.nodeId ?? req.params.stepId) as string;
+      const { runId } = req.params;
 
-      const result = await submitStep({
+      const result = await submitNode({
         runId,
-        stepId,
+        nodeId,
         submission: {
           values: parsed.data.values,
           clientSubmitId: parsed.data.clientSubmitId,
         },
       });
 
-      // Cross-flow safety: same check as getRun above.
       if (result.run.flowId !== flow.id) {
         res.status(404).json({ error: 'Run not found' });
         return;
@@ -265,19 +251,21 @@ export class PublicWidgetFlowController {
 
       res.json({
         run: publicRun(result.run),
-        nextStep: result.nextStep ? publicStep(result.nextStep) : null,
+        // Dual-name for back-compat with the existing renderer.
+        nextStep: result.nextNode ? publicNode(result.nextNode) : null,
+        nextNode: result.nextNode ? publicNode(result.nextNode) : null,
         errors: result.errors,
         replayed: result.replayed,
       });
     } catch (err) {
-      if (err instanceof EngineError) {
-        res.status(engineErrorStatus(err.code)).json({
+      if (err instanceof GraphRuntimeError) {
+        res.status(runtimeErrorStatus(err.code)).json({
           error: err.message,
           code: err.code,
         });
         return;
       }
-      sendError(res, err, 'Failed to submit step');
+      sendError(res, err, 'Failed to submit node');
     }
   }
 }

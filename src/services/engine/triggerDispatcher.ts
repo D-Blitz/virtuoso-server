@@ -16,6 +16,8 @@ import { on, type EventName, type EventPayload } from '../events/bus';
 import prisma from '../../prisma';
 import { isStepVisible } from './expressionEvaluator';
 import { runEventReactionFlow } from './eventReactionRunner';
+import { startRun } from './graphRuntime';
+import { recordEngineAction } from './metering';
 
 /**
  * Event names the engine knows about. Keep in sync with the
@@ -51,16 +53,15 @@ async function dispatch<N extends EventName>(
     return;
   }
 
-  // Triggers are stored on a per-flow basis; find all WidgetFlows
-  // (the flow's org scoping is enforced by the join) whose triggers
-  // include this event name. Filtering flows by isPublished + kind +
-  // not-trashed + not-archived in one query.
-  const triggers = await prisma.widgetTrigger.findMany({
+  // Phase 3.1 — v2 entry-point dispatch. Looks up WidgetEntryPoints
+  // of kind='event' whose config.eventName matches. The v1
+  // WidgetTrigger table is no longer consulted; the migration script
+  // (Phase 3.5) converts legacy triggers to v2 entry points.
+  const entryPoints = await prisma.widgetEntryPoint.findMany({
     where: {
-      eventName,
+      kind: 'event',
       flow: {
         organizationId: envelope.organizationId,
-        kind: 'EVENT_REACTION',
         isPublished: true,
         deletedAt: null,
         archivedAt: null,
@@ -69,13 +70,19 @@ async function dispatch<N extends EventName>(
     select: {
       id: true,
       flowId: true,
-      eventName: true,
-      filter: true,
+      config: true,
+      entryNodeId: true,
       flow: { select: { organizationId: true } },
     },
   });
 
-  if (triggers.length === 0) return;
+  // Filter to the matching event name (config.eventName).
+  const matching = entryPoints.filter((ep) => {
+    const cfg = ep.config as { eventName?: string; filter?: unknown };
+    return cfg.eventName === eventName;
+  });
+
+  if (matching.length === 0) return;
 
   // Build the evaluation context once — same shape for every trigger
   // of this event. `event.*` mirrors the payload for the
@@ -90,37 +97,72 @@ async function dispatch<N extends EventName>(
     org: { id: envelope.organizationId },
   };
 
-  for (const trigger of triggers) {
+  for (const ep of matching) {
+    const cfg = ep.config as { filter?: unknown };
     // Filter is JSONLogic — null/missing means "always fire".
-    // isStepVisible() returns true on null/parse-error, which is the
-    // safe default for visibility but the wrong default for triggers
-    // (a malformed filter shouldn't unleash an unintended action).
-    // Re-evaluate manually so we can fall closed on filter errors.
-    if (trigger.filter != null) {
+    // Re-evaluate manually so we can fall closed on filter errors
+    // (visibility falls open by default; triggers should fall closed
+    // so a malformed filter never unleashes an unintended action).
+    if (cfg.filter != null) {
       try {
-        const matches = isStepVisible(trigger.filter, evalContext);
+        const matches = isStepVisible(cfg.filter, evalContext);
         if (!matches) continue;
       } catch (err) {
         console.error(
-          `[engine:trigger] filter eval failed on trigger ${trigger.id}; skipping for safety:`,
+          `[engine:trigger] filter eval failed on entry point ${ep.id}; skipping for safety:`,
           err,
         );
         continue;
       }
     }
 
-    // Fire-and-await within the per-event try/catch in the
-    // subscriber wrapper. We DO await so a flood of events processes
-    // sequentially per envelope rather than fan-out-and-forget;
-    // keeps Postgres connection pressure bounded.
-    await runEventReactionFlow({
-      flowId: trigger.flowId,
-      organizationId: trigger.flow.organizationId,
-      eventName,
-      eventPayload: envelope.payload as unknown as Record<string, unknown>,
-    });
+    // Need a defined entryNodeId to start the v2 graph walk.
+    if (!ep.entryNodeId) {
+      console.warn(
+        `[engine:trigger] entry point ${ep.id} has null entryNodeId — skipping`,
+      );
+      continue;
+    }
+
+    // Fire-and-await within the per-event try/catch in the subscriber
+    // wrapper. Sequential per envelope to bound Postgres pressure.
+    try {
+      await startRun({
+        flowId: ep.flowId,
+        organizationId: ep.flow.organizationId,
+        entryNodeId: ep.entryNodeId,
+        // Seed vars with the event payload so action configs can
+        // interpolate {vars.paymentId} etc. directly.
+        seedVars: {
+          ...(envelope.payload as Record<string, unknown>),
+          event: {
+            name: eventName,
+            ...(envelope.payload as Record<string, unknown>),
+          },
+        },
+      });
+    } catch (err) {
+      console.error(
+        `[engine:trigger] startRun failed for entry point ${ep.id}:`,
+        err,
+      );
+      await recordEngineAction({
+        organizationId: ep.flow.organizationId,
+        flowId: ep.flowId,
+        runId: null,
+        actionKind: 'RUN_ERROR',
+        status: 'ERROR',
+        durationMs: 0,
+        errorMessage: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 }
+
+// Legacy v1 runner — kept callable for the eventReactionRunner module
+// that hasn't been retired yet. New dispatcher path above uses
+// graphRuntime.startRun directly.
+void runEventReactionFlow;
 
 /**
  * Register engine subscribers for every supported event. Idempotent —

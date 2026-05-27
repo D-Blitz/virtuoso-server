@@ -82,22 +82,13 @@ const FLOW_LIST_SELECT = {
 } as const;
 
 const FLOW_DETAIL_INCLUDE = {
-  steps: {
-    orderBy: { order: 'asc' as const },
-    include: { fields: { orderBy: { order: 'asc' as const } } },
-  },
-  // Phase 2.2 — actions ship with the flow detail so the editor can
-  // round-trip them through draft/publish/export without a separate
-  // fetch. Returned as a flat list; flowToPayload() reshapes into the
-  // nested tree the admin UI consumes.
-  actions: {
-    orderBy: { order: 'asc' as const },
-  },
-  // Phase 2.3 — triggers. Flat list ordered by event name for stable
-  // editor rendering.
-  triggers: {
-    orderBy: { eventName: 'asc' as const },
-  },
+  // Phase 3.1 — v2 graph. Replaces the v1 steps + actions + triggers
+  // includes. The legacy relations still exist on the model (for the
+  // v1 runtime that hasn't been fully retired yet) but the admin
+  // service exclusively serves the v2 shape.
+  nodes: true,
+  edges: true,
+  entryPoints: true,
 };
 
 // ─── Service methods ──────────────────────────────────────────────
@@ -371,36 +362,68 @@ export async function exportFlow(organizationId: string, flowId: string) {
 }
 
 /**
+ * Re-map every node id in the payload to a fresh one + rewrite edge
+ * fromNodeId/toNodeId + entryPoint.entryNodeId references to match.
+ * Used at import time so two flows (source + imported) never share
+ * node ids — otherwise the WidgetNode @id unique constraint conflicts
+ * and the import 500s.
+ */
+function remapNodeIds(payload: FlowPayload): FlowPayload {
+  const idMap = new Map<string, string>();
+  for (const node of payload.nodes) {
+    idMap.set(node.id, randomBytes(16).toString('hex'));
+  }
+  return {
+    ...payload,
+    nodes: payload.nodes.map((n) => ({ ...n, id: idMap.get(n.id)! })),
+    edges: payload.edges.map((e) => ({
+      ...e,
+      fromNodeId: idMap.get(e.fromNodeId) ?? e.fromNodeId,
+      toNodeId: idMap.get(e.toNodeId) ?? e.toNodeId,
+    })),
+    entryPoints: payload.entryPoints.map((ep) => ({
+      ...ep,
+      entryNodeId: ep.entryNodeId
+        ? (idMap.get(ep.entryNodeId) ?? ep.entryNodeId)
+        : null,
+    })),
+  };
+}
+
+/**
  * Import creates a NEW flow with a fresh id + cleared publishableKey
  * (NOT published yet — admin must explicitly Publish after import).
- * The imported payload is written to BOTH the normalized rows AND the
- * draft so the admin can edit straight away.
+ * Node ids are re-mapped (see remapNodeIds) so the imported flow
+ * doesn't collide with the source. The remapped payload is written
+ * to BOTH the normalized rows AND the draft so the admin can edit
+ * straight away.
  */
 export async function importFlow(
   organizationId: string,
   payload: FlowPayload,
 ) {
+  const remapped = remapNodeIds(payload);
   return prisma.$transaction(async (tx) => {
     // Create the flow shell first so we have an id for normalized
     // child rows + the draft.
     const flow = await tx.widgetFlow.create({
       data: {
         organizationId,
-        name: payload.name,
-        description: payload.description ?? null,
-        kind: payload.kind,
+        name: remapped.name,
+        description: remapped.description ?? null,
+        kind: remapped.kind,
         isPublished: false,
         version: 1,
       },
       select: { id: true },
     });
 
-    await writePayloadToFlow(tx, flow.id, payload);
+    await writePayloadToFlow(tx, flow.id, remapped);
 
     await tx.widgetFlowDraft.create({
       data: {
         flowId: flow.id,
-        payload: payload as unknown as Prisma.InputJsonValue,
+        payload: remapped as unknown as Prisma.InputJsonValue,
       },
     });
 
