@@ -330,19 +330,110 @@ export async function advanceRun(params: {
     }
 
     if (handler.category === 'WAIT') {
-      // Phase 3.1 stub — WAIT nodes pass through immediately.
-      // Phase 3.2 sets status = WAITING_TIME/TOKEN + writes to
-      // WidgetScheduledResume / WidgetResumeToken + returns here.
+      // Compute the wait descriptor + suspend the run. Sweeper job
+      // (engineResume.ts) picks up time-based resumes; resume route
+      // (Phase 3.2b) picks up token-based ones.
+      let descriptor;
+      try {
+        descriptor = handler.scheduleWait!(
+          node,
+          buildEvaluationContext(vars, run.organizationId),
+        );
+      } catch (err) {
+        await recordEngineAction({
+          organizationId: run.organizationId,
+          flowId: run.flowId,
+          runId: run.id,
+          actionKind: node.kind,
+          status: 'ERROR',
+          durationMs: 0,
+          errorMessage: err instanceof Error ? err.message : String(err),
+        });
+        await prisma.widgetRun.update({
+          where: { id: run.id },
+          data: { status: 'ERRORED', completedAt: new Date() },
+        });
+        const refreshed = await prisma.widgetRun.findUniqueOrThrow({
+          where: { id: run.id },
+        });
+        return { run: refreshed, currentNode: null };
+      }
+
+      if (descriptor.kind === 'time') {
+        // Write the scheduled-resume row + pause the run.
+        await prisma.$transaction([
+          prisma.widgetScheduledResume.create({
+            data: {
+              flowId: run.flowId,
+              runId: run.id,
+              nodeId: node.id,
+              fireAt: descriptor.fireAt,
+            },
+          }),
+          prisma.widgetRun.update({
+            where: { id: run.id },
+            data: {
+              status: 'WAITING_TIME' satisfies RunStatus,
+              currentNodeId: node.id,
+              nextResumeAt: descriptor.fireAt,
+              vars: descriptor.varsPatch
+                ? ({ ...vars, ...descriptor.varsPatch } as Prisma.InputJsonValue)
+                : (vars as Prisma.InputJsonValue),
+            },
+          }),
+        ]);
+        await recordEngineAction({
+          organizationId: run.organizationId,
+          flowId: run.flowId,
+          runId: run.id,
+          actionKind: node.kind,
+          status: 'OK',
+          durationMs: 0,
+          errorMessage: `paused until ${descriptor.fireAt.toISOString()}`,
+        });
+        const refreshed = await prisma.widgetRun.findUniqueOrThrow({
+          where: { id: run.id },
+        });
+        return { run: refreshed, currentNode: node };
+      }
+
+      // descriptor.kind === 'token' — write a single-use resume token.
+      const expiresAt = new Date(
+        Date.now() + (descriptor.expirationDays ?? 30) * 24 * 60 * 60 * 1000,
+      );
+      await prisma.$transaction([
+        prisma.widgetResumeToken.create({
+          data: {
+            flowId: run.flowId,
+            runId: run.id,
+            nodeId: node.id,
+            expiresAt,
+          },
+        }),
+        prisma.widgetRun.update({
+          where: { id: run.id },
+          data: {
+            status: 'WAITING_TOKEN' satisfies RunStatus,
+            currentNodeId: node.id,
+            vars: descriptor.varsPatch
+              ? ({ ...vars, ...descriptor.varsPatch } as Prisma.InputJsonValue)
+              : (vars as Prisma.InputJsonValue),
+          },
+        }),
+      ]);
       await recordEngineAction({
         organizationId: run.organizationId,
         flowId: run.flowId,
         runId: run.id,
-        actionKind: `NODE_${node.kind}`,
-        status: 'SKIPPED',
+        actionKind: node.kind,
+        status: 'OK',
         durationMs: 0,
-        errorMessage: 'WAIT semantics deferred to Phase 3.2',
+        errorMessage: `awaiting token (expires ${expiresAt.toISOString()})`,
       });
-      // Fall through to edge picking — treat as a no-op ACTION.
+      const refreshed = await prisma.widgetRun.findUniqueOrThrow({
+        where: { id: run.id },
+      });
+      return { run: refreshed, currentNode: node };
     } else {
       // ACTION — execute synchronously.
       const t0 = Date.now();
@@ -599,6 +690,87 @@ export async function submitNode(params: {
     errors: [],
     replayed: false,
   };
+}
+
+/**
+ * Resume a run that was paused at a WAIT node. Called by:
+ *   - the sweeper job (engineResume.ts) for time-based waits when
+ *     WidgetScheduledResume.fireAt <= now
+ *   - the public resume route (Phase 3.2b) for token-based waits
+ *     when the visitor clicks the URL
+ *
+ * Skips past the WAIT node by following its first matching outgoing
+ * edge, then walks forward via advanceRun. If the WAIT node has no
+ * outgoing edges, the run completes.
+ *
+ * Caller is responsible for marking the schedule/token row consumed —
+ * this function doesn't touch those tables (separation of concerns +
+ * lets the sweeper batch updates).
+ */
+export async function resumeRun(params: {
+  runId: string;
+}): Promise<AdvanceResult> {
+  const run = await prisma.widgetRun.findUnique({
+    where: { id: params.runId },
+    include: { flow: { include: FLOW_INCLUDE } },
+  });
+  if (!run) {
+    throw new GraphRuntimeError(`Run ${params.runId} not found`, 'RUN_NOT_FOUND');
+  }
+  if (
+    run.status !== ('WAITING_TIME' satisfies RunStatus) &&
+    run.status !== ('WAITING_TOKEN' satisfies RunStatus)
+  ) {
+    throw new GraphRuntimeError(
+      `Run ${params.runId} is ${run.status}, not WAITING_*`,
+      'RUN_NOT_IN_PROGRESS',
+    );
+  }
+
+  const flow = run.flow as LoadedFlow;
+  const waitNodeId = run.currentNodeId;
+  if (!waitNodeId) {
+    // Defensive — WAIT_* statuses should always have a currentNodeId.
+    await prisma.widgetRun.update({
+      where: { id: run.id },
+      data: { status: 'ERRORED', completedAt: new Date() },
+    });
+    throw new GraphRuntimeError(
+      `Run ${params.runId} is WAITING_* but has no currentNodeId`,
+      'NODE_NOT_FOUND',
+    );
+  }
+
+  // Pick the first matching outgoing edge — this is where the run
+  // resumes from. Use post-pause vars (any varsPatch from the WAIT
+  // descriptor was already merged at suspend time).
+  const vars = (run.vars ?? {}) as Record<string, unknown>;
+  const ctx = buildEvaluationContext(vars, run.organizationId);
+  const nextEdge = pickNextEdge(flow, waitNodeId, ctx);
+  const nextNodeId = nextEdge?.toNodeId ?? null;
+
+  // Flip status back to IN_PROGRESS + advance the cursor + clear the
+  // resume timestamp in one transaction. advanceRun handles the
+  // COMPLETED transition when nextNodeId is null.
+  await prisma.widgetRun.update({
+    where: { id: run.id },
+    data: {
+      status: 'IN_PROGRESS' satisfies RunStatus,
+      currentNodeId: nextNodeId,
+      nextResumeAt: null,
+    },
+  });
+
+  await recordEngineAction({
+    organizationId: run.organizationId,
+    flowId: run.flowId,
+    runId: run.id,
+    actionKind: 'RUN_RESUME',
+    status: 'OK',
+    durationMs: 0,
+  });
+
+  return advanceRun({ runId: params.runId });
 }
 
 // ─── Internals ────────────────────────────────────────────────────

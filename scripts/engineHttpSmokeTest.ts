@@ -682,6 +682,132 @@ async function main() {
       );
       assertEq(r.status, 404, 'bogus key returns 404');
     }
+
+    // ── 15. WAIT_DURATION + sweeper (Phase 3.2) ─────────────
+    // Build a 3-node flow: SINGLE_SELECT → WAIT_DURATION(100ms) → RECAP.
+    // Walk to the WAIT, verify status WAITING_TIME + scheduled-resume
+    // row written, drive the sweeper, verify run reaches COMPLETED.
+    console.log('\n15. WAIT_DURATION + sweeper (Phase 3.2)');
+    {
+      const select = randomUUID();
+      const wait = randomUUID();
+      const recap = randomUUID();
+      const create = await http('POST', '/api/widget-flows', {
+        name: '[http-smoke] wait flow',
+        kind: 'BOOKING',
+      });
+      const waitFlowId = create.json.flow.id;
+
+      const waitPayload = {
+        name: '[http-smoke] wait flow',
+        description: null,
+        kind: 'BOOKING' as const,
+        nodes: [
+          {
+            id: select,
+            kind: 'SINGLE_SELECT',
+            label: 'Pick',
+            description: null,
+            config: {
+              varName: 'pick',
+              options: [{ value: 'go', label: 'Go' }],
+            },
+            position: { x: 0, y: 0 },
+          },
+          {
+            id: wait,
+            kind: 'WAIT_DURATION',
+            label: 'Wait briefly',
+            description: null,
+            // 100ms — long enough that the run pauses, short enough
+            // that the smoke can wait it out without burning time.
+            config: { durationMs: 100 },
+            position: { x: 0, y: 200 },
+          },
+          {
+            id: recap,
+            kind: 'RECAP',
+            label: 'Done',
+            description: null,
+            config: {},
+            position: { x: 0, y: 400 },
+          },
+        ],
+        edges: [
+          { fromNodeId: select, toNodeId: wait, order: 0 },
+          { fromNodeId: wait, toNodeId: recap, order: 0 },
+        ],
+        entryPoints: [
+          { kind: 'visitor' as const, config: {}, entryNodeId: select },
+        ],
+      };
+
+      await http('PATCH', `/api/widget-flows/${waitFlowId}/draft`, waitPayload);
+      const pubW = await http('POST', `/api/widget-flows/${waitFlowId}/publish`);
+      assertEq(pubW.status, 200, 'wait flow published');
+      const waitKey = pubW.json.flow.publishableKey;
+
+      const runStart = await http(
+        'POST',
+        `/api/public/widget-flows/by-key/${waitKey}/runs`,
+        {},
+      );
+      const waitRunId = runStart.json.run.id;
+      // Submit the SELECT — run should advance to WAIT_DURATION + pause.
+      await http(
+        'POST',
+        `/api/public/widget-flows/by-key/${waitKey}/runs/${waitRunId}/nodes/${select}/submit`,
+        { values: { selected: 'go' }, clientSubmitId: randomUUID() },
+      );
+
+      // Inspect the run + the scheduled-resume row.
+      const pausedRun = await prisma.widgetRun.findUniqueOrThrow({
+        where: { id: waitRunId },
+      });
+      assertEq(pausedRun.status, 'WAITING_TIME', 'run is WAITING_TIME');
+      assertEq(pausedRun.currentNodeId, wait, 'currentNodeId points at WAIT node');
+      assert(pausedRun.nextResumeAt != null, 'nextResumeAt set');
+
+      const scheduled = await prisma.widgetScheduledResume.findMany({
+        where: { runId: waitRunId, consumed: false },
+      });
+      assertEq(scheduled.length, 1, 'one scheduled-resume row written');
+
+      // Wait out the 100ms + drive the sweeper synchronously.
+      await new Promise((r) => setTimeout(r, 150));
+      const { _tickOnceForTests } = await import('../src/jobs/engineResume');
+      const resumedCount = await _tickOnceForTests();
+      assert(resumedCount >= 1, 'sweeper resumed at least one run');
+
+      // After the sweep, the run walked from WAIT → RECAP. RECAP is
+      // a UI node — it pauses for visitor input. So status is now
+      // WAITING_INPUT + currentNodeId = recap. This is correct
+      // behavior; the visitor finishes by submitting RECAP.
+      const afterSweep = await prisma.widgetRun.findUniqueOrThrow({
+        where: { id: waitRunId },
+      });
+      assertEq(afterSweep.status, 'WAITING_INPUT', 'run on RECAP after sweep');
+      assertEq(afterSweep.currentNodeId, recap, 'cursor advanced to RECAP');
+
+      // Scheduled row marked consumed by the sweeper.
+      const consumedRows = await prisma.widgetScheduledResume.findMany({
+        where: { runId: waitRunId, consumed: true },
+      });
+      assertEq(consumedRows.length, 1, 'scheduled row marked consumed');
+
+      // Visitor submits RECAP → COMPLETED.
+      await http(
+        'POST',
+        `/api/public/widget-flows/by-key/${waitKey}/runs/${waitRunId}/nodes/${recap}/submit`,
+        { values: {}, clientSubmitId: randomUUID() },
+      );
+      const final = await prisma.widgetRun.findUniqueOrThrow({
+        where: { id: waitRunId },
+      });
+      assertEq(final.status, 'COMPLETED', 'run COMPLETED after RECAP submit');
+
+      await http('DELETE', `/api/widget-flows/${waitFlowId}`);
+    }
   } finally {
     await purgeSmokeFlows(organizationId);
     server.close();

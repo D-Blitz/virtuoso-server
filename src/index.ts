@@ -49,6 +49,7 @@ import { startSlotHoldSweep } from './jobs/sweepSlotHolds';
 import { startEnrollmentInviteJobs } from './jobs/enrollmentInvites';
 import { startTrashPurgeJob } from './jobs/trashPurge';
 import { startReminderJob } from './jobs/reminders';
+import { startEngineResumeSweep } from './jobs/engineResume';
 
 // Phase 2.0a — wire default bus subscribers on boot. Importing the
 // module is enough; subscribers register at top-level.
@@ -141,6 +142,10 @@ startSlotHoldSweep();
 startEnrollmentInviteJobs();
 startTrashPurgeJob();
 startReminderJob();
+// Phase 3.2 — engine resume sweeper. Picks up time-based WAIT
+// resumes (WAIT_DURATION / WAIT_UNTIL) every 30s and walks the run
+// forward.
+startEngineResumeSweep();
 
 app.listen(PORT, () => {
   console.log(`Server running at http://localhost:${PORT}`);

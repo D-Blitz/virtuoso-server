@@ -21,6 +21,7 @@ import { recapHandler as legacyRecapHandler } from '../stepHandlers/recap';
 import { singleSelectHandler as legacySingleSelectHandler } from '../stepHandlers/singleSelect';
 import { sendEmailHandler as legacySendEmailHandler } from '../actionHandlers/sendEmail';
 import type { ActionExecutionContext, ActionResult } from '../actionHandlers/types';
+import { evaluate, ExpressionError, type EvaluationContext } from '../expressionEvaluator';
 import type {
   StepHandler,
   StepSubmission,
@@ -32,11 +33,37 @@ import type {
 export type NodeCategory = 'UI' | 'ACTION' | 'WAIT';
 
 /**
+ * Descriptor returned by WAIT handlers so the runtime knows when /
+ * how to resume the run.
+ *
+ *   time  → resume at `fireAt`. Runtime writes a WidgetScheduledResume
+ *           row + sets run.nextResumeAt + status = WAITING_TIME.
+ *   token → resume when an external URL is clicked. Runtime writes a
+ *           WidgetResumeToken row + sets run.status = WAITING_TOKEN.
+ *           (Phase 3.2b)
+ *
+ * `varsPatch` is merged into run.vars before the wait — useful for
+ * WAIT_TOKEN to inject the resume URL into a var the upstream email
+ * could not have known about (Phase 3.2b).
+ */
+export type WaitDescriptor =
+  | {
+      kind: 'time';
+      fireAt: Date;
+      varsPatch?: Record<string, unknown>;
+    }
+  | {
+      kind: 'token';
+      expirationDays?: number;
+      varsPatch?: Record<string, unknown>;
+    };
+
+/**
  * Unified node handler. Different categories implement different
  * subsets:
  *   UI     → validateConfig, validateSubmission, applySubmission
  *   ACTION → validateConfig, execute
- *   WAIT   → validateConfig, scheduleResume
+ *   WAIT   → validateConfig, scheduleWait
  *
  * The runtime checks category before calling the kind-specific
  * method, so handlers don't need to implement all methods.
@@ -67,11 +94,16 @@ export type NodeHandler = {
     context: ActionExecutionContext,
   ): Promise<ActionResult>;
 
-  // WAIT-only methods (Phase 3.2 stubs) -----------------------------
-  // Implementations return descriptors the runtime uses to enqueue
-  // resume events. For Phase 3.1, every WAIT handler returns a no-op
-  // so the runtime can ignore WAIT semantics and treat them as pass-
-  // through ACTION nodes.
+  // WAIT-only methods (Phase 3.2) -----------------------------------
+  /**
+   * Compute the wait descriptor — when / how to resume. Receives the
+   * current evaluation context so config expressions can reference
+   * vars / event / now.
+   */
+  scheduleWait?(
+    node: WidgetNode,
+    context: EvaluationContext,
+  ): WaitDescriptor;
 };
 
 // ─── Adapters: bridge v1 step/action handlers to the v2 shape ────
@@ -182,21 +214,119 @@ function actionAdapter(legacy: {
   };
 }
 
-// ─── WAIT handlers (Phase 3.1 stubs) ──────────────────────────────
+// ─── WAIT handlers (Phase 3.2) ────────────────────────────────────
 //
-// Phase 3.2 wires real wait semantics. For 3.1, these no-op so a
-// flow author can drop a WAIT node and the runtime treats it as a
-// pass-through that records an ENGINE event.
+// WAIT_DURATION  → wait N milliseconds (config.durationMs).
+// WAIT_UNTIL     → wait until a specific datetime resolved at runtime
+//                  via a JSONLogic expression that produces an ISO
+//                  string OR a ms-since-epoch number.
+// WAIT_TOKEN     → wait until a resume URL is clicked. Phase 3.2b
+//                  ships the consumer route + the CREATE_RESUME_LINK
+//                  action; for 3.2a this handler stubs as a 1-day
+//                  WAIT_DURATION fallback so existing flows that
+//                  reference it don't 500.
 
-function waitStub(kind: string): NodeHandler {
-  return {
-    kind,
-    category: 'WAIT',
-    validateConfig() {
-      return null;
-    },
-  };
-}
+const waitDurationHandler: NodeHandler = {
+  kind: 'WAIT_DURATION',
+  category: 'WAIT',
+  validateConfig(config) {
+    if (!config || typeof config !== 'object' || Array.isArray(config)) {
+      return 'WAIT_DURATION config must be an object';
+    }
+    const c = config as Record<string, unknown>;
+    if (typeof c.durationMs !== 'number' || c.durationMs < 0) {
+      return 'WAIT_DURATION config.durationMs is required (positive number, milliseconds)';
+    }
+    if (c.durationMs > 365 * 24 * 60 * 60 * 1000) {
+      return 'WAIT_DURATION config.durationMs cannot exceed 1 year (sanity cap)';
+    }
+    return null;
+  },
+  scheduleWait(node) {
+    const cfg = node.config as unknown as { durationMs: number };
+    return {
+      kind: 'time',
+      fireAt: new Date(Date.now() + cfg.durationMs),
+    };
+  },
+};
+
+const waitUntilHandler: NodeHandler = {
+  kind: 'WAIT_UNTIL',
+  category: 'WAIT',
+  validateConfig(config) {
+    if (!config || typeof config !== 'object' || Array.isArray(config)) {
+      return 'WAIT_UNTIL config must be an object';
+    }
+    const c = config as Record<string, unknown>;
+    if (c.datetimeExpr === undefined) {
+      return 'WAIT_UNTIL config.datetimeExpr is required (JSONLogic producing ISO string or ms)';
+    }
+    return null;
+  },
+  scheduleWait(node, context) {
+    const cfg = node.config as unknown as { datetimeExpr: unknown };
+    let resolved: unknown;
+    try {
+      resolved = evaluate(cfg.datetimeExpr, context);
+    } catch (err) {
+      if (err instanceof ExpressionError) {
+        throw new Error(`WAIT_UNTIL: ${err.message}`);
+      }
+      throw err;
+    }
+
+    // Accept ISO string OR ms-since-epoch number. Anything else falls
+    // through to "wait 1 minute" so a broken expression doesn't stall
+    // the run forever — admin sees the truncated wait in the run feed
+    // and can fix the expression.
+    let fireAt: Date;
+    if (typeof resolved === 'string') {
+      const t = new Date(resolved).getTime();
+      if (!Number.isFinite(t)) {
+        console.warn(
+          `[engine:wait] WAIT_UNTIL got unparseable string "${resolved}" — falling back to 60s`,
+        );
+        fireAt = new Date(Date.now() + 60_000);
+      } else {
+        fireAt = new Date(t);
+      }
+    } else if (typeof resolved === 'number' && Number.isFinite(resolved)) {
+      fireAt = new Date(resolved);
+    } else {
+      console.warn(
+        `[engine:wait] WAIT_UNTIL expression resolved to ${typeof resolved} — falling back to 60s`,
+      );
+      fireAt = new Date(Date.now() + 60_000);
+    }
+
+    // Clamp: if the resolved time is in the past, fire immediately.
+    // Helps with "wait until 9am today" expressions evaluated after 9am.
+    if (fireAt.getTime() < Date.now()) {
+      fireAt = new Date(Date.now() + 1_000);
+    }
+    return { kind: 'time', fireAt };
+  },
+};
+
+const waitTokenHandler: NodeHandler = {
+  kind: 'WAIT_TOKEN',
+  category: 'WAIT',
+  validateConfig(config) {
+    // expirationDays optional — defaults to 30 in the runtime.
+    if (config && typeof config !== 'object') {
+      return 'WAIT_TOKEN config must be an object (or empty)';
+    }
+    return null;
+  },
+  scheduleWait(node) {
+    const cfg = (node.config ?? {}) as { expirationDays?: number };
+    return {
+      kind: 'token',
+      expirationDays: cfg.expirationDays ?? 30,
+    };
+  },
+};
 
 // ─── Registry ─────────────────────────────────────────────────────
 
@@ -209,10 +339,12 @@ export const nodeHandlers: Record<string, NodeHandler> = {
   // ACTION kinds
   SEND_EMAIL: actionAdapter(legacySendEmailHandler),
 
-  // WAIT kinds — stubs for Phase 3.1; real impl in Phase 3.2.
-  WAIT_DURATION: waitStub('WAIT_DURATION'),
-  WAIT_UNTIL: waitStub('WAIT_UNTIL'),
-  WAIT_TOKEN: waitStub('WAIT_TOKEN'),
+  // WAIT kinds — real handlers (Phase 3.2). WAIT_TOKEN's resume
+  // route lands in Phase 3.2b; this handler still pauses the run
+  // correctly so the schema is exercised end-to-end.
+  WAIT_DURATION: waitDurationHandler,
+  WAIT_UNTIL: waitUntilHandler,
+  WAIT_TOKEN: waitTokenHandler,
 };
 
 export function getNodeHandler(kind: string): NodeHandler | null {
