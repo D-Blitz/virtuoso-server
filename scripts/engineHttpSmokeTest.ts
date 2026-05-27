@@ -21,6 +21,8 @@
  *  12. Usage summary endpoint
  *  13. Trash (DELETE) + archive endpoints work for flows
  *  14. 404 on bogus publishable key
+ *  15. WAIT_DURATION + sweeper resumes paused run (Phase 3.2)
+ *  16. CREATE_RESUME_LINK + WAIT_TOKEN + GET /resume/:tokenId (Phase 3.2b)
  *
  * Uses the existing dev-auth-bypass mechanism in `requireUser`:
  * NODE_ENV != 'production' + DEV_AUTH_BYPASS=true + DEV_DEFAULT_ORG_ID.
@@ -807,6 +809,193 @@ async function main() {
       assertEq(final.status, 'COMPLETED', 'run COMPLETED after RECAP submit');
 
       await http('DELETE', `/api/widget-flows/${waitFlowId}`);
+    }
+
+    // ── 16. CREATE_RESUME_LINK + WAIT_TOKEN + resume URL (3.2b) ─
+    // Build a 4-node flow:
+    //   SINGLE_SELECT → CREATE_RESUME_LINK → WAIT_TOKEN → RECAP
+    // Walk to WAIT_TOKEN, verify the run pauses + a resume token
+    // was generated + vars.resumeUrl was populated. Then hit
+    // GET /api/public/widget-flows/resume/:tokenId to consume the
+    // token, verify the run resumes onto RECAP. Submitting RECAP
+    // completes the run.
+    console.log('\n16. CREATE_RESUME_LINK + WAIT_TOKEN + resume URL (Phase 3.2b)');
+    {
+      const select = randomUUID();
+      const linkAction = randomUUID();
+      const waitToken = randomUUID();
+      const recap = randomUUID();
+      const create = await http('POST', '/api/widget-flows', {
+        name: '[http-smoke] token flow',
+        kind: 'BOOKING',
+      });
+      const tokenFlowId = create.json.flow.id;
+
+      const tokenPayload = {
+        name: '[http-smoke] token flow',
+        description: null,
+        kind: 'BOOKING' as const,
+        nodes: [
+          {
+            id: select,
+            kind: 'SINGLE_SELECT',
+            label: 'Start',
+            description: null,
+            config: {
+              varName: 'start',
+              options: [{ value: 'go', label: 'Go' }],
+            },
+            position: { x: 0, y: 0 },
+          },
+          {
+            id: linkAction,
+            kind: 'CREATE_RESUME_LINK',
+            label: 'Generate resume link',
+            description: null,
+            config: {
+              urlVar: 'resumeUrl',
+              tokenVar: 'resumeToken',
+              expirationDays: 7,
+              publicBaseUrl: 'https://smoke.example.com',
+            },
+            position: { x: 0, y: 200 },
+          },
+          {
+            id: waitToken,
+            kind: 'WAIT_TOKEN',
+            label: 'Wait for click',
+            description: null,
+            config: { expirationDays: 7 },
+            position: { x: 0, y: 400 },
+          },
+          {
+            id: recap,
+            kind: 'RECAP',
+            label: 'Thanks',
+            description: null,
+            config: {},
+            position: { x: 0, y: 600 },
+          },
+        ],
+        edges: [
+          { fromNodeId: select, toNodeId: linkAction, order: 0 },
+          { fromNodeId: linkAction, toNodeId: waitToken, order: 0 },
+          { fromNodeId: waitToken, toNodeId: recap, order: 0 },
+        ],
+        entryPoints: [
+          { kind: 'visitor' as const, config: {}, entryNodeId: select },
+        ],
+      };
+
+      await http('PATCH', `/api/widget-flows/${tokenFlowId}/draft`, tokenPayload);
+      const pubT = await http('POST', `/api/widget-flows/${tokenFlowId}/publish`);
+      assertEq(pubT.status, 200, 'token flow published');
+      const tokenKey = pubT.json.flow.publishableKey;
+
+      // Visitor starts a run + submits the SINGLE_SELECT.
+      const runStart = await http(
+        'POST',
+        `/api/public/widget-flows/by-key/${tokenKey}/runs`,
+        {},
+      );
+      const tokenRunId = runStart.json.run.id;
+      await http(
+        'POST',
+        `/api/public/widget-flows/by-key/${tokenKey}/runs/${tokenRunId}/nodes/${select}/submit`,
+        { values: { selected: 'go' }, clientSubmitId: randomUUID() },
+      );
+
+      // After submitting: CREATE_RESUME_LINK runs, then WAIT_TOKEN
+      // pauses. Verify the run + vars + token row.
+      const pausedRun = await prisma.widgetRun.findUniqueOrThrow({
+        where: { id: tokenRunId },
+      });
+      assertEq(pausedRun.status, 'WAITING_TOKEN', 'run is WAITING_TOKEN');
+      assertEq(
+        pausedRun.currentNodeId,
+        waitToken,
+        'currentNodeId points at WAIT_TOKEN',
+      );
+      const pausedVars = pausedRun.vars as Record<string, unknown>;
+      assert(
+        typeof pausedVars.resumeUrl === 'string' &&
+          (pausedVars.resumeUrl as string).startsWith(
+            'https://smoke.example.com/widget-flow/resume/',
+          ),
+        'vars.resumeUrl interpolated with publicBaseUrl',
+      );
+      assert(
+        typeof pausedVars.resumeToken === 'string',
+        'vars.resumeToken populated',
+      );
+
+      const tokens = await prisma.widgetResumeToken.findMany({
+        where: { runId: tokenRunId, consumed: false },
+      });
+      assertEq(tokens.length, 1, 'one unconsumed resume token written');
+      const resumeTokenId = tokens[0].id;
+      assertEq(
+        pausedVars.resumeToken,
+        resumeTokenId,
+        'vars.resumeToken matches DB row id',
+      );
+
+      // Click the URL — calls the public resume endpoint.
+      const resume = await http(
+        'GET',
+        `/api/public/widget-flows/resume/${resumeTokenId}`,
+      );
+      assertEq(resume.status, 200, 'resume status = 200');
+      assertEq(resume.json?.runId, tokenRunId, 'resume returns same runId');
+      assertEq(
+        resume.json?.publishableKey,
+        tokenKey,
+        'resume returns the flow publishableKey',
+      );
+      assertEq(
+        resume.json?.run?.status,
+        'WAITING_INPUT',
+        'run advanced to WAITING_INPUT after token consumed',
+      );
+      assertEq(
+        resume.json?.currentNode?.kind,
+        'RECAP',
+        'currentNode is RECAP after resume',
+      );
+
+      // Token row is now consumed.
+      const consumedToken = await prisma.widgetResumeToken.findUniqueOrThrow({
+        where: { id: resumeTokenId },
+      });
+      assertEq(consumedToken.consumed, true, 'token marked consumed');
+      assert(consumedToken.consumedAt != null, 'consumedAt timestamp set');
+
+      // Second click of the same URL fails — single-use enforcement.
+      const replay = await http(
+        'GET',
+        `/api/public/widget-flows/resume/${resumeTokenId}`,
+      );
+      assertEq(replay.status, 409, 'replay of consumed token returns 409');
+
+      // Bogus token id returns 404.
+      const bogus = await http(
+        'GET',
+        `/api/public/widget-flows/resume/${randomUUID()}`,
+      );
+      assertEq(bogus.status, 404, 'bogus token id returns 404');
+
+      // Visitor finishes by submitting RECAP → COMPLETED.
+      await http(
+        'POST',
+        `/api/public/widget-flows/by-key/${tokenKey}/runs/${tokenRunId}/nodes/${recap}/submit`,
+        { values: {}, clientSubmitId: randomUUID() },
+      );
+      const finalRun = await prisma.widgetRun.findUniqueOrThrow({
+        where: { id: tokenRunId },
+      });
+      assertEq(finalRun.status, 'COMPLETED', 'run COMPLETED after RECAP submit');
+
+      await http('DELETE', `/api/widget-flows/${tokenFlowId}`);
     }
   } finally {
     await purgeSmokeFlows(organizationId);

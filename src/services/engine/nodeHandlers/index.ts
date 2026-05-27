@@ -20,6 +20,7 @@ import { formHandler as legacyFormHandler } from '../stepHandlers/form';
 import { recapHandler as legacyRecapHandler } from '../stepHandlers/recap';
 import { singleSelectHandler as legacySingleSelectHandler } from '../stepHandlers/singleSelect';
 import { sendEmailHandler as legacySendEmailHandler } from '../actionHandlers/sendEmail';
+import { createResumeLinkHandler as legacyCreateResumeLinkHandler } from '../actionHandlers/createResumeLink';
 import type { ActionExecutionContext, ActionResult } from '../actionHandlers/types';
 import { evaluate, ExpressionError, type EvaluationContext } from '../expressionEvaluator';
 import type {
@@ -338,6 +339,8 @@ export const nodeHandlers: Record<string, NodeHandler> = {
 
   // ACTION kinds
   SEND_EMAIL: actionAdapter(legacySendEmailHandler),
+  // Phase 3.2b — pairs with WAIT_TOKEN to enable email-link resume.
+  CREATE_RESUME_LINK: actionAdapter(legacyCreateResumeLinkHandler),
 
   // WAIT kinds — real handlers (Phase 3.2). WAIT_TOKEN's resume
   // route lands in Phase 3.2b; this handler still pauses the run

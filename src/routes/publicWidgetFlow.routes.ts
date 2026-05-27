@@ -34,4 +34,17 @@ router.post(
   (req, res) => controller.submitNode(req, res),
 );
 
+// Phase 3.2b — resume a paused run via a single-use token URL.
+// Distinct from the publishable-key-scoped routes above: the token
+// itself encodes which flow + run to resume, so requireWidgetFlow
+// isn't appropriate here. The controller resolves the org context
+// from the token's run row.
+//
+// GET (idempotency via the token's `consumed` flag) so the URL
+// works in email clients that pre-fetch links + on any plain click.
+router.get(
+  '/resume/:tokenId',
+  (req, res) => controller.consumeResume(req, res),
+);
+
 export default router;

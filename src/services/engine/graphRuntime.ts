@@ -397,19 +397,46 @@ export async function advanceRun(params: {
         return { run: refreshed, currentNode: node };
       }
 
-      // descriptor.kind === 'token' — write a single-use resume token.
+      // descriptor.kind === 'token' — pause until a single-use resume
+      // token is consumed.
+      //
+      // Token sourcing: if an unconsumed token already exists for this
+      // run (the common case — CREATE_RESUME_LINK minted one upstream
+      // so the email could interpolate the URL), reuse it. Otherwise
+      // mint a fresh fallback token so the run isn't permanently
+      // stranded — but flows authored this way have no out-of-band
+      // way for the visitor to learn the URL (no email sent), so the
+      // fallback token is effectively a hold-on-DB-only handle.
       const expiresAt = new Date(
         Date.now() + (descriptor.expirationDays ?? 30) * 24 * 60 * 60 * 1000,
       );
+      const existingToken = await prisma.widgetResumeToken.findFirst({
+        where: { runId: run.id, consumed: false },
+        orderBy: { createdAt: 'desc' },
+        select: { id: true, expiresAt: true },
+      });
+      const tokenOps = existingToken
+        ? [
+            // Re-point the existing token at this WAIT_TOKEN node so
+            // metering / debugging traces the consume back to the
+            // wait, not the upstream CREATE_RESUME_LINK.
+            prisma.widgetResumeToken.update({
+              where: { id: existingToken.id },
+              data: { nodeId: node.id },
+            }),
+          ]
+        : [
+            prisma.widgetResumeToken.create({
+              data: {
+                flowId: run.flowId,
+                runId: run.id,
+                nodeId: node.id,
+                expiresAt,
+              },
+            }),
+          ];
       await prisma.$transaction([
-        prisma.widgetResumeToken.create({
-          data: {
-            flowId: run.flowId,
-            runId: run.id,
-            nodeId: node.id,
-            expiresAt,
-          },
-        }),
+        ...tokenOps,
         prisma.widgetRun.update({
           where: { id: run.id },
           data: {
@@ -421,6 +448,9 @@ export async function advanceRun(params: {
           },
         }),
       ]);
+      const effectiveExpiresAt = existingToken
+        ? existingToken.expiresAt
+        : expiresAt;
       await recordEngineAction({
         organizationId: run.organizationId,
         flowId: run.flowId,
@@ -428,7 +458,9 @@ export async function advanceRun(params: {
         actionKind: node.kind,
         status: 'OK',
         durationMs: 0,
-        errorMessage: `awaiting token (expires ${expiresAt.toISOString()})`,
+        errorMessage: existingToken
+          ? `awaiting token (reused, expires ${effectiveExpiresAt.toISOString()})`
+          : `awaiting token (expires ${effectiveExpiresAt.toISOString()})`,
       });
       const refreshed = await prisma.widgetRun.findUniqueOrThrow({
         where: { id: run.id },
@@ -693,11 +725,67 @@ export async function submitNode(params: {
 }
 
 /**
+ * Consume a resume token + drive the resume. The public route
+ * (POST /api/public/widget-flows/resume/:tokenId) calls this when
+ * the visitor clicks the URL the engine emailed them.
+ *
+ * Validates:
+ *   - token exists + unconsumed + unexpired
+ *   - the linked run is in WAITING_TOKEN status
+ * On success: marks the token consumed + calls resumeRun.
+ *
+ * Returns the resume result so the controller can redirect the
+ * visitor to the next UI (if any) or the completion screen.
+ */
+export async function consumeResumeToken(params: {
+  tokenId: string;
+}): Promise<AdvanceResult> {
+  const token = await prisma.widgetResumeToken.findUnique({
+    where: { id: params.tokenId },
+    select: {
+      id: true,
+      runId: true,
+      flowId: true,
+      consumed: true,
+      expiresAt: true,
+    },
+  });
+  if (!token) {
+    throw new GraphRuntimeError(
+      `Resume token ${params.tokenId} not found`,
+      'RUN_NOT_FOUND',
+    );
+  }
+  if (token.consumed) {
+    throw new GraphRuntimeError(
+      `Resume token ${params.tokenId} already consumed`,
+      'RUN_NOT_IN_PROGRESS',
+    );
+  }
+  if (token.expiresAt.getTime() < Date.now()) {
+    throw new GraphRuntimeError(
+      `Resume token ${params.tokenId} expired at ${token.expiresAt.toISOString()}`,
+      'RUN_NOT_IN_PROGRESS',
+    );
+  }
+
+  // Mark consumed BEFORE resuming so concurrent clicks of the same
+  // link can't double-trigger. resumeRun's own status check is the
+  // backstop against double-resume from any other source.
+  await prisma.widgetResumeToken.update({
+    where: { id: token.id },
+    data: { consumed: true, consumedAt: new Date() },
+  });
+
+  return resumeRun({ runId: token.runId });
+}
+
+/**
  * Resume a run that was paused at a WAIT node. Called by:
  *   - the sweeper job (engineResume.ts) for time-based waits when
  *     WidgetScheduledResume.fireAt <= now
- *   - the public resume route (Phase 3.2b) for token-based waits
- *     when the visitor clicks the URL
+ *   - consumeResumeToken (above) for token-based waits when the
+ *     visitor clicks the URL
  *
  * Skips past the WAIT node by following its first matching outgoing
  * edge, then walks forward via advanceRun. If the WAIT node has no

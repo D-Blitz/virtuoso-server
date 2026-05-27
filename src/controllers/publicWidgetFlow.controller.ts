@@ -10,6 +10,7 @@ import type { Request, Response } from 'express';
 
 import prisma from '../prisma';
 import {
+  consumeResumeToken,
   GraphRuntimeError,
   startRun,
   submitNode,
@@ -215,6 +216,59 @@ export class PublicWidgetFlowController {
       });
     } catch (err) {
       sendError(res, err, 'Failed to fetch run');
+    }
+  }
+
+  /**
+   * GET /api/public/widget-flows/resume/:tokenId
+   *
+   * Consume a single-use resume token + advance the paused run.
+   * Resolves the run + flow + publishable key from the token + run
+   * row (no requireWidgetFlow middleware here — the token IS the
+   * authorization).
+   *
+   * Returns the run state + the publishable key, so the admin's
+   * /widget-flow/resume/[token] page can redirect to the visitor
+   * renderer at the right URL with the runId in the query string.
+   *
+   * If the token is invalid / expired / already-consumed, returns
+   * the error JSON with a 4xx status code so the admin's resume
+   * page can render a friendly "this link is no longer valid"
+   * message.
+   */
+  async consumeResume(req: Request, res: Response) {
+    const { tokenId } = req.params;
+    try {
+      const result = await consumeResumeToken({ tokenId });
+
+      // Resolve the flow's publishable key so the client can route
+      // to the visitor renderer. EVENT_REACTION flows have null
+      // publishableKey — they shouldn't normally be reached via
+      // visitor resume URLs (those flows don't have visitor entry),
+      // but we return null gracefully for the client to handle.
+      const flow = await prisma.widgetFlow.findUnique({
+        where: { id: result.run.flowId },
+        select: { id: true, publishableKey: true, name: true },
+      });
+
+      res.json({
+        runId: result.run.id,
+        flowId: result.run.flowId,
+        publishableKey: flow?.publishableKey ?? null,
+        run: publicRun(result.run),
+        currentNode: result.currentNode
+          ? publicNode(result.currentNode)
+          : null,
+      });
+    } catch (err) {
+      if (err instanceof GraphRuntimeError) {
+        res.status(runtimeErrorStatus(err.code)).json({
+          error: err.message,
+          code: err.code,
+        });
+        return;
+      }
+      sendError(res, err, 'Failed to consume resume token');
     }
   }
 
