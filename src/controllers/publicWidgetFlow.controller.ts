@@ -80,6 +80,12 @@ function publicRun(run: {
  * kinds this includes the kind-specific config (option list, field
  * definitions, etc.). bindingTarget on FORM fields IS exposed so the
  * client can construct submission keys.
+ *
+ * Compatibility note: v1 returned `fields` as a top-level property of
+ * the step. v2 bundles fields under `config.fields`. The visitor
+ * renderer was built against v1, so we project `config.fields` to
+ * the top level here. The renderer keeps working unchanged; the
+ * canvas editor (Phase 3.3) will author them in the same location.
  */
 function publicNode(node: {
   id: string;
@@ -88,12 +94,18 @@ function publicNode(node: {
   description: string | null;
   config: unknown;
 }) {
+  const cfg = (node.config ?? {}) as { fields?: unknown };
+  const fields = Array.isArray(cfg.fields) ? cfg.fields : [];
   return {
     id: node.id,
     kind: node.kind,
     label: node.label,
     description: node.description,
     config: node.config,
+    // Mirrored for the v1 renderer; always an array (empty for non-
+    // FORM kinds) so the renderer's `.slice().sort()` calls never
+    // explode on undefined.
+    fields,
   };
 }
 
