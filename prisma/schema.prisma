@@ -923,10 +923,27 @@ model WidgetFlow {
   runs      WidgetRun[]
   draft     WidgetFlowDraft?
   snapshots WidgetFlowSnapshot[]
-  // Phase 2.2 — post-completion actions.
+  // Phase 2.2 — post-completion actions (LEGACY — to be removed in
+  // Phase 3.5 once the v2 graph engine is the only consumer).
   actions   WidgetAction[]
-  // Phase 2.3 — event-bus triggers (EVENT_REACTION flows only).
+  // Phase 2.3 — event-bus triggers (LEGACY — Phase 3 unifies these
+  // into WidgetEntryPoint).
   triggers  WidgetTrigger[]
+
+  // ─── Phase 3.0 — graph engine ─────────────────────────────────
+  // The v2 model: a flow is a directed graph of nodes + edges with
+  // entry-point descriptors that fire runs. UI nodes block for
+  // visitor input; ACTION nodes execute server-side; WAIT nodes
+  // suspend the run (resumed via cron sweeper or token URL).
+  //
+  // The legacy step/field/action/trigger tables coexist during the
+  // 3.0-3.4 phase window so the migration is reversible. Phase 3.5
+  // drops them.
+  nodes            WidgetNode[]
+  edges            WidgetEdge[]
+  entryPoints      WidgetEntryPoint[]
+  resumeTokens     WidgetResumeToken[]
+  scheduledResumes WidgetScheduledResume[]
 
   // Phase 2.2 follow-up — same trash + archive semantics as the rest
   // of the soft-deletable models. Deleting a flow from the editor or
@@ -1046,8 +1063,28 @@ model WidgetRun {
   // All captured values from the visitor's session — `vars.X` namespace.
   vars Json @default("{}")
 
+  // v1 — current STEP id (legacy). Kept during 3.0-3.4 phase window
+  // for the old runtime; new runtime uses currentNodeId.
   currentStepId String?
-  status        String // IN_PROGRESS | COMPLETED | ABANDONED | ERRORED
+
+  // Phase 3.0 — v2 graph runtime cursor. The node the run is
+  // currently stopped at (or null if COMPLETED / not yet started).
+  currentNodeId String?
+
+  // Status union grew in 3.0:
+  //   IN_PROGRESS     — actively walking (or about to be picked up)
+  //   WAITING_INPUT   — paused at a UI node; visitor hasn't submitted
+  //   WAITING_TIME    — paused at a WAIT_DURATION / WAIT_UNTIL node;
+  //                     sweeper will resume at nextResumeAt
+  //   WAITING_TOKEN   — paused at a WAIT_TOKEN node; external URL click resumes
+  //   COMPLETED       — reached an end node (no outgoing edges matched)
+  //   ABANDONED       — visitor never came back; future TTL cleanup
+  //   ERRORED         — fatal error during execution
+  status String
+
+  // Phase 3.0 — when set, the cron sweeper picks this run up at the
+  // wall-clock time. Cleared on resume.
+  nextResumeAt DateTime?
 
   startedAt   DateTime  @default(now())
   completedAt DateTime?
@@ -1059,8 +1096,14 @@ model WidgetRun {
   // cached response without re-applying side effects.
   submits WidgetRunSubmit[]
 
+  // Phase 3.0 — pending resume tokens + scheduled resumes for this
+  // run. Cascade-delete from WidgetRun.
+  resumeTokens     WidgetResumeToken[]
+  scheduledResumes WidgetScheduledResume[]
+
   @@index([organizationId, startedAt])
   @@index([flowId, status])
+  @@index([status, nextResumeAt])
 }
 
 // Idempotency log for step submissions (Phase 2.0 Commit 2).
@@ -1242,13 +1285,156 @@ model WidgetAction {
 // branches is done in the action tree (CONDITIONAL), not by
 // stacking triggers.
 model WidgetTrigger {
-  id        String     @id @default(cuid())
-  flowId    String
-  flow      WidgetFlow @relation(fields: [flowId], references: [id], onDelete: Cascade)
+  id     String     @id @default(cuid())
+  flowId String
+  flow   WidgetFlow @relation(fields: [flowId], references: [id], onDelete: Cascade)
 
   eventName String // e.g. "payment.succeeded", "event.cancelled"
   filter    Json?
 
   @@unique([flowId, eventName])
   @@index([eventName])
+}
+
+// ─── Phase 3.0 — graph engine (v2) ────────────────────────────────
+//
+// Replaces the WidgetStep / WidgetField / WidgetAction / WidgetTrigger
+// quartet with a unified node + edge model. Old tables coexist during
+// the 3.0-3.4 phase window for migration safety; Phase 3.5 drops them.
+
+// One node in the flow graph. Categories:
+//   UI     — blocks for visitor input (SINGLE_SELECT, FORM, RECAP,
+//            TEXT_BLOCK, etc.). FORM nodes embed their fields in
+//            `config.fields` (no separate WidgetField table in v2).
+//   ACTION — executes server-side (SEND_EMAIL, ISSUE_REFUND, …).
+//   WAIT   — suspends the run; resumed externally
+//            (WAIT_DURATION via cron sweeper, WAIT_TOKEN via URL).
+//
+// `kind` is String (not enum) so adding a new node kind is purely
+// app-layer work — no schema migration. The handler registry is the
+// authoritative whitelist.
+//
+// `position` (positionX / positionY) is for the canvas editor.
+// Defaults to (0, 0) for nodes created via JSON import; the canvas
+// auto-layouts unpositioned nodes on first render.
+model WidgetNode {
+  id     String     @id @default(cuid())
+  flowId String
+  flow   WidgetFlow @relation(fields: [flowId], references: [id], onDelete: Cascade)
+
+  kind        String
+  label       String
+  description String?
+  config      Json    @default("{}")
+
+  positionX Float @default(0)
+  positionY Float @default(0)
+
+  outgoingEdges    WidgetEdge[]            @relation("EdgeFrom")
+  incomingEdges    WidgetEdge[]            @relation("EdgeTo")
+  entryPoints      WidgetEntryPoint[]
+  resumeTokens     WidgetResumeToken[]
+  scheduledResumes WidgetScheduledResume[]
+
+  @@index([flowId])
+  @@index([flowId, kind])
+}
+
+// Directed edge between two nodes. Multiple outgoing edges from one
+// node = a branch; the engine picks the first whose `condition`
+// evaluates truthy (in `order`). An edge with no `condition` always
+// matches — useful as the catch-all at the end of a branch list.
+model WidgetEdge {
+  id     String     @id @default(cuid())
+  flowId String
+  flow   WidgetFlow @relation(fields: [flowId], references: [id], onDelete: Cascade)
+
+  fromNodeId String
+  fromNode   WidgetNode @relation("EdgeFrom", fields: [fromNodeId], references: [id], onDelete: Cascade)
+  toNodeId   String
+  toNode     WidgetNode @relation("EdgeTo", fields: [toNodeId], references: [id], onDelete: Cascade)
+
+  // Evaluation order for siblings out of the same source node.
+  order     Int     @default(0)
+  // Optional JSONLogic gate. Null = always match.
+  condition Json?
+  // Optional human-readable label rendered on the canvas edge.
+  label     String?
+
+  @@index([flowId])
+  @@index([fromNodeId])
+  @@index([toNodeId])
+}
+
+// Entry-point descriptor — replaces the legacy WidgetTrigger model.
+// Each entry point describes WHERE runs start (which node) and HOW
+// (visitor URL, bus event, or cron).
+//
+//   kind = 'visitor' → BOOKING-style; flow's publishableKey URL hits
+//                       this entry. At most one per flow.
+//   kind = 'event'   → bus-event; config.eventName + optional filter.
+//                       Multiple per flow if listening for several events.
+//   kind = 'cron'    → time-based; config.schedule (cron expression).
+//                       Multiple per flow for multiple schedules.
+model WidgetEntryPoint {
+  id     String     @id @default(cuid())
+  flowId String
+  flow   WidgetFlow @relation(fields: [flowId], references: [id], onDelete: Cascade)
+
+  kind   String // 'visitor' | 'event' | 'cron'
+  config Json   @default("{}")
+
+  entryNodeId String?
+  entryNode   WidgetNode? @relation(fields: [entryNodeId], references: [id], onDelete: SetNull)
+
+  @@index([flowId])
+  @@index([kind])
+}
+
+// Resume token for WAIT_TOKEN nodes. Generated when a run hits a
+// WAIT_TOKEN node and stored alongside the email/SMS body that
+// references it. The token URL resolves to the run + node, and on
+// click the engine resumes from there.
+//
+// `consumed` flips true on first successful resume — a token is
+// single-use (prevents replays). `expiresAt` defaults to 30 days.
+model WidgetResumeToken {
+  id     String     @id @default(cuid())
+  flowId String
+  flow   WidgetFlow @relation(fields: [flowId], references: [id], onDelete: Cascade)
+  runId  String
+  run    WidgetRun  @relation(fields: [runId], references: [id], onDelete: Cascade)
+  nodeId String
+  node   WidgetNode @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+
+  expiresAt  DateTime
+  consumed   Boolean   @default(false)
+  consumedAt DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([runId])
+  @@index([expiresAt, consumed])
+}
+
+// Scheduled resume for WAIT_DURATION / WAIT_UNTIL nodes. The sweeper
+// job (Phase 3.2) picks up rows with fireAt <= now() + consumed=false,
+// resumes the run from `nodeId`, then flips consumed=true.
+model WidgetScheduledResume {
+  id     String     @id @default(cuid())
+  flowId String
+  flow   WidgetFlow @relation(fields: [flowId], references: [id], onDelete: Cascade)
+  runId  String
+  run    WidgetRun  @relation(fields: [runId], references: [id], onDelete: Cascade)
+  nodeId String
+  node   WidgetNode @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+
+  fireAt     DateTime
+  consumed   Boolean   @default(false)
+  consumedAt DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([runId])
+  @@index([fireAt, consumed])
 }
