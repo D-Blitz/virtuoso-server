@@ -18,6 +18,15 @@ router.get(
   (req, res) => controller.getRun(req, res),
 );
 
+// Phase 3.4 — visitor-facing entity list for ENTITY_REF fields. Scoped
+// to the flow's organization via requireWidgetFlow; the entity
+// registry's safeFields whitelist gates which fields are exposed.
+router.get(
+  '/by-key/:publishableKey/entities/:entityType',
+  requireWidgetFlow,
+  (req, res) => controller.listEntities(req, res),
+);
+
 // Phase 3.1 — v2 canonical submit URL: nodes/:nodeId
 router.post(
   '/by-key/:publishableKey/runs/:runId/nodes/:nodeId/submit',

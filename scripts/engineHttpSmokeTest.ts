@@ -23,6 +23,7 @@
  *  14. 404 on bogus publishable key
  *  15. WAIT_DURATION + sweeper resumes paused run (Phase 3.2)
  *  16. CREATE_RESUME_LINK + WAIT_TOKEN + GET /resume/:tokenId (Phase 3.2b)
+ *  17. ENTITY_REF FORM field: list endpoint + resolve on submit (Phase 3.4)
  *
  * Uses the existing dev-auth-bypass mechanism in `requireUser`:
  * NODE_ENV != 'production' + DEV_AUTH_BYPASS=true + DEV_DEFAULT_ORG_ID.
@@ -996,6 +997,293 @@ async function main() {
       assertEq(finalRun.status, 'COMPLETED', 'run COMPLETED after RECAP submit');
 
       await http('DELETE', `/api/widget-flows/${tokenFlowId}`);
+    }
+
+    // ── 17. ENTITY_REF list endpoint + resolve on submit (3.4) ──
+    // Build a 2-node flow: FORM with ENTITY_REF(facilitator) → RECAP.
+    // Seed a Facilitator row scoped to this org, walk a visitor
+    // through, verify:
+    //   - GET /entities/facilitator returns the seeded row
+    //   - submit with the facilitator id resolves + writes
+    //     vars.facilitator = { id, label, email, ... }
+    //   - submit with a bogus id produces a validation error
+    //   - GET /entities/<unknown-type> returns empty (entityType
+    //     never reaches the registry, doesn't throw)
+    //   - cross-org id (different org's facilitator) is rejected
+    //     as "not found" — proves org scoping
+    console.log('\n17. ENTITY_REF FORM field (Phase 3.4)');
+    {
+      // Seed two facilitators so we can test the multi-row list.
+      const seeded = await Promise.all([
+        prisma.facilitator.create({
+          data: {
+            organizationId,
+            firstname: 'SmokeAlpha',
+            lastname: 'Tester',
+            email: 'alpha@smoke.test',
+            phone: '5555550100',
+            color: '#ff0000',
+            availability: {},
+            isBookable: true,
+            isBioDisplayed: false,
+          },
+        }),
+        prisma.facilitator.create({
+          data: {
+            organizationId,
+            firstname: 'SmokeBeta',
+            lastname: 'Tester',
+            email: 'beta@smoke.test',
+            phone: '5555550200',
+            color: '#00ff00',
+            availability: {},
+            isBookable: true,
+            isBioDisplayed: false,
+          },
+        }),
+      ]);
+
+      // Find another org's facilitator (if any exist) to test cross-
+      // org rejection. Skip the cross-org assertion if there are no
+      // other orgs (e.g. fresh dev DB).
+      const otherOrgFac = await prisma.facilitator.findFirst({
+        where: {
+          organizationId: { not: organizationId },
+          isBookable: true,
+        },
+      });
+
+      const form = randomUUID();
+      const recap = randomUUID();
+      const entityFlow = await http('POST', '/api/widget-flows', {
+        name: '[http-smoke] entity-ref flow',
+        kind: 'BOOKING',
+      });
+      const entityFlowId = entityFlow.json.flow.id;
+
+      const entityPayload = {
+        name: '[http-smoke] entity-ref flow',
+        description: null,
+        kind: 'BOOKING' as const,
+        nodes: [
+          {
+            id: form,
+            kind: 'FORM',
+            label: 'Choisir un intervenant',
+            description: null,
+            config: {
+              fields: [
+                {
+                  order: 0,
+                  kind: 'ENTITY_REF',
+                  label: 'Intervenant',
+                  required: true,
+                  binding: 'VAR',
+                  bindingTarget: 'facilitator',
+                  config: {
+                    entityType: 'facilitator',
+                    extractFields: ['email', 'firstname'],
+                  },
+                },
+              ],
+            },
+            position: { x: 0, y: 0 },
+          },
+          {
+            id: recap,
+            kind: 'RECAP',
+            label: 'Confirmer',
+            description: null,
+            config: {},
+            position: { x: 0, y: 200 },
+          },
+        ],
+        edges: [{ fromNodeId: form, toNodeId: recap, order: 0 }],
+        entryPoints: [
+          { kind: 'visitor' as const, config: {}, entryNodeId: form },
+        ],
+      };
+
+      try {
+        await http(
+          'PATCH',
+          `/api/widget-flows/${entityFlowId}/draft`,
+          entityPayload,
+        );
+        const pubE = await http(
+          'POST',
+          `/api/widget-flows/${entityFlowId}/publish`,
+        );
+        assertEq(pubE.status, 200, 'entity-ref flow published');
+        const entityKey = pubE.json.flow.publishableKey;
+
+        // 17a. List endpoint returns the seeded facilitators.
+        const listRes = await http(
+          'GET',
+          `/api/public/widget-flows/by-key/${entityKey}/entities/facilitator`,
+        );
+        assertEq(listRes.status, 200, 'entity list status = 200');
+        assert(
+          Array.isArray(listRes.json?.entities),
+          'list returns entities array',
+        );
+        const listedIds = new Set(
+          (listRes.json.entities as { id: string }[]).map((e) => e.id),
+        );
+        assert(
+          listedIds.has(seeded[0].id) && listedIds.has(seeded[1].id),
+          'both seeded facilitators in the list',
+        );
+        // Cross-org leak check: another org's facilitator must NOT
+        // appear in the list.
+        if (otherOrgFac) {
+          assert(
+            !listedIds.has(otherOrgFac.id),
+            'cross-org facilitator NOT leaked in list',
+          );
+        }
+        // Safe-fields projection: list rows expose `fields` with
+        // only the registry's whitelist (no raw Prisma columns).
+        const firstEntity = (listRes.json.entities as Array<{
+          id: string;
+          label: string;
+          fields: Record<string, unknown>;
+        }>).find((e) => e.id === seeded[0].id);
+        assert(firstEntity != null, 'seeded facilitator returned');
+        assertEq(
+          firstEntity?.label,
+          'SmokeAlpha Tester',
+          'label = firstname + lastname',
+        );
+        assertEq(
+          firstEntity?.fields?.email,
+          'alpha@smoke.test',
+          'fields.email present',
+        );
+
+        // 17b. Unknown entity type → empty array, no 500.
+        const unknownRes = await http(
+          'GET',
+          `/api/public/widget-flows/by-key/${entityKey}/entities/spaceship`,
+        );
+        assertEq(unknownRes.status, 200, 'unknown type returns 200');
+        assertEq(
+          (unknownRes.json?.entities ?? []).length,
+          0,
+          'unknown type returns empty list',
+        );
+
+        // 17c. Submit with the picked facilitator id.
+        const runStart = await http(
+          'POST',
+          `/api/public/widget-flows/by-key/${entityKey}/runs`,
+          {},
+        );
+        const entityRunId = runStart.json.run.id;
+        const okSubmit = await http(
+          'POST',
+          `/api/public/widget-flows/by-key/${entityKey}/runs/${entityRunId}/nodes/${form}/submit`,
+          {
+            values: { facilitator: seeded[0].id },
+            clientSubmitId: randomUUID(),
+          },
+        );
+        assertEq(okSubmit.status, 200, 'valid submit status = 200');
+        assertEq(
+          okSubmit.json?.errors?.length,
+          0,
+          'no errors on valid entity pick',
+        );
+        assertEq(
+          okSubmit.json?.nextNode?.kind,
+          'RECAP',
+          'advanced to RECAP after resolve',
+        );
+
+        // Verify vars projection: vars.facilitator = { id, label, email }
+        const resolvedRun = await prisma.widgetRun.findUniqueOrThrow({
+          where: { id: entityRunId },
+        });
+        const vars = resolvedRun.vars as Record<string, unknown>;
+        const fac = vars.facilitator as
+          | { id?: string; label?: string; email?: string; firstname?: string }
+          | undefined;
+        assertEq(fac?.id, seeded[0].id, 'vars.facilitator.id matches pick');
+        assertEq(
+          fac?.email,
+          'alpha@smoke.test',
+          'vars.facilitator.email extracted',
+        );
+        assertEq(
+          fac?.firstname,
+          'SmokeAlpha',
+          'vars.facilitator.firstname extracted',
+        );
+        assertEq(
+          fac?.label,
+          'SmokeAlpha Tester',
+          'vars.facilitator.label populated',
+        );
+
+        // 17d. Bogus id → validation error, run stays put.
+        const bogusRun = await http(
+          'POST',
+          `/api/public/widget-flows/by-key/${entityKey}/runs`,
+          {},
+        );
+        const bogusRunId = bogusRun.json.run.id;
+        const badSubmit = await http(
+          'POST',
+          `/api/public/widget-flows/by-key/${entityKey}/runs/${bogusRunId}/nodes/${form}/submit`,
+          {
+            values: { facilitator: 'not-a-real-id' },
+            clientSubmitId: randomUUID(),
+          },
+        );
+        assertEq(badSubmit.status, 200, 'bogus id status = 200 (validation)');
+        assert(
+          (badSubmit.json?.errors ?? []).some(
+            (e: { field?: string }) => e.field === 'facilitator',
+          ),
+          'validation error on facilitator field for bogus id',
+        );
+        assertEq(
+          badSubmit.json?.nextNode?.kind,
+          'FORM',
+          'run did NOT advance past FORM',
+        );
+
+        // 17e. Cross-org id → validation error (org scoping).
+        if (otherOrgFac) {
+          const crossRun = await http(
+            'POST',
+            `/api/public/widget-flows/by-key/${entityKey}/runs`,
+            {},
+          );
+          const crossRunId = crossRun.json.run.id;
+          const crossSubmit = await http(
+            'POST',
+            `/api/public/widget-flows/by-key/${entityKey}/runs/${crossRunId}/nodes/${form}/submit`,
+            {
+              values: { facilitator: otherOrgFac.id },
+              clientSubmitId: randomUUID(),
+            },
+          );
+          assert(
+            (crossSubmit.json?.errors ?? []).some(
+              (e: { field?: string }) => e.field === 'facilitator',
+            ),
+            'cross-org facilitator id rejected as "not found"',
+          );
+        }
+
+        await http('DELETE', `/api/widget-flows/${entityFlowId}`);
+      } finally {
+        // Clean up seeded fixture rows regardless of test outcome.
+        await prisma.facilitator.deleteMany({
+          where: { id: { in: seeded.map((f) => f.id) } },
+        });
+      }
     }
   } finally {
     await purgeSmokeFlows(organizationId);

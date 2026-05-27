@@ -632,7 +632,16 @@ export async function submitNode(params: {
   }
 
   // ── Validate.
-  const errors = handler.validateSubmission!(submission, node);
+  const submissionContext = {
+    organizationId: run.organizationId,
+    runId: run.id,
+    flowId: run.flowId,
+  };
+  const errors = await handler.validateSubmission!(
+    submission,
+    node,
+    submissionContext,
+  );
 
   if (errors.length > 0) {
     // Validation failed — cache + return without advancing.
@@ -661,7 +670,12 @@ export async function submitNode(params: {
 
   // ── Apply submission — update vars.
   const currentVars = (run.vars ?? {}) as Record<string, unknown>;
-  const newVars = handler.applySubmission!(submission, node, currentVars);
+  const newVars = await handler.applySubmission!(
+    submission,
+    node,
+    currentVars,
+    submissionContext,
+  );
 
   // Pick the next edge to follow from THIS node, using the
   // post-apply vars (so conditions referencing the value the visitor

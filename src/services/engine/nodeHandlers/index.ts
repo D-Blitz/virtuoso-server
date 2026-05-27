@@ -16,11 +16,11 @@
 
 import type { Prisma, WidgetNode } from '@prisma/client';
 
-import { formHandler as legacyFormHandler } from '../stepHandlers/form';
 import { recapHandler as legacyRecapHandler } from '../stepHandlers/recap';
 import { singleSelectHandler as legacySingleSelectHandler } from '../stepHandlers/singleSelect';
 import { sendEmailHandler as legacySendEmailHandler } from '../actionHandlers/sendEmail';
 import { createResumeLinkHandler as legacyCreateResumeLinkHandler } from '../actionHandlers/createResumeLink';
+import { formNodeHandler } from './form';
 import type { ActionExecutionContext, ActionResult } from '../actionHandlers/types';
 import { evaluate, ExpressionError, type EvaluationContext } from '../expressionEvaluator';
 import type {
@@ -60,6 +60,18 @@ export type WaitDescriptor =
     };
 
 /**
+ * Per-submission contextual data that the runtime threads into UI
+ * handler hooks. The flow's organizationId is the critical piece —
+ * handlers that fetch tenant-scoped data (ENTITY_REF, future DB-
+ * column bindings) need it to scope their queries.
+ */
+export type SubmissionContext = {
+  organizationId: string;
+  runId: string;
+  flowId: string;
+};
+
+/**
  * Unified node handler. Different categories implement different
  * subsets:
  *   UI     → validateConfig, validateSubmission, applySubmission
@@ -79,15 +91,21 @@ export type NodeHandler = {
   validateConfig(config: Prisma.JsonValue): string | null;
 
   // UI-only methods --------------------------------------------------
+  //
+  // validate + apply MAY return a Promise so handlers that need DB
+  // lookups (e.g. ENTITY_REF field resolution in FORM, Phase 3.4) can
+  // do them inline. The runtime always awaits.
   validateSubmission?(
     submission: StepSubmission,
     node: WidgetNode,
-  ): ValidationError[];
+    context: SubmissionContext,
+  ): ValidationError[] | Promise<ValidationError[]>;
   applySubmission?(
     submission: StepSubmission,
     node: WidgetNode,
     currentVars: Record<string, unknown>,
-  ): Record<string, unknown>;
+    context: SubmissionContext,
+  ): Record<string, unknown> | Promise<Record<string, unknown>>;
 
   // ACTION-only methods ---------------------------------------------
   execute?(
@@ -177,6 +195,8 @@ function uiAdapter(legacy: StepHandler): NodeHandler {
       return null;
     },
     validateSubmission(submission, node) {
+      // Legacy handlers are sync — ignore the new SubmissionContext
+      // arg + return a plain array. The runtime awaits either way.
       return legacy.validate(submission, nodeAsStepWithFields(node) as any);
     },
     applySubmission(submission, node, currentVars) {
@@ -334,7 +354,11 @@ const waitTokenHandler: NodeHandler = {
 export const nodeHandlers: Record<string, NodeHandler> = {
   // UI kinds
   SINGLE_SELECT: uiAdapter(legacySingleSelectHandler),
-  FORM: uiAdapter(legacyFormHandler),
+  // Phase 3.4: FORM is the first v2-native handler — async, knows
+  // about ENTITY_REF fields (resolves them against the org-scoped
+  // entity registry). The legacy stepHandlers/form.ts stays around
+  // until Phase 3.5 drops the v1 tables.
+  FORM: formNodeHandler,
   RECAP: uiAdapter(legacyRecapHandler),
 
   // ACTION kinds

@@ -15,6 +15,7 @@ import {
   startRun,
   submitNode,
 } from '../services/engine/graphRuntime';
+import { listEntities } from '../services/engine/entityRegistry';
 import {
   startRunBodySchema,
   submitNodeBodySchema,
@@ -269,6 +270,51 @@ export class PublicWidgetFlowController {
         return;
       }
       sendError(res, err, 'Failed to consume resume token');
+    }
+  }
+
+  /**
+   * GET /api/public/widget-flows/by-key/:publishableKey/entities/:entityType
+   *
+   * Returns the list of entities (Facilitator / Room / Client /
+   * Service) the visitor renderer can show in an ENTITY_REF picker.
+   * The list is scoped to the flow's organization via requireWidgetFlow
+   * and filtered through the entityRegistry's safeFields whitelist —
+   * we never return raw Prisma rows.
+   *
+   * Query string:
+   *   - limit: optional, clamped to the registry's per-type max.
+   *
+   * No pagination cursor yet — bounded by the per-type maxListSize
+   * (200) which is enough for typical small/mid-sized orgs. A cursor
+   * lands when a customer needs it.
+   */
+  async listEntities(req: Request, res: Response) {
+    try {
+      const flow = (req as ReqWithFlow).widgetFlow;
+      if (!flow) {
+        res.status(500).json({ error: 'Flow not resolved' });
+        return;
+      }
+
+      const { entityType } = req.params;
+      const rawLimit = Number(req.query.limit);
+      const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? rawLimit : undefined;
+
+      const items = await listEntities({
+        organizationId: flow.organizationId,
+        type: entityType,
+        limit,
+      });
+
+      // Unknown entity type → 404 (the registry returned empty).
+      // Distinguish "unknown type" from "valid type, no rows" by
+      // re-checking via getEntityDescriptor would add a round trip; the
+      // public endpoint just returns empty in both cases. Authoring-
+      // time validation against the registry is what catches typos.
+      res.json({ entities: items });
+    } catch (err) {
+      sendError(res, err, 'Failed to list entities');
     }
   }
 
