@@ -41,7 +41,16 @@ export const submitNodeBodySchema = z.object({
 
 // ─── Admin-surface schemas ────────────────────────────────────────
 
-const widgetFlowKindEnum = z.enum(['VISITOR', 'EVENT_REACTION']);
+// VISITOR replaced BOOKING in May 2026 (migration
+// 20260528000007_rename_booking_to_visitor). The data migration that
+// followed rewrites stale JSON blobs in WidgetFlowDraft +
+// WidgetFlowSnapshot, but we also accept BOOKING as an alias here for
+// defense-in-depth: if a stale client (cached tab, importing an old
+// export file, etc.) sends BOOKING, we transparently coerce.
+const widgetFlowKindEnum = z.preprocess(
+  (v) => (v === 'BOOKING' ? 'VISITOR' : v),
+  z.enum(['VISITOR', 'EVENT_REACTION']),
+);
 
 /**
  * JSON-serializable value. Used for node/edge/entrypoint config
