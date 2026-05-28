@@ -16,18 +16,14 @@
 
 import type { Prisma, WidgetNode } from '@prisma/client';
 
-import { recapHandler as legacyRecapHandler } from '../stepHandlers/recap';
-import { singleSelectHandler as legacySingleSelectHandler } from '../stepHandlers/singleSelect';
 import { sendEmailHandler as legacySendEmailHandler } from '../actionHandlers/sendEmail';
 import { createResumeLinkHandler as legacyCreateResumeLinkHandler } from '../actionHandlers/createResumeLink';
 import { formNodeHandler } from './form';
+import { recapNodeHandler } from './recap';
+import { singleSelectNodeHandler } from './singleSelect';
 import type { ActionExecutionContext, ActionResult } from '../actionHandlers/types';
 import { evaluate, ExpressionError, type EvaluationContext } from '../expressionEvaluator';
-import type {
-  StepHandler,
-  StepSubmission,
-  ValidationError,
-} from '../types';
+import type { StepSubmission, ValidationError } from '../types';
 
 // ─── Category + handler shape ─────────────────────────────────────
 
@@ -125,85 +121,12 @@ export type NodeHandler = {
   ): WaitDescriptor;
 };
 
-// ─── Adapters: bridge v1 step/action handlers to the v2 shape ────
+// ─── Action adapter ───────────────────────────────────────────────
 //
-// The v1 stepHandlers expect a `StepWithFields` (their second arg).
-// v2 has a flat WidgetNode whose config can bundle fields. The
-// adapter constructs a StepWithFields-like object from the node for
-// the legacy handler's apply / validate calls.
-
-function nodeAsStepWithFields(node: WidgetNode): {
-  id: string;
-  flowId: string;
-  order: number;
-  kind: string;
-  label: string;
-  description: string | null;
-  config: Prisma.JsonValue;
-  visibleWhen: Prisma.JsonValue | null;
-  fields: Array<{
-    id: string;
-    stepId: string;
-    order: number;
-    kind: string;
-    label: string;
-    placeholder: string | null;
-    required: boolean;
-    binding: string;
-    bindingTarget: string;
-    config: Prisma.JsonValue;
-  }>;
-} {
-  // FORM nodes bundle their fields under config.fields. Synthesize the
-  // shape the legacy StepWithFields expects.
-  const cfg = (node.config ?? {}) as { fields?: unknown };
-  const rawFields = Array.isArray(cfg.fields) ? cfg.fields : [];
-
-  return {
-    id: node.id,
-    flowId: node.flowId,
-    order: 0, // legacy field, unused by handlers
-    kind: node.kind,
-    label: node.label,
-    description: node.description,
-    config: node.config as Prisma.JsonValue,
-    visibleWhen: null, // v2 routes visibility via edges, not visibleWhen
-    fields: rawFields.map((raw: any, i: number) => ({
-      id: raw.id ?? `${node.id}.field.${i}`,
-      stepId: node.id,
-      order: typeof raw.order === 'number' ? raw.order : i,
-      kind: raw.kind,
-      label: raw.label,
-      placeholder: raw.placeholder ?? null,
-      required: !!raw.required,
-      binding: raw.binding ?? 'VAR',
-      bindingTarget: raw.bindingTarget,
-      config: (raw.config ?? {}) as Prisma.JsonValue,
-    })),
-  };
-}
-
-function uiAdapter(legacy: StepHandler): NodeHandler {
-  return {
-    kind: legacy.kind,
-    category: 'UI',
-    validateConfig() {
-      // Legacy step handlers don't expose validateConfig — config is
-      // validated implicitly via their validate() at runtime. For v2
-      // publish-time checks, accept any config shape and let runtime
-      // surface issues.
-      return null;
-    },
-    validateSubmission(submission, node) {
-      // Legacy handlers are sync — ignore the new SubmissionContext
-      // arg + return a plain array. The runtime awaits either way.
-      return legacy.validate(submission, nodeAsStepWithFields(node) as any);
-    },
-    applySubmission(submission, node, currentVars) {
-      return legacy.apply(submission, nodeAsStepWithFields(node) as any, currentVars);
-    },
-  };
-}
+// The remaining action handlers (sendEmail, createResumeLink) still
+// implement the v1 ActionHandler shape — they get a LoadedAction-like
+// arg + a context. Wrap them to satisfy NodeHandler. UI handlers are
+// all v2-native now (Phase 3.5 retired the legacy StepHandler shape).
 
 function actionAdapter(legacy: {
   kind: string;
@@ -352,14 +275,12 @@ const waitTokenHandler: NodeHandler = {
 // ─── Registry ─────────────────────────────────────────────────────
 
 export const nodeHandlers: Record<string, NodeHandler> = {
-  // UI kinds
-  SINGLE_SELECT: uiAdapter(legacySingleSelectHandler),
-  // Phase 3.4: FORM is the first v2-native handler — async, knows
-  // about ENTITY_REF fields (resolves them against the org-scoped
-  // entity registry). The legacy stepHandlers/form.ts stays around
-  // until Phase 3.5 drops the v1 tables.
+  // UI kinds — all v2-native after Phase 3.5.
+  SINGLE_SELECT: singleSelectNodeHandler,
+  // FORM resolves ENTITY_REF fields against the org-scoped entity
+  // registry during validate + apply.
   FORM: formNodeHandler,
-  RECAP: uiAdapter(legacyRecapHandler),
+  RECAP: recapNodeHandler,
 
   // ACTION kinds
   SEND_EMAIL: actionAdapter(legacySendEmailHandler),

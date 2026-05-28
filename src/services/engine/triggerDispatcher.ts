@@ -15,7 +15,6 @@
 import { on, type EventName, type EventPayload } from '../events/bus';
 import prisma from '../../prisma';
 import { isStepVisible } from './expressionEvaluator';
-import { runEventReactionFlow } from './eventReactionRunner';
 import { startRun } from './graphRuntime';
 import { recordEngineAction } from './metering';
 
@@ -158,11 +157,6 @@ async function dispatch<N extends EventName>(
     }
   }
 }
-
-// Legacy v1 runner — kept callable for the eventReactionRunner module
-// that hasn't been retired yet. New dispatcher path above uses
-// graphRuntime.startRun directly.
-void runEventReactionFlow;
 
 /**
  * Register engine subscribers for every supported event. Idempotent —

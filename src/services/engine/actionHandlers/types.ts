@@ -1,19 +1,28 @@
-// Action handler internal types (Phase 2.2).
+// Action handler internal types.
 //
 // One handler per action `kind` value. Handlers are async (they hit
 // outbound services like Resend) and return either OK or an error
-// description. The executor wraps them in metering writes.
+// description. The v2 graph runtime (graphRuntime.ts) wraps them
+// inside the unified node-handler dispatch.
 
-import type { Prisma, WidgetAction } from '@prisma/client';
+import type { Prisma } from '@prisma/client';
 import type { EvaluationContext } from '../expressionEvaluator';
 
 /**
- * Loaded WidgetAction tree — children pre-fetched and ordered by
- * order asc. Handlers only see their own action; the executor walks
- * the tree.
+ * Loaded action input. Structurally compatible with v2 WidgetNode
+ * (id / kind / config / flowId) so the runtime can pass node rows
+ * directly. The Phase 2.2 tree-shaped LoadedAction has been retired
+ * with the v1 WidgetAction table (Phase 3.5) — handlers see one
+ * action at a time + ignore `children`. The field is kept on the
+ * type so a hypothetical future "sub-tree action" can repopulate it
+ * without breaking handler signatures.
  */
-export type LoadedAction = WidgetAction & {
-  children: LoadedAction[];
+export type LoadedAction = {
+  id: string;
+  flowId: string;
+  kind: string;
+  config: Prisma.JsonValue;
+  children?: LoadedAction[];
 };
 
 /**

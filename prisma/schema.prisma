@@ -919,26 +919,19 @@ model WidgetFlow {
   // WidgetFlowSnapshot for rollback. Active version is the highest.
   version Int @default(1)
 
-  steps     WidgetStep[]
   runs      WidgetRun[]
   draft     WidgetFlowDraft?
   snapshots WidgetFlowSnapshot[]
-  // Phase 2.2 — post-completion actions (LEGACY — to be removed in
-  // Phase 3.5 once the v2 graph engine is the only consumer).
-  actions   WidgetAction[]
-  // Phase 2.3 — event-bus triggers (LEGACY — Phase 3 unifies these
-  // into WidgetEntryPoint).
-  triggers  WidgetTrigger[]
 
-  // ─── Phase 3.0 — graph engine ─────────────────────────────────
-  // The v2 model: a flow is a directed graph of nodes + edges with
-  // entry-point descriptors that fire runs. UI nodes block for
-  // visitor input; ACTION nodes execute server-side; WAIT nodes
-  // suspend the run (resumed via cron sweeper or token URL).
+  // ─── Graph engine (v2, the only engine after Phase 3.5) ───────
+  // A flow is a directed graph of nodes + edges with entry-point
+  // descriptors that fire runs. UI nodes block for visitor input;
+  // ACTION nodes execute server-side; WAIT nodes suspend the run
+  // (resumed via cron sweeper or token URL).
   //
-  // The legacy step/field/action/trigger tables coexist during the
-  // 3.0-3.4 phase window so the migration is reversible. Phase 3.5
-  // drops them.
+  // Phase 3.5 retired the legacy WidgetStep / WidgetField /
+  // WidgetAction / WidgetTrigger tables along with the v1 flow
+  // engine that consumed them.
   nodes            WidgetNode[]
   edges            WidgetEdge[]
   entryPoints      WidgetEntryPoint[]
@@ -964,94 +957,10 @@ model WidgetFlow {
   @@index([archivedAt])
 }
 
-enum WidgetStepKind {
-  // UI step kinds (BOOKING flows only)
-  SINGLE_SELECT
-  MULTI_SELECT
-  RADIO
-  CHECKBOX
-  TEXT_INPUT
-  TEXTAREA
-  NUMBER
-  EMAIL
-  PHONE
-  DATE_PICKER
-  TIME_PICKER
-  SLOT_PICKER // calendar-aware, facilitator-scoped
-  FORM // composite step with multiple WidgetField children
-  TEXT_BLOCK // read-only, supports {var} interpolation
-  RECAP // auto-summary of captured vars
-  STRIPE_CHECKOUT
-  VALIDATION // final confirmation render
-}
-
-model WidgetStep {
-  id     String     @id @default(cuid())
-  flowId String
-  flow   WidgetFlow @relation(fields: [flowId], references: [id], onDelete: Cascade)
-
-  order       Int
-  kind        WidgetStepKind
-  label       String // visible to the visitor
-  description String?
-
-  // Per-step config (kind-specific shape). See `flowConfig.ts` in the
-  // app layer for the discriminated union.
-  config Json @default("{}")
-
-  // Visibility expression (JSONLogic). Null = always visible.
-  // Example: { "==": [{ "var": "vars.level" }, "ADVANCED"] }
-  visibleWhen Json?
-
-  fields WidgetField[] // populated for FORM kind
-
-  @@unique([flowId, order])
-  @@index([flowId])
-}
-
-enum WidgetFieldKind {
-  TEXT
-  TEXTAREA
-  EMAIL
-  PHONE
-  NUMBER
-  DATE
-  BOOLEAN
-  SELECT
-  MULTI_SELECT
-}
-
-enum WidgetFieldBinding {
-  VAR // stores into vars.<name>
-  DB_COLUMN // writes to a hardcoded column (e.g. Client.email)
-  CUSTOM_FIELD // writes to a customFields.<key> on a target entity
-}
-
-model WidgetField {
-  id     String     @id @default(cuid())
-  stepId String
-  step   WidgetStep @relation(fields: [stepId], references: [id], onDelete: Cascade)
-
-  order       Int
-  kind        WidgetFieldKind
-  label       String
-  placeholder String?
-  required    Boolean         @default(false)
-
-  // Binding determines where the captured value lands at submit time.
-  //   VAR          → bindingTarget = "<varName>" (free namespace)
-  //   DB_COLUMN    → bindingTarget = "Client.email" | "Client.firstname" | ...
-  //   CUSTOM_FIELD → bindingTarget = "Client.customFields.preferredInstrument"
-  //                  (engine resolves to the CustomFieldDefinition by key)
-  binding       WidgetFieldBinding
-  bindingTarget String
-
-  // SELECT / MULTI_SELECT options, validation rules, etc.
-  config Json @default("{}")
-
-  @@unique([stepId, order])
-  @@index([stepId])
-}
+// Phase 3.5 dropped the v1 `WidgetStep` + `WidgetField` models +
+// their enums (WidgetStepKind / WidgetFieldKind / WidgetFieldBinding).
+// v2 stores steps as `WidgetNode` rows with FORM fields inlined into
+// `node.config.fields` (validated app-side by the FORM handler).
 
 model WidgetRun {
   id             String       @id @default(cuid())
@@ -1215,86 +1124,10 @@ model EngineActionEvent {
   @@index([organizationId, actionKind, executedAt])
 }
 
-// ─── Actions (Phase 2.2) ──────────────────────────────────────────
-//
-// Post-completion hooks fired after a BOOKING run reaches COMPLETED,
-// or as the body of an EVENT_REACTION flow triggered by an event.
-//
-// Self-referential tree via parentId so CONDITIONAL actions can wrap
-// child branches. Top-level (parentId = null) actions execute in
-// `order`. A CONDITIONAL evaluates its expression and dispatches to
-// its children based on the result (true → run children; false →
-// skip — for v1 we don't have an explicit else branch, the admin
-// can chain a second CONDITIONAL with the inverse expression).
-//
-// `kind` stays a String column (not an enum) so adding new action
-// kinds is a data migration, not a schema migration — the engine's
-// action registry is the authoritative whitelist.
-
-model WidgetAction {
-  id     String     @id @default(cuid())
-  flowId String
-  flow   WidgetFlow @relation(fields: [flowId], references: [id], onDelete: Cascade)
-
-  // null for top-level; references the parent CONDITIONAL action for
-  // child branches. Cascade-delete means removing a CONDITIONAL also
-  // removes its entire subtree (intended — the admin can drag children
-  // out before deleting the parent if they want to preserve them).
-  parentId String?
-  parent   WidgetAction?  @relation("ActionTree", fields: [parentId], references: [id], onDelete: Cascade)
-  children WidgetAction[] @relation("ActionTree")
-
-  order Int
-
-  // String not enum: see model header. v1 supported kinds (enforced
-  // by the engine's action registry, not the DB):
-  //   SEND_EMAIL   — sends a templated email (config: { to, subject,
-  //                  bodyHtml, bodyText? })
-  //   CONDITIONAL  — gates children (config: { condition: JSONLogic })
-  //   WAIT         — no-op stub for v1; future async delay (config:
-  //                  { ms } or { until: JSONLogic-date })
-  kind String
-
-  // Kind-specific shape. See services/engine/actionHandlers/* for the
-  // discriminated union and per-kind validators.
-  config Json @default("{}")
-
-  @@index([flowId, parentId])
-  @@index([flowId, order])
-}
-
-// ─── Triggers (Phase 2.3) ─────────────────────────────────────────
-//
-// Subscriber rows for the platform's typed EventBus. When an event
-// fires (payment.succeeded, event.cancelled, etc.), the trigger
-// dispatcher looks up every WidgetTrigger matching the event name +
-// kicks off a WidgetRun for each flow whose `filter` evaluates true
-// against the event payload.
-//
-// `eventName` is a plain String column (not an enum) — adding a new
-// bus event becomes a data fact, not a schema migration. The engine
-// keeps the authoritative whitelist of allowed names in
-// services/engine/triggerDispatcher.ts.
-//
-// `filter` is optional JSONLogic. When null, every event of that
-// kind fires the trigger. When set, evaluated against an
-// EvaluationContext with `event.<X>` mirroring the bus payload.
-//
-// Unique on (flowId, eventName): a flow can have at most one
-// trigger per event kind. Splitting a single event into multiple
-// branches is done in the action tree (CONDITIONAL), not by
-// stacking triggers.
-model WidgetTrigger {
-  id     String     @id @default(cuid())
-  flowId String
-  flow   WidgetFlow @relation(fields: [flowId], references: [id], onDelete: Cascade)
-
-  eventName String // e.g. "payment.succeeded", "event.cancelled"
-  filter    Json?
-
-  @@unique([flowId, eventName])
-  @@index([eventName])
-}
+// Phase 3.5 dropped the v1 `WidgetAction` + `WidgetTrigger` models.
+// v2 expresses both as `WidgetNode` rows (ACTION-category for the
+// former) and `WidgetEntryPoint` rows of kind='event' (for the
+// latter), unified under the graph engine in graphRuntime.ts.
 
 // ─── Phase 3.0 — graph engine (v2) ────────────────────────────────
 //

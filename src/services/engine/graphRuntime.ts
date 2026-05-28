@@ -36,7 +36,6 @@
 import type { Prisma, WidgetEdge, WidgetNode, WidgetRun } from '@prisma/client';
 
 import prisma from '../../prisma';
-import { fireFlowCompletionActions as _legacyFireActions } from './actionExecutor';
 import { isStepVisible, type EvaluationContext } from './expressionEvaluator';
 import { recordEngineAction } from './metering';
 import { getNodeHandler, type NodeCategory } from './nodeHandlers';
@@ -903,9 +902,3 @@ async function replayCached(
 export type { EvaluationContext } from './expressionEvaluator';
 // Re-export NodeCategory for convenience in callers.
 export type { NodeCategory };
-
-// Silence unused-import lint for the legacy fire-actions import — kept
-// as a marker that the v1 action executor is still around (used by
-// the v1 flowEngine which the v1 routes still consume). When Phase
-// 3.5 drops v1, this import goes too.
-void _legacyFireActions;
