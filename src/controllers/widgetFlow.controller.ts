@@ -28,6 +28,7 @@ import {
   patchDraft,
   publishFlow,
 } from '../services/engine/flowAdminService';
+import { listEntities } from '../services/engine/entityRegistry';
 import {
   createFlowBodySchema,
   importFlowBodySchema,
@@ -254,6 +255,52 @@ export class WidgetFlowController {
       res.json(summary);
     } catch (err) {
       handleFlowAdminError(res, err, 'Failed to fetch usage summary');
+    }
+  }
+
+  /**
+   * GET /api/widget-flows/entities/:entityType
+   *
+   * Editor-side entity list used by the canvas inspector when an
+   * admin is configuring a SINGLE_SELECT / ENTITY_REF with entity
+   * options. Scoped to the session's org. Same shape + safeFields
+   * projection as the public counterpart — admins shouldn't see
+   * anything more than what visitors get, since the same entityRegistry
+   * gates both surfaces.
+   *
+   * Query string:
+   *   - limit: optional, clamped to the registry's per-type max.
+   *   - ids:   optional comma-separated allow-list (rarely used on
+   *            the admin side — admins typically need the full list
+   *            to choose FROM, not a pre-filtered one).
+   */
+  async listEntities(req: Request, res: Response) {
+    const orgId = requireOrgId(res);
+    if (!orgId) return;
+    try {
+      const { entityType } = req.params;
+      const rawLimit = Number(req.query.limit);
+      const limit =
+        Number.isFinite(rawLimit) && rawLimit > 0 ? rawLimit : undefined;
+
+      const rawIds = req.query.ids;
+      const idFilter =
+        typeof rawIds === 'string' && rawIds.length > 0
+          ? rawIds
+              .split(',')
+              .map((s) => s.trim())
+              .filter((s) => s.length > 0)
+          : undefined;
+
+      const items = await listEntities({
+        organizationId: orgId,
+        type: entityType,
+        limit,
+        idFilter,
+      });
+      res.json({ entities: items });
+    } catch (err) {
+      sendError(res, err, 'Failed to list entities');
     }
   }
 }

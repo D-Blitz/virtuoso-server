@@ -25,6 +25,18 @@ router.get(
   (req, res) => controller.usageSummary(req, res),
 );
 
+// Editor-side entity list — used by the canvas inspector when
+// SINGLE_SELECT / ENTITY_REF needs to populate a picker. Scoped to
+// the session's org (NOT a publishable key — the editor can be open
+// on unpublished flows). Same /entities/:type literal as the public
+// route; the URL prefix (/api/widget-flows vs /api/public/widget-flows)
+// is what distinguishes them.
+router.get(
+  '/entities/:entityType',
+  requirePermission('WIDGET_MANAGE'),
+  (req, res) => controller.listEntities(req, res),
+);
+
 router.get('/', requirePermission('WIDGET_MANAGE'), (req, res) =>
   controller.list(req, res),
 );

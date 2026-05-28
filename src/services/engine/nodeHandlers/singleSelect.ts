@@ -15,7 +15,14 @@
 //     // Source B — pull from an org-scoped entity (entityRegistry):
 //     "optionsSource": "entity",
 //     "entityType":   "facilitator" | "room" | "client" | "service",
-//     "extractFields": ["email", "firstname", ...]
+//     "extractFields": ["email", "firstname", ...],
+//
+//     // Optional subset filter — when present + non-empty, the
+//     // visitor only sees these entities, and the submit handler
+//     // rejects ids outside the set. Missing or empty array = "all
+//     // entities of this type", same as before.
+//     "selectionMode": "all" | "subset",
+//     "entityIds":     ["<id1>", "<id2>", ...]
 //   }
 //
 // Submission shape (both modes): { selected: "<id>" }
@@ -47,6 +54,8 @@ type SingleSelectConfig = {
   // Entity-mode fields.
   entityType?: string;
   extractFields?: string[];
+  selectionMode?: 'all' | 'subset';
+  entityIds?: string[];
 };
 
 function readConfig(node: { id: string; config: unknown }): SingleSelectConfig {
@@ -69,7 +78,21 @@ function readConfig(node: { id: string; config: unknown }): SingleSelectConfig {
           (f): f is string => typeof f === 'string',
         )
       : [];
-    return { varName, optionsSource, entityType, extractFields };
+    const selectionMode: 'all' | 'subset' =
+      raw.selectionMode === 'subset' ? 'subset' : 'all';
+    const entityIds = Array.isArray(raw.entityIds)
+      ? (raw.entityIds as unknown[]).filter(
+          (i): i is string => typeof i === 'string',
+        )
+      : [];
+    return {
+      varName,
+      optionsSource,
+      entityType,
+      extractFields,
+      selectionMode,
+      entityIds,
+    };
   }
 
   const options = Array.isArray(raw.options)
@@ -111,6 +134,16 @@ export const singleSelectNodeHandler: NodeHandler = {
       if (c.extractFields !== undefined && !Array.isArray(c.extractFields)) {
         return 'SINGLE_SELECT config.extractFields must be an array of strings';
       }
+      if (
+        c.selectionMode !== undefined &&
+        c.selectionMode !== 'all' &&
+        c.selectionMode !== 'subset'
+      ) {
+        return 'SINGLE_SELECT config.selectionMode must be "all" or "subset"';
+      }
+      if (c.entityIds !== undefined && !Array.isArray(c.entityIds)) {
+        return 'SINGLE_SELECT config.entityIds must be an array of strings';
+      }
     } else if (c.options !== undefined && !Array.isArray(c.options)) {
       return 'SINGLE_SELECT config.options must be an array';
     }
@@ -138,6 +171,22 @@ export const singleSelectNodeHandler: NodeHandler = {
             field: 'selected',
             message:
               'Configuration invalide : type d’entité inconnu pour cette étape.',
+          },
+        ];
+      }
+      // Subset enforcement — if the flow author handpicked a subset,
+      // the visitor must have submitted one of those ids. Checked
+      // BEFORE the DB lookup so we don't even resolve forbidden ids.
+      if (
+        config.selectionMode === 'subset' &&
+        Array.isArray(config.entityIds) &&
+        config.entityIds.length > 0 &&
+        !config.entityIds.includes(selected)
+      ) {
+        return [
+          {
+            field: 'selected',
+            message: 'Cette sélection n’est pas autorisée pour cette étape.',
           },
         ];
       }

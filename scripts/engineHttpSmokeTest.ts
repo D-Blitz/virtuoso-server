@@ -25,6 +25,7 @@
  *  16. CREATE_RESUME_LINK + WAIT_TOKEN + GET /resume/:tokenId (Phase 3.2b)
  *  17. ENTITY_REF FORM field: list endpoint + resolve on submit (Phase 3.4)
  *  18. SINGLE_SELECT with optionsSource='entity' resolves entity + projects to vars
+ *  19. SINGLE_SELECT with selectionMode='subset' enforces id allow-list + list endpoint filters
  *
  * Uses the existing dev-auth-bypass mechanism in `requireUser`:
  * NODE_ENV != 'production' + DEV_AUTH_BYPASS=true + DEV_DEFAULT_ORG_ID.
@@ -1439,6 +1440,160 @@ async function main() {
         await http('DELETE', `/api/widget-flows/${entityFlowId}`);
       } finally {
         await prisma.facilitator.delete({ where: { id: seeded.id } });
+      }
+    }
+
+    // ── 19. SINGLE_SELECT subset filter enforcement ─────────────
+    // Seed THREE facilitators. Configure SINGLE_SELECT with
+    // selectionMode='subset' allowing only the first two. Verify:
+    //   - GET /entities?ids=A,B returns only A + B (not C)
+    //   - submit with A is accepted, vars projected
+    //   - submit with C (the excluded one) is rejected even though
+    //     the entity exists + belongs to the same org
+    console.log('\n19. SINGLE_SELECT subset filter enforcement');
+    {
+      const seeded = await Promise.all(
+        ['Delta', 'Epsilon', 'Zeta'].map((name, i) =>
+          prisma.facilitator.create({
+            data: {
+              organizationId,
+              firstname: `Smoke${name}`,
+              lastname: 'Tester',
+              email: `${name.toLowerCase()}@smoke.test`,
+              phone: `555555040${i}`,
+              color: '#abcdef',
+              availability: {},
+              isBookable: true,
+              isBioDisplayed: false,
+            },
+          }),
+        ),
+      );
+      const [a, b, c] = seeded;
+
+      const select = randomUUID();
+      const recap = randomUUID();
+      const subsetFlow = await http('POST', '/api/widget-flows', {
+        name: '[http-smoke] SS-subset flow',
+        kind: 'VISITOR',
+      });
+      const subsetFlowId = subsetFlow.json.flow.id;
+
+      const payload = {
+        name: '[http-smoke] SS-subset flow',
+        description: null,
+        kind: 'VISITOR' as const,
+        nodes: [
+          {
+            id: select,
+            kind: 'SINGLE_SELECT',
+            label: 'Choisir parmi A ou B (pas C)',
+            description: null,
+            config: {
+              varName: 'facilitator',
+              optionsSource: 'entity',
+              entityType: 'facilitator',
+              extractFields: ['email'],
+              selectionMode: 'subset',
+              entityIds: [a.id, b.id],
+            },
+            position: { x: 0, y: 0 },
+          },
+          {
+            id: recap,
+            kind: 'RECAP',
+            label: 'Confirmer',
+            description: null,
+            config: {},
+            position: { x: 0, y: 200 },
+          },
+        ],
+        edges: [{ fromNodeId: select, toNodeId: recap, order: 0 }],
+        entryPoints: [
+          { kind: 'visitor' as const, config: {}, entryNodeId: select },
+        ],
+      };
+
+      try {
+        await http('PATCH', `/api/widget-flows/${subsetFlowId}/draft`, payload);
+        const pub = await http('POST', `/api/widget-flows/${subsetFlowId}/publish`);
+        assertEq(pub.status, 200, 'SS-subset flow published');
+        const key = pub.json.flow.publishableKey;
+
+        // Endpoint with ?ids=a,b returns ONLY a + b.
+        const filteredList = await http(
+          'GET',
+          `/api/public/widget-flows/by-key/${key}/entities/facilitator?ids=${a.id},${b.id}`,
+        );
+        assertEq(filteredList.status, 200, 'filtered list status = 200');
+        const filteredIds = new Set(
+          (filteredList.json.entities as { id: string }[]).map((e) => e.id),
+        );
+        assertEq(filteredIds.size, 2, 'filtered list returns exactly 2 entities');
+        assert(
+          filteredIds.has(a.id) && filteredIds.has(b.id),
+          'filtered list contains A + B',
+        );
+        assert(!filteredIds.has(c.id), 'filtered list does NOT contain C');
+
+        // Submit A → accepted.
+        const runStart = await http(
+          'POST',
+          `/api/public/widget-flows/by-key/${key}/runs`,
+          {},
+        );
+        const runId = runStart.json.run.id;
+        const okSubmit = await http(
+          'POST',
+          `/api/public/widget-flows/by-key/${key}/runs/${runId}/nodes/${select}/submit`,
+          { values: { selected: a.id }, clientSubmitId: randomUUID() },
+        );
+        assertEq(okSubmit.status, 200, 'in-subset pick status = 200');
+        assertEq(
+          okSubmit.json?.errors?.length,
+          0,
+          'no errors on in-subset pick',
+        );
+        assertEq(
+          okSubmit.json?.nextNode?.kind,
+          'RECAP',
+          'advanced to RECAP on in-subset pick',
+        );
+
+        // Submit C (excluded but real + same org) → rejected.
+        const blockedRun = await http(
+          'POST',
+          `/api/public/widget-flows/by-key/${key}/runs`,
+          {},
+        );
+        const blockedRunId = blockedRun.json.run.id;
+        const blockedSubmit = await http(
+          'POST',
+          `/api/public/widget-flows/by-key/${key}/runs/${blockedRunId}/nodes/${select}/submit`,
+          { values: { selected: c.id }, clientSubmitId: randomUUID() },
+        );
+        assertEq(
+          blockedSubmit.status,
+          200,
+          'out-of-subset pick status = 200 (validation)',
+        );
+        assert(
+          (blockedSubmit.json?.errors ?? []).some(
+            (e: { field?: string }) => e.field === 'selected',
+          ),
+          'out-of-subset pick produces validation error',
+        );
+        assertEq(
+          blockedSubmit.json?.nextNode?.kind,
+          'SINGLE_SELECT',
+          'run did NOT advance past SINGLE_SELECT on out-of-subset pick',
+        );
+
+        await http('DELETE', `/api/widget-flows/${subsetFlowId}`);
+      } finally {
+        await prisma.facilitator.deleteMany({
+          where: { id: { in: seeded.map((f) => f.id) } },
+        });
       }
     }
   } finally {

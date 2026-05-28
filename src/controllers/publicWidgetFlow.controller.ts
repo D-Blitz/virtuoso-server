@@ -284,6 +284,11 @@ export class PublicWidgetFlowController {
    *
    * Query string:
    *   - limit: optional, clamped to the registry's per-type max.
+   *   - ids:   optional comma-separated allow-list of entity ids the
+   *            caller wants. Used by SINGLE_SELECT with selectionMode
+   *            = 'subset' so the visitor only sees the handpicked
+   *            options the admin chose. Empty string = no filter
+   *            (treats `?ids=` and missing the same).
    *
    * No pagination cursor yet — bounded by the per-type maxListSize
    * (200) which is enough for typical small/mid-sized orgs. A cursor
@@ -301,10 +306,23 @@ export class PublicWidgetFlowController {
       const rawLimit = Number(req.query.limit);
       const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? rawLimit : undefined;
 
+      // Comma-separated id allow-list. Defensive parse: trim each
+      // segment + drop empties so `?ids=a,,b` and `?ids=a , b` both
+      // resolve to ['a','b'].
+      const rawIds = req.query.ids;
+      const idFilter =
+        typeof rawIds === 'string' && rawIds.length > 0
+          ? rawIds
+              .split(',')
+              .map((s) => s.trim())
+              .filter((s) => s.length > 0)
+          : undefined;
+
       const items = await listEntities({
         organizationId: flow.organizationId,
         type: entityType,
         limit,
+        idFilter,
       });
 
       // Unknown entity type → 404 (the registry returned empty).

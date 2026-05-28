@@ -39,6 +39,17 @@ type ListOptions = {
    * server-side max so a flow author can't request thousands.
    */
   limit?: number;
+  /**
+   * Restrict to these ids (intersected with the org scope). Used by
+   * SINGLE_SELECT with `selectionMode: 'subset'` — the flow author
+   * handpicks a subset of facilitators/rooms/etc. and the visitor
+   * only sees those.
+   *
+   * Empty array = no rows returned (callers should treat empty as
+   * "no filter" or "no selection" depending on their UX semantics).
+   * Undefined = unfiltered.
+   */
+  idFilter?: string[];
 };
 
 type ResolveOptions = {
@@ -93,9 +104,13 @@ const facilitatorDescriptor: EntityDescriptor = {
   label: 'Intervenant',
   safeFields: ['firstname', 'lastname', 'email', 'phone', 'color', 'bio'],
   maxListSize: 200,
-  async list({ organizationId, limit }) {
+  async list({ organizationId, limit, idFilter }) {
     const rows = await prisma.facilitator.findMany({
-      where: { organizationId, isBookable: true },
+      where: {
+        organizationId,
+        isBookable: true,
+        ...(idFilter && idFilter.length > 0 ? { id: { in: idFilter } } : {}),
+      },
       orderBy: [{ lastname: 'asc' }, { firstname: 'asc' }],
       take: Math.min(limit ?? 100, 200),
       select: {
@@ -152,9 +167,12 @@ const roomDescriptor: EntityDescriptor = {
   label: 'Salle',
   safeFields: ['name', 'color', 'locationId'],
   maxListSize: 200,
-  async list({ organizationId, limit }) {
+  async list({ organizationId, limit, idFilter }) {
     const rows = await prisma.room.findMany({
-      where: { organizationId },
+      where: {
+        organizationId,
+        ...(idFilter && idFilter.length > 0 ? { id: { in: idFilter } } : {}),
+      },
       orderBy: { name: 'asc' },
       take: Math.min(limit ?? 100, 200),
       select: { id: true, name: true, color: true, locationId: true },
@@ -191,9 +209,12 @@ const clientDescriptor: EntityDescriptor = {
   // ACTION node with admin scope (not yet built).
   safeFields: ['firstname', 'lastname', 'email', 'phone'],
   maxListSize: 200,
-  async list({ organizationId, limit }) {
+  async list({ organizationId, limit, idFilter }) {
     const rows = await prisma.client.findMany({
-      where: { organizationId },
+      where: {
+        organizationId,
+        ...(idFilter && idFilter.length > 0 ? { id: { in: idFilter } } : {}),
+      },
       orderBy: [{ lastname: 'asc' }, { firstname: 'asc' }],
       take: Math.min(limit ?? 100, 200),
       select: {
@@ -244,9 +265,12 @@ const serviceDescriptor: EntityDescriptor = {
   label: 'Prestation',
   safeFields: ['name', 'description', 'defaultDurationMinutes', 'defaultPrice'],
   maxListSize: 200,
-  async list({ organizationId, limit }) {
+  async list({ organizationId, limit, idFilter }) {
     const rows = await prisma.service.findMany({
-      where: { organizationId },
+      where: {
+        organizationId,
+        ...(idFilter && idFilter.length > 0 ? { id: { in: idFilter } } : {}),
+      },
       orderBy: { name: 'asc' },
       take: Math.min(limit ?? 100, 200),
       select: {
@@ -334,17 +358,20 @@ export async function resolveEntity(params: {
 
 /**
  * Public-safe paginated list. `limit` is clamped to the descriptor's
- * server-side maximum.
+ * server-side maximum. `idFilter` restricts the result to those ids,
+ * still intersected with the org scope.
  */
 export async function listEntities(params: {
   organizationId: string;
   type: string;
   limit?: number;
+  idFilter?: string[];
 }): Promise<ResolvedEntity[]> {
   const descriptor = getEntityDescriptor(params.type);
   if (!descriptor) return [];
   return descriptor.list({
     organizationId: params.organizationId,
     limit: params.limit,
+    idFilter: params.idFilter,
   });
 }
