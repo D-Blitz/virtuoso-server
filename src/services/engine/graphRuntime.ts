@@ -500,7 +500,7 @@ export async function advanceRun(params: {
           errorMessage: err instanceof Error ? err.message : String(err),
         });
         // Continue walking — a failed action shouldn't strand the
-        // visitor on the broken node. (For BOOKING flows with a
+        // visitor on the broken node. (For VISITOR flows with a
         // failing email, we still complete the run.)
       }
     }

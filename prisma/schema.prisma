@@ -899,7 +899,11 @@ model AuditLogEntry {
 // design rationale and how these models compose.
 
 enum WidgetFlowKind {
-  BOOKING // public-facing widget flow
+  // Visitor-driven flow with a public URL. Covers any flow a real
+  // person walks through: booking, enrollment, trial signup, contact
+  // form, etc. (Renamed from BOOKING in May 2026 — see migration
+  // 20260528000007_rename_booking_to_visitor.)
+  VISITOR
   EVENT_REACTION // triggered by a lifecycle event, no UI
 }
 
@@ -910,10 +914,10 @@ model WidgetFlow {
 
   name           String
   description    String?
-  kind           WidgetFlowKind @default(BOOKING)
+  kind           WidgetFlowKind @default(VISITOR)
   isTemplate     Boolean        @default(false) // platform-shipped seed; admin clones
-  isPublished    Boolean        @default(false) // BOOKING only; gates the public URL
-  publishableKey String?        @unique // BOOKING only; appears in widget URL
+  isPublished    Boolean        @default(false) // VISITOR only; gates the public URL
+  publishableKey String?        @unique // VISITOR only; appears in widget URL
 
   // Versioning — bump on every Publish; old versions retained in
   // WidgetFlowSnapshot for rollback. Active version is the highest.

@@ -12,7 +12,7 @@
  *   3. Publish blocks on invalid payload (no entry point)
  *   4. Successful publish: publishableKey assigned, snapshot written
  *   5. Export → Import round-trip preserves graph shape
- *   6. Visitor walk-through: 3-node BOOKING flow → COMPLETED
+ *   6. Visitor walk-through: 3-node VISITOR flow → COMPLETED
  *   7. Idempotency: replay submit returns cached response
  *   8. Validation errors: invalid email returns errors, run stays put
  *   9. Conditional edge branching
@@ -24,6 +24,7 @@
  *  15. WAIT_DURATION + sweeper resumes paused run (Phase 3.2)
  *  16. CREATE_RESUME_LINK + WAIT_TOKEN + GET /resume/:tokenId (Phase 3.2b)
  *  17. ENTITY_REF FORM field: list endpoint + resolve on submit (Phase 3.4)
+ *  18. SINGLE_SELECT with optionsSource='entity' resolves entity + projects to vars
  *
  * Uses the existing dev-auth-bypass mechanism in `requireUser`:
  * NODE_ENV != 'production' + DEV_AUTH_BYPASS=true + DEV_DEFAULT_ORG_ID.
@@ -119,7 +120,7 @@ function buildFlowPayload(name: string) {
   return {
     name,
     description: null,
-    kind: 'BOOKING' as const,
+    kind: 'VISITOR' as const,
     nodes: [
       {
         id: serviceNode,
@@ -239,7 +240,7 @@ async function main() {
     {
       const r = await http('POST', '/api/widget-flows', {
         name: '[http-smoke] flow A',
-        kind: 'BOOKING',
+        kind: 'VISITOR',
       });
       assertEq(r.status, 201, 'create status = 201');
       assert(r.json?.flow?.id, 'flow.id returned');
@@ -443,14 +444,14 @@ async function main() {
       const c = randomUUID();
       const branchFlow = await http('POST', '/api/widget-flows', {
         name: '[http-smoke] branch flow',
-        kind: 'BOOKING',
+        kind: 'VISITOR',
       });
       const branchFlowId = branchFlow.json.flow.id;
 
       const branchPayload = {
         name: '[http-smoke] branch flow',
         description: null,
-        kind: 'BOOKING' as const,
+        kind: 'VISITOR' as const,
         nodes: [
           {
             id: a,
@@ -697,14 +698,14 @@ async function main() {
       const recap = randomUUID();
       const create = await http('POST', '/api/widget-flows', {
         name: '[http-smoke] wait flow',
-        kind: 'BOOKING',
+        kind: 'VISITOR',
       });
       const waitFlowId = create.json.flow.id;
 
       const waitPayload = {
         name: '[http-smoke] wait flow',
         description: null,
-        kind: 'BOOKING' as const,
+        kind: 'VISITOR' as const,
         nodes: [
           {
             id: select,
@@ -828,14 +829,14 @@ async function main() {
       const recap = randomUUID();
       const create = await http('POST', '/api/widget-flows', {
         name: '[http-smoke] token flow',
-        kind: 'BOOKING',
+        kind: 'VISITOR',
       });
       const tokenFlowId = create.json.flow.id;
 
       const tokenPayload = {
         name: '[http-smoke] token flow',
         description: null,
-        kind: 'BOOKING' as const,
+        kind: 'VISITOR' as const,
         nodes: [
           {
             id: select,
@@ -1057,14 +1058,14 @@ async function main() {
       const recap = randomUUID();
       const entityFlow = await http('POST', '/api/widget-flows', {
         name: '[http-smoke] entity-ref flow',
-        kind: 'BOOKING',
+        kind: 'VISITOR',
       });
       const entityFlowId = entityFlow.json.flow.id;
 
       const entityPayload = {
         name: '[http-smoke] entity-ref flow',
         description: null,
-        kind: 'BOOKING' as const,
+        kind: 'VISITOR' as const,
         nodes: [
           {
             id: form,
@@ -1283,6 +1284,161 @@ async function main() {
         await prisma.facilitator.deleteMany({
           where: { id: { in: seeded.map((f) => f.id) } },
         });
+      }
+    }
+
+    // ── 18. SINGLE_SELECT with entity source ──────────────────
+    // Build a 2-node flow: SINGLE_SELECT(entity=facilitator) → RECAP.
+    // Seed a facilitator, walk a visitor through, verify:
+    //   - the picked id is validated against the entity registry
+    //   - vars.facilitator lands as a resolved object with extracted
+    //     fields (id, label, email, …), same shape ENTITY_REF uses
+    //   - bogus id produces a validation error, run stays put
+    console.log('\n18. SINGLE_SELECT with optionsSource=entity (May 2026)');
+    {
+      const seeded = await prisma.facilitator.create({
+        data: {
+          organizationId,
+          firstname: 'SmokeGamma',
+          lastname: 'Tester',
+          email: 'gamma@smoke.test',
+          phone: '5555550300',
+          color: '#0000ff',
+          availability: {},
+          isBookable: true,
+          isBioDisplayed: false,
+        },
+      });
+
+      const select = randomUUID();
+      const recap = randomUUID();
+      const entityFlow = await http('POST', '/api/widget-flows', {
+        name: '[http-smoke] SS-entity flow',
+        kind: 'VISITOR',
+      });
+      const entityFlowId = entityFlow.json.flow.id;
+
+      const payload = {
+        name: '[http-smoke] SS-entity flow',
+        description: null,
+        kind: 'VISITOR' as const,
+        nodes: [
+          {
+            id: select,
+            kind: 'SINGLE_SELECT',
+            label: 'Choisir un intervenant',
+            description: null,
+            config: {
+              varName: 'facilitator',
+              optionsSource: 'entity',
+              entityType: 'facilitator',
+              extractFields: ['email', 'firstname'],
+            },
+            position: { x: 0, y: 0 },
+          },
+          {
+            id: recap,
+            kind: 'RECAP',
+            label: 'Confirmer',
+            description: null,
+            config: {},
+            position: { x: 0, y: 200 },
+          },
+        ],
+        edges: [{ fromNodeId: select, toNodeId: recap, order: 0 }],
+        entryPoints: [
+          { kind: 'visitor' as const, config: {}, entryNodeId: select },
+        ],
+      };
+
+      try {
+        await http('PATCH', `/api/widget-flows/${entityFlowId}/draft`, payload);
+        const pub = await http('POST', `/api/widget-flows/${entityFlowId}/publish`);
+        assertEq(pub.status, 200, 'SS-entity flow published');
+        const key = pub.json.flow.publishableKey;
+
+        // Visitor picks the seeded facilitator by id.
+        const runStart = await http(
+          'POST',
+          `/api/public/widget-flows/by-key/${key}/runs`,
+          {},
+        );
+        const runId = runStart.json.run.id;
+        const okSubmit = await http(
+          'POST',
+          `/api/public/widget-flows/by-key/${key}/runs/${runId}/nodes/${select}/submit`,
+          { values: { selected: seeded.id }, clientSubmitId: randomUUID() },
+        );
+        assertEq(okSubmit.status, 200, 'entity pick status = 200');
+        assertEq(
+          okSubmit.json?.errors?.length,
+          0,
+          'no errors on entity-source SINGLE_SELECT',
+        );
+        assertEq(
+          okSubmit.json?.nextNode?.kind,
+          'RECAP',
+          'advanced to RECAP',
+        );
+
+        const run = await prisma.widgetRun.findUniqueOrThrow({
+          where: { id: runId },
+        });
+        const vars = run.vars as Record<string, unknown>;
+        const fac = vars.facilitator as
+          | { id?: string; label?: string; email?: string; firstname?: string }
+          | undefined;
+        assertEq(
+          fac?.id,
+          seeded.id,
+          'vars.facilitator.id matches the entity picked',
+        );
+        assertEq(
+          fac?.email,
+          'gamma@smoke.test',
+          'vars.facilitator.email extracted from entity',
+        );
+        assertEq(
+          fac?.firstname,
+          'SmokeGamma',
+          'vars.facilitator.firstname extracted',
+        );
+
+        // Bogus id → validation error, run stays put.
+        const bogusRun = await http(
+          'POST',
+          `/api/public/widget-flows/by-key/${key}/runs`,
+          {},
+        );
+        const bogusRunId = bogusRun.json.run.id;
+        const badSubmit = await http(
+          'POST',
+          `/api/public/widget-flows/by-key/${key}/runs/${bogusRunId}/nodes/${select}/submit`,
+          {
+            values: { selected: 'not-a-real-id' },
+            clientSubmitId: randomUUID(),
+          },
+        );
+        assertEq(
+          badSubmit.status,
+          200,
+          'bogus id status = 200 (validation)',
+        );
+        assert(
+          (badSubmit.json?.errors ?? []).some(
+            (e: { field?: string }) => e.field === 'selected',
+          ),
+          'bogus entity id produces "selected" validation error',
+        );
+        assertEq(
+          badSubmit.json?.nextNode?.kind,
+          'SINGLE_SELECT',
+          'run did NOT advance past SINGLE_SELECT on bogus id',
+        );
+
+        await http('DELETE', `/api/widget-flows/${entityFlowId}`);
+      } finally {
+        await prisma.facilitator.delete({ where: { id: seeded.id } });
       }
     }
   } finally {

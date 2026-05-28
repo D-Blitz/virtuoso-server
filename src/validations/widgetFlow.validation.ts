@@ -41,7 +41,7 @@ export const submitNodeBodySchema = z.object({
 
 // ─── Admin-surface schemas ────────────────────────────────────────
 
-const widgetFlowKindEnum = z.enum(['BOOKING', 'EVENT_REACTION']);
+const widgetFlowKindEnum = z.enum(['VISITOR', 'EVENT_REACTION']);
 
 /**
  * JSON-serializable value. Used for node/edge/entrypoint config
@@ -153,7 +153,7 @@ export type FlowEntryPointPayload = z.infer<typeof flowEntryPointSchema>;
 export const createFlowBodySchema = z.object({
   name: z.string().min(1),
   description: z.string().optional(),
-  kind: widgetFlowKindEnum.default('BOOKING'),
+  kind: widgetFlowKindEnum.default('VISITOR'),
 });
 
 /**

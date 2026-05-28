@@ -114,7 +114,7 @@ export async function createFlow(params: {
   organizationId: string;
   name: string;
   description?: string;
-  kind: 'BOOKING' | 'EVENT_REACTION';
+  kind: 'VISITOR' | 'EVENT_REACTION';
 }) {
   return prisma.widgetFlow.create({
     data: {
@@ -309,11 +309,11 @@ export async function publishFlow(organizationId: string, flowId: string) {
   // 3. Apply atomically: normalized writes + flow update + snapshot.
   // EVENT_REACTION flows never serve a public URL — they fire via
   // the trigger dispatcher — so they don't need a publishableKey.
-  // BOOKING flows assign one on first publish and keep it across
+  // VISITOR flows assign one on first publish and keep it across
   // re-publishes (so admins can paste the URL once and trust it).
   const nextVersion = flow.version + 1;
   const publishableKey =
-    payload.kind === 'BOOKING'
+    payload.kind === 'VISITOR'
       ? (flow.publishableKey ?? generatePublishableKey())
       : null;
 

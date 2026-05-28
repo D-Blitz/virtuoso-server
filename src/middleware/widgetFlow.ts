@@ -6,7 +6,7 @@ import { requestContext } from '../auth/context';
  * Phase 2.0 Commit 3 — public guard for the workflow engine.
  *
  * Resolves `WidgetFlow` by `:publishableKey` URL param, ensures the
- * flow is published + BOOKING kind, attaches it to the request, and
+ * flow is published + VISITOR kind, attaches it to the request, and
  * wraps the rest of the chain in an org-scoped requestContext so any
  * downstream prisma calls are tenant-scoped automatically.
  *
@@ -58,7 +58,7 @@ export async function requireWidgetFlow(
     res.status(404).json({ error: 'Flow not published' });
     return;
   }
-  if (flow.kind !== 'BOOKING') {
+  if (flow.kind !== 'VISITOR') {
     // EVENT_REACTION flows have no public surface — they fire on bus
     // events. Returning 404 (vs 403) so we don't leak existence.
     res.status(404).json({ error: 'Flow not found' });

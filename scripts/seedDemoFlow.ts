@@ -2,7 +2,7 @@
  * Seed a demo workflow-engine flow for an organization
  * (Phase 3.1 — graph engine v2).
  *
- * Creates a working 3-node BOOKING flow that proves the engine end-
+ * Creates a working 3-node VISITOR flow that proves the engine end-
  * to-end without depending on Stripe / post-submit actions:
  *
  *   Node 1: SINGLE_SELECT — "Choisissez un service" (3 hardcoded options)
@@ -59,7 +59,7 @@ function buildDemoPayload(): FlowPayload {
   return {
     name: DEMO_NAME,
     description: DEMO_DESCRIPTION,
-    kind: 'BOOKING',
+    kind: 'VISITOR',
     nodes: [
       {
         id: serviceNodeId,
@@ -201,7 +201,7 @@ async function main() {
     organizationId,
     name: DEMO_NAME,
     description: DEMO_DESCRIPTION,
-    kind: 'BOOKING',
+    kind: 'VISITOR',
   });
   console.log(`  • created flow: ${flow.id}`);
 

@@ -11,7 +11,7 @@
 // All four fields support {path} interpolation. `to` is the most
 // common interpolation target — admin sets it to `{vars.email}` to
 // route the email to the value the visitor typed in step 2 of a
-// BOOKING flow.
+// VISITOR flow.
 
 import { EmailService } from '../../email.service';
 import { interpolate } from './interpolate';
