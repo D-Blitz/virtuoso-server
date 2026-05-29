@@ -301,6 +301,89 @@ async function main() {
         },
       });
     }
+
+    // ── 10. Unified single-CSV round-trip ────────────────────
+    // One CSV with rows for multiple entity types. The leading
+    // `type` column discriminates which spec validates each row.
+    console.log('\n10. Unified single-CSV preview + commit');
+    {
+      const unified = [
+        'type,name,address,description,label,startDate,endDate,location,firstname,lastname,email,phone,color,isBookable,isBioDisplayed',
+        'location,[csv-smoke] Studio D,5 rue Test,,,,,,,,,,,,',
+        'tag,,,,[csv-smoke] solfege,,,,,,,,,,',
+        'facilitator,,,,,,,,Diane,SmokeUnified,smoke-unified@test.io,5555550501,#abcdef,oui,non',
+        'invalid-type,X,Y,Z,,,,,,,,,,,',
+      ].join('\n');
+
+      const preview = await fetch(`${baseUrl}/api/import/unified/preview`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/csv' },
+        body: unified,
+      });
+      const previewBody = (await preview.json()) as any;
+      assertEq(preview.status, 200, 'unified preview status = 200');
+      assertEq(previewBody.totalRows, 4, 'unified preview: 4 total rows');
+      assertEq(previewBody.validRows, 3, 'unified preview: 3 valid');
+      assertEq(previewBody.errorRows, 1, 'unified preview: 1 errored (bogus type)');
+      assert(
+        previewBody.rowErrors.some(
+          (r: any) =>
+            r.errors.some((e: string) => e.toLowerCase().includes('inconnu')),
+        ),
+        'unified preview flags unknown type as error',
+      );
+      assertEq(
+        previewBody.perType.location.validRows,
+        1,
+        'perType.location.validRows = 1',
+      );
+      assertEq(
+        previewBody.perType.facilitator.validRows,
+        1,
+        'perType.facilitator.validRows = 1',
+      );
+
+      const commit = await fetch(`${baseUrl}/api/import/unified/commit`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/csv' },
+        body: unified,
+      });
+      const commitBody = (await commit.json()) as any;
+      assertEq(commit.status, 200, 'unified commit status = 200');
+      assert(
+        commitBody.created + commitBody.updated >= 3,
+        'unified commit: created+updated >= 3',
+      );
+      assertEq(commitBody.errored, 1, 'unified commit: 1 errored (bogus type)');
+
+      // Export endpoint produces a unified CSV that round-trips.
+      const exportRes = await fetch(`${baseUrl}/api/import/unified/export`);
+      assertEq(exportRes.status, 200, 'unified export status = 200');
+      const exported = (await exportRes.text()).replace(/^﻿/, '');
+      assert(
+        exported.split('\n')[0].startsWith('type,'),
+        'unified export header starts with "type,"',
+      );
+      assert(
+        exported.includes('[csv-smoke] Studio D'),
+        'unified export contains the seeded location',
+      );
+      assert(
+        exported.includes('smoke-unified@test.io'),
+        'unified export contains the seeded facilitator',
+      );
+
+      // Cleanup
+      await prisma.tag.deleteMany({
+        where: { organizationId, label: '[csv-smoke] solfege' },
+      });
+      await prisma.facilitator.deleteMany({
+        where: { organizationId, email: 'smoke-unified@test.io' },
+      });
+      await prisma.location.deleteMany({
+        where: { organizationId, name: '[csv-smoke] Studio D' },
+      });
+    }
   } finally {
     await purgeSmokeData(organizationId);
     server.close();

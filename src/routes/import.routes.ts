@@ -79,4 +79,38 @@ router.post('/all/commit', requireImport, jsonBody, (req, res) =>
   controller.commitAll(req, res),
 );
 
+// Unified single-CSV surfaces — one file holds every entity, with a
+// `type` column discriminating each row. Same body parsing scheme
+// as the per-entity preview/commit routes (raw text/csv).
+router.get('/unified/template', requireImport, (req, res) =>
+  controller.unifiedTemplate(req, res),
+);
+router.get('/unified/export', requireImport, (req, res) =>
+  controller.unifiedExport(req, res),
+);
+router.post(
+  '/unified/preview',
+  requireImport,
+  csvBody,
+  (req, res, next) => {
+    if (Buffer.isBuffer(req.body)) {
+      req.body = req.body.toString('utf-8');
+    }
+    next();
+  },
+  (req, res) => controller.unifiedPreview(req, res),
+);
+router.post(
+  '/unified/commit',
+  requireImport,
+  csvBody,
+  (req, res, next) => {
+    if (Buffer.isBuffer(req.body)) {
+      req.body = req.body.toString('utf-8');
+    }
+    next();
+  },
+  (req, res) => controller.unifiedCommit(req, res),
+);
+
 export default router;

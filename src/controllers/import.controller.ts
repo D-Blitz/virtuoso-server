@@ -17,12 +17,16 @@ import { getOrganizationId } from '../auth/context';
 import { sendError } from './httpErrors';
 import {
   buildCsvTemplate,
+  buildUnifiedTemplate,
   commitAll,
   commitImport,
+  commitUnifiedCsv,
   exportEntityCsv,
+  exportUnifiedCsv,
   listAllEntityTypes,
   previewAll,
   previewImport,
+  previewUnifiedCsv,
 } from '../services/import/csvImport';
 import { listImportSpecs } from '../services/import/registry';
 
@@ -189,6 +193,85 @@ export class ImportController {
       res.json({ results });
     } catch (err) {
       sendError(res, err, 'Failed to commit all');
+    }
+  }
+
+  // ─── Unified single-CSV surfaces ─────────────────────────────
+  //
+  // One CSV file holds rows for every entity type, discriminated by
+  // a leading `type` column. Export produces it from the DB; preview
+  // + commit parse + route per row.
+
+  /** GET /api/import/unified/template */
+  unifiedTemplate(_req: Request, res: Response) {
+    try {
+      const csv = buildUnifiedTemplate();
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="all-entities-template.csv"`,
+      );
+      res.send('﻿' + csv);
+    } catch (err) {
+      sendError(res, err, 'Failed to build unified template');
+    }
+  }
+
+  /** GET /api/import/unified/export */
+  async unifiedExport(req: Request, res: Response) {
+    const orgId = requireOrgId(res);
+    if (!orgId) return;
+    try {
+      const csv = await exportUnifiedCsv({ organizationId: orgId });
+      const stamp = new Date().toISOString().slice(0, 10);
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="all-entities-${stamp}.csv"`,
+      );
+      res.send('﻿' + csv);
+    } catch (err) {
+      sendError(res, err, 'Failed to export unified CSV');
+    }
+  }
+
+  /** POST /api/import/unified/preview — body: raw CSV text */
+  async unifiedPreview(req: Request, res: Response) {
+    const orgId = requireOrgId(res);
+    if (!orgId) return;
+    try {
+      const csvText = typeof req.body === 'string' ? req.body : '';
+      if (csvText.trim().length === 0) {
+        res.status(400).json({ error: 'CSV body is empty' });
+        return;
+      }
+      const result = await previewUnifiedCsv({
+        organizationId: orgId,
+        csvText,
+      });
+      res.json(result);
+    } catch (err) {
+      sendError(res, err, 'Failed to preview unified CSV');
+    }
+  }
+
+  /** POST /api/import/unified/commit — body: raw CSV text */
+  async unifiedCommit(req: Request, res: Response) {
+    const orgId = requireOrgId(res);
+    if (!orgId) return;
+    try {
+      const csvText = typeof req.body === 'string' ? req.body : '';
+      if (csvText.trim().length === 0) {
+        res.status(400).json({ error: 'CSV body is empty' });
+        return;
+      }
+      const result = await commitUnifiedCsv({
+        organizationId: orgId,
+        csvText,
+      });
+      res.json(result);
+    } catch (err) {
+      sendError(res, err, 'Failed to commit unified CSV');
     }
   }
 }
