@@ -184,4 +184,47 @@ export const facilitatorSpec: ImportEntitySpec = {
     });
     return { id: created.id, action: 'created' };
   },
+  async exportRows(ctx) {
+    const rows = await ctx.prisma.facilitator.findMany({
+      where: { organizationId: ctx.organizationId },
+      orderBy: [{ lastname: 'asc' }, { firstname: 'asc' }],
+      select: {
+        firstname: true,
+        lastname: true,
+        email: true,
+        phone: true,
+        color: true,
+        isBookable: true,
+        isBioDisplayed: true,
+        bio: true,
+        address: true,
+        notes: true,
+      },
+    });
+    return rows.map(
+      (r: {
+        firstname: string;
+        lastname: string;
+        email: string;
+        phone: string;
+        color: string;
+        isBookable: boolean;
+        isBioDisplayed: boolean;
+        bio: string | null;
+        address: string | null;
+        notes: string | null;
+      }) => ({
+        firstname: r.firstname,
+        lastname: r.lastname,
+        email: r.email,
+        phone: r.phone,
+        color: r.color,
+        isBookable: r.isBookable ? 'oui' : 'non',
+        isBioDisplayed: r.isBioDisplayed ? 'oui' : 'non',
+        bio: r.bio ?? '',
+        address: r.address ?? '',
+        notes: r.notes ?? '',
+      }),
+    );
+  },
 };

@@ -45,4 +45,12 @@ export const tagSpec: ImportEntitySpec = {
     });
     return { id: created.id, action: 'created' };
   },
+  async exportRows(ctx) {
+    const rows = await ctx.prisma.tag.findMany({
+      where: { organizationId: ctx.organizationId },
+      orderBy: { label: 'asc' },
+      select: { label: true },
+    });
+    return rows.map((r: { label: string }) => ({ label: r.label }));
+  },
 };

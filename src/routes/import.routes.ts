@@ -1,12 +1,16 @@
 // CSV bulk-import admin routes.
 
-import { Router, raw } from 'express';
+import { Router, json, raw } from 'express';
 
 import { ImportController } from '../controllers/import.controller';
 import { requirePermission } from '../middleware/permission';
 
 const router = Router();
 const controller = new ImportController();
+
+// Larger limit on the 'all' surfaces since one request can carry
+// multiple CSVs concatenated as JSON.
+const jsonBody = json({ limit: '50mb' });
 
 // Permission gate: imports change a lot of rows at once, so we gate
 // on a broad write permission. Adjust as the permission model grows.
@@ -54,6 +58,25 @@ router.post(
     next();
   },
   (req, res) => controller.commit(req, res),
+);
+
+// Export — round-trips back through commit so admins can edit
+// existing rows in a spreadsheet + re-upload.
+router.get('/export/:type', requireImport, (req, res) =>
+  controller.export(req, res),
+);
+
+// 'all' surfaces — dependency-ordered batch processing of one CSV
+// per entity. Single endpoint accepts a JSON object with CSV
+// strings keyed by entity type.
+router.get('/all/types', requireImport, (req, res) =>
+  controller.allTypes(req, res),
+);
+router.post('/all/preview', requireImport, jsonBody, (req, res) =>
+  controller.previewAll(req, res),
+);
+router.post('/all/commit', requireImport, jsonBody, (req, res) =>
+  controller.commitAll(req, res),
 );
 
 export default router;

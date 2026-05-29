@@ -78,4 +78,16 @@ export const locationSpec: ImportEntitySpec = {
     });
     return { id: created.id, action: 'created' };
   },
+  async exportRows(ctx) {
+    const rows = await ctx.prisma.location.findMany({
+      where: { organizationId: ctx.organizationId },
+      orderBy: { name: 'asc' },
+      select: { name: true, address: true, description: true },
+    });
+    return rows.map((r: { name: string; address: string; description: string | null }) => ({
+      name: r.name,
+      address: r.address,
+      description: r.description ?? '',
+    }));
+  },
 };

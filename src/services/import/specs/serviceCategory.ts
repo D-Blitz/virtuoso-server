@@ -98,4 +98,29 @@ export const serviceCategorySpec: ImportEntitySpec = {
     });
     return { id: created.id, action: 'created' };
   },
+  async exportRows(ctx) {
+    const rows = await ctx.prisma.serviceCategory.findMany({
+      where: { organizationId: ctx.organizationId },
+      orderBy: { name: 'asc' },
+      select: {
+        name: true,
+        description: true,
+        isDisplayed: true,
+        isBookable: true,
+      },
+    });
+    return rows.map(
+      (r: {
+        name: string;
+        description: string;
+        isDisplayed: boolean;
+        isBookable: boolean;
+      }) => ({
+        name: r.name,
+        description: r.description,
+        isDisplayed: r.isDisplayed ? 'oui' : 'non',
+        isBookable: r.isBookable ? 'oui' : 'non',
+      }),
+    );
+  },
 };

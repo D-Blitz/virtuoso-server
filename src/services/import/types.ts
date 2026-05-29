@@ -113,6 +113,16 @@ export type ImportEntitySpec = {
     data: Record<string, unknown>,
     ctx: ImportContext,
   ) => Promise<{ id: string; action: 'created' | 'updated' | 'skipped' }>;
+
+  /**
+   * Read all rows of this entity for the org, projected into the
+   * same column shape the import expects — so an export → re-import
+   * round-trip is lossless (modulo M2M relations which v1 doesn't
+   * handle). Each returned record's keys match the spec's columns[].
+   */
+  exportRows: (
+    ctx: ImportContext,
+  ) => Promise<Array<Record<string, string>>>;
 };
 
 export type ImportPreviewResult = {

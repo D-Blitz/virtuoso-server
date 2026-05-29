@@ -129,4 +129,29 @@ export const termSpec: ImportEntitySpec = {
     });
     return { id: created.id, action: 'created' };
   },
+  async exportRows(ctx) {
+    const rows = await ctx.prisma.term.findMany({
+      where: { organizationId: ctx.organizationId },
+      orderBy: { startDate: 'asc' },
+      select: {
+        name: true,
+        startDate: true,
+        endDate: true,
+        location: { select: { name: true } },
+      },
+    });
+    return rows.map(
+      (r: {
+        name: string;
+        startDate: Date;
+        endDate: Date;
+        location: { name: string } | null;
+      }) => ({
+        name: r.name,
+        startDate: r.startDate.toISOString().slice(0, 10),
+        endDate: r.endDate.toISOString().slice(0, 10),
+        location: r.location?.name ?? '',
+      }),
+    );
+  },
 };

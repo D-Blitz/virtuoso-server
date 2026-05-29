@@ -185,4 +185,38 @@ export const serviceSpec: ImportEntitySpec = {
     });
     return { id: created.id, action: 'created' };
   },
+  async exportRows(ctx) {
+    const rows = await ctx.prisma.service.findMany({
+      where: { organizationId: ctx.organizationId },
+      orderBy: { name: 'asc' },
+      select: {
+        name: true,
+        description: true,
+        defaultDurationMinutes: true,
+        defaultPrice: true,
+        bookingMode: true,
+        notes: true,
+        serviceCategory: { select: { name: true } },
+      },
+    });
+    return rows.map(
+      (r: {
+        name: string;
+        description: string;
+        defaultDurationMinutes: number;
+        defaultPrice: number;
+        bookingMode: string;
+        notes: string | null;
+        serviceCategory: { name: string } | null;
+      }) => ({
+        name: r.name,
+        description: r.description,
+        category: r.serviceCategory?.name ?? '',
+        defaultDurationMinutes: String(r.defaultDurationMinutes),
+        defaultPrice: String(r.defaultPrice),
+        bookingMode: r.bookingMode,
+        notes: r.notes ?? '',
+      }),
+    );
+  },
 };

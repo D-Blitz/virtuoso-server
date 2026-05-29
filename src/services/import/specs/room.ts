@@ -126,4 +126,29 @@ export const roomSpec: ImportEntitySpec = {
     });
     return { id: created.id, action: 'created' };
   },
+  async exportRows(ctx) {
+    const rows = await ctx.prisma.room.findMany({
+      where: { organizationId: ctx.organizationId },
+      orderBy: { name: 'asc' },
+      select: {
+        name: true,
+        color: true,
+        notes: true,
+        location: { select: { name: true } },
+      },
+    });
+    return rows.map(
+      (r: {
+        name: string;
+        color: string;
+        notes: string | null;
+        location: { name: string } | null;
+      }) => ({
+        name: r.name,
+        location: r.location?.name ?? '',
+        color: r.color,
+        notes: r.notes ?? '',
+      }),
+    );
+  },
 };

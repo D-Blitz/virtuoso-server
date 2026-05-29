@@ -147,4 +147,39 @@ export const clientSpec: ImportEntitySpec = {
     });
     return { id: created.id, action: 'created' };
   },
+  async exportRows(ctx) {
+    const rows = await ctx.prisma.client.findMany({
+      where: { organizationId: ctx.organizationId },
+      orderBy: [{ lastname: 'asc' }, { firstname: 'asc' }],
+      select: {
+        firstname: true,
+        lastname: true,
+        email: true,
+        phone: true,
+        birthdate: true,
+        address: true,
+        notes: true,
+      },
+    });
+    return rows.map(
+      (r: {
+        firstname: string;
+        lastname: string;
+        email: string;
+        phone: string;
+        birthdate: Date;
+        address: string;
+        notes: string | null;
+      }) => ({
+        firstname: r.firstname,
+        lastname: r.lastname,
+        email: r.email,
+        phone: r.phone,
+        // ISO yyyy-mm-dd for symmetry with the parser.
+        birthdate: r.birthdate.toISOString().slice(0, 10),
+        address: r.address,
+        notes: r.notes ?? '',
+      }),
+    );
+  },
 };

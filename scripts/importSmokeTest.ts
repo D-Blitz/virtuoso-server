@@ -210,6 +210,97 @@ async function main() {
         },
       );
     }
+
+    // ── 7. Export endpoint round-trips through commit ───────
+    console.log('\n7. Export endpoint returns CSV that re-imports clean');
+    {
+      const res = await fetch(`${baseUrl}/api/import/export/location`);
+      assertEq(res.status, 200, 'export status = 200');
+      const csv = await res.text();
+      assert(csv.includes('[csv-smoke] Studio A'), 'export contains seeded row');
+      assert(
+        csv.split('\n')[0].replace(/^﻿/, '').startsWith('name,address'),
+        'export header matches the import template',
+      );
+      // Re-import the export — should be all updates.
+      const stripped = csv.replace(/^﻿/, '');
+      const reimport = await postCsv('/api/import/commit/location', stripped);
+      assertEq(reimport.json.created, 0, 'export re-import: 0 created');
+      assert(reimport.json.updated >= 2, 'export re-import: ≥2 updated');
+    }
+
+    // ── 8. All-types endpoint enumerates dependency order ──
+    console.log('\n8. /all/types returns dependency-ordered list');
+    {
+      const res = await fetch(`${baseUrl}/api/import/all/types`);
+      const body = (await res.json()) as { types: string[] };
+      assertEq(res.status, 200, 'all/types status = 200');
+      assertEq(body.types.length, 9, 'all/types returns 9 entries');
+      assertEq(body.types[0], 'location', 'first dep-order entry = location');
+      assert(
+        body.types.indexOf('location') < body.types.indexOf('room'),
+        'location resolves before room',
+      );
+      assert(
+        body.types.indexOf('serviceCategory') < body.types.indexOf('service'),
+        'serviceCategory resolves before service',
+      );
+    }
+
+    // ── 9. /all/preview + /all/commit batch processing ──────
+    console.log('\n9. all/preview + all/commit process multiple entities');
+    const allPayload = {
+      location: 'name,address\n[csv-smoke] Studio C,3 rue Test',
+      tag: 'label\n[csv-smoke] piano-débutant',
+    };
+    {
+      const previewRes = await fetch(`${baseUrl}/api/import/all/preview`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(allPayload),
+      });
+      const previewBody = (await previewRes.json()) as any;
+      assertEq(previewRes.status, 200, 'all/preview status = 200');
+      assertEq(
+        previewBody.results.location.validRows,
+        1,
+        'preview location: 1 valid row',
+      );
+      assertEq(
+        previewBody.results.tag.validRows,
+        1,
+        'preview tag: 1 valid row',
+      );
+
+      const commitRes = await fetch(`${baseUrl}/api/import/all/commit`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(allPayload),
+      });
+      const commitBody = (await commitRes.json()) as any;
+      assertEq(commitRes.status, 200, 'all/commit status = 200');
+      assert(
+        commitBody.results.location.created + commitBody.results.location.updated >= 1,
+        'all/commit upserted the location',
+      );
+      assert(
+        commitBody.results.tag.created + commitBody.results.tag.updated >= 1,
+        'all/commit upserted the tag',
+      );
+      // Tag cleanup so re-running the smoke is idempotent.
+      await prisma.tag.deleteMany({
+        where: {
+          organizationId,
+          label: '[csv-smoke] piano-débutant',
+        },
+      });
+      await prisma.location.deleteMany({
+        where: {
+          organizationId,
+          name: '[csv-smoke] Studio C',
+        },
+      });
+    }
   } finally {
     await purgeSmokeData(organizationId);
     server.close();

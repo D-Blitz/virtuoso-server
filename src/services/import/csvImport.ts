@@ -22,13 +22,31 @@
 import Papa from 'papaparse';
 
 import prisma from '../../prisma';
-import { getImportSpec } from './registry';
+import { getImportSpec, IMPORT_REGISTRY } from './registry';
 import type {
   ImportCommitResult,
   ImportContext,
   ImportPreviewResult,
   ParsedRow,
 } from './types';
+
+/**
+ * Topological order so a single 'all' commit imports referenced
+ * entities (Location, ServiceCategory) BEFORE the ones that
+ * reference them (Room, Service). Empty-cell references on the
+ * dependents wouldn't resolve otherwise.
+ */
+const DEPENDENCY_ORDER: string[] = [
+  'location',
+  'tag',
+  'serviceCategory',
+  'term',
+  'closure',
+  'client',
+  'facilitator',
+  'room',
+  'service',
+];
 
 const PREVIEW_ROW_CAP = 200;
 
@@ -41,6 +59,11 @@ function parseCsv(csvText: string): ParseCsvResult {
   const parsed = Papa.parse<Record<string, string>>(trimmed, {
     header: true,
     skipEmptyLines: 'greedy',
+    // Explicitly set the delimiter rather than relying on auto-detect.
+    // Auto-detect fails on single-column CSVs (no delimiter to find)
+    // and surfaces a confusing parse error to admins importing tags
+    // or single-field entities.
+    delimiter: ',',
     transformHeader: (h) => h.trim(),
   });
   if (parsed.errors.length > 0) {
@@ -207,4 +230,78 @@ export function buildCsvTemplate(entityType: string): string | null {
   const headers = spec.columns.map((c) => c.key);
   const exampleRow = spec.columns.map((c) => c.example ?? '');
   return Papa.unparse([headers, exampleRow]);
+}
+
+/**
+ * Export every row of an entity for the current org as CSV. Round-
+ * trips back through commitImport() — same column order as the
+ * template, so re-importing an exported file is the natural way to
+ * make bulk edits.
+ */
+export async function exportEntityCsv(params: {
+  organizationId: string;
+  entityType: string;
+}): Promise<string | null> {
+  const spec = getImportSpec(params.entityType);
+  if (!spec) return null;
+  const ctx = makeContext(params.organizationId);
+  const rows = await spec.exportRows(ctx);
+  const headers = spec.columns.map((c) => c.key);
+  // Build a 2D array: header row, then each data row in column order.
+  const matrix = [
+    headers,
+    ...rows.map((r) => headers.map((h) => r[h] ?? '')),
+  ];
+  return Papa.unparse(matrix);
+}
+
+/**
+ * Batch preview: caller passes one CSV per entity type. We run
+ * each spec's previewImport() and aggregate the results, keyed by
+ * type. No DB writes; safe to call repeatedly.
+ */
+export async function previewAll(params: {
+  organizationId: string;
+  payloads: Record<string, string>;
+}): Promise<Record<string, ImportPreviewResult>> {
+  const out: Record<string, ImportPreviewResult> = {};
+  for (const type of DEPENDENCY_ORDER) {
+    const csv = params.payloads[type];
+    if (!csv) continue;
+    out[type] = await previewImport({
+      organizationId: params.organizationId,
+      entityType: type,
+      csvText: csv,
+    });
+  }
+  return out;
+}
+
+/**
+ * Batch commit: process the provided CSVs in dependency order so
+ * references resolve. Returns a per-type result map. One entity's
+ * errors do NOT block the next entity from running — each spec is
+ * idempotent on its own natural key, so partial failure +
+ * re-running just the failing files is the standard recovery path.
+ */
+export async function commitAll(params: {
+  organizationId: string;
+  payloads: Record<string, string>;
+}): Promise<Record<string, ImportCommitResult>> {
+  const out: Record<string, ImportCommitResult> = {};
+  for (const type of DEPENDENCY_ORDER) {
+    const csv = params.payloads[type];
+    if (!csv) continue;
+    out[type] = await commitImport({
+      organizationId: params.organizationId,
+      entityType: type,
+      csvText: csv,
+    });
+  }
+  return out;
+}
+
+/** Used by the admin UI to render an "Importer/Exporter tout" surface. */
+export function listAllEntityTypes(): string[] {
+  return DEPENDENCY_ORDER.filter((t) => IMPORT_REGISTRY[t] != null);
 }
