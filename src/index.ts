@@ -43,6 +43,7 @@ import roleRoutes from './routes/role.routes';
 import userRoutes from './routes/user.routes';
 import organizationRoutes from './routes/organization.routes';
 import widgetFlowRoutes from './routes/widgetFlow.routes';
+import importRoutes from './routes/import.routes';
 
 // jobs
 import { startSlotHoldSweep } from './jobs/sweepSlotHolds';
@@ -125,6 +126,10 @@ app.use('/api/widgets', widgetRoutes);
 // top-level path so /:id routes don't collide with /api/widgets/:id
 // (legacy BookingWidget).
 app.use('/api/widget-flows', widgetFlowRoutes);
+// CSV bulk import for the 9 Tier 1+2 entities. Body parser is
+// attached per-route so the JSON parser already mounted at top
+// level doesn't try to consume CSV bodies.
+app.use('/api/import', importRoutes);
 app.use('/api/payments', paymentRoutes);
 app.use('/api/jobs', jobsRoutes);
 app.use('/api/closures', closureRoutes);

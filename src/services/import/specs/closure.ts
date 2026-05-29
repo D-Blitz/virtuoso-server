@@ -1,0 +1,131 @@
+// Closure import spec (vacances scolaires / fermetures exceptionnelles).
+//
+// Same shape as Term: name + dates + optional Location.
+
+import { parseDate, parseString } from '../parsers';
+import type { ImportContext, ImportEntitySpec } from '../types';
+
+async function resolveLocationId(
+  name: string,
+  ctx: ImportContext,
+): Promise<string | null> {
+  const key = `location:${name.toLowerCase()}`;
+  const cached = ctx.referenceCache.get(key);
+  if (cached !== undefined) return cached;
+  const row = await ctx.prisma.location.findFirst({
+    where: { organizationId: ctx.organizationId, name },
+    select: { id: true },
+  });
+  const id = row?.id ?? null;
+  ctx.referenceCache.set(key, id);
+  return id;
+}
+
+export const closureSpec: ImportEntitySpec = {
+  type: 'closure',
+  label: 'Fermetures',
+  description:
+    'Périodes pendant lesquelles aucun cours n’a lieu (vacances, jours fériés, fermetures exceptionnelles).',
+  uniqueBy: 'name',
+  columns: [
+    {
+      key: 'name',
+      label: 'Nom',
+      required: true,
+      type: 'string',
+      example: 'Vacances de Noël',
+    },
+    {
+      key: 'startDate',
+      label: 'Date de début',
+      required: true,
+      type: 'date',
+      example: '2026-12-20',
+    },
+    {
+      key: 'endDate',
+      label: 'Date de fin',
+      required: true,
+      type: 'date',
+      example: '2027-01-05',
+    },
+    {
+      key: 'location',
+      label: 'Lieu (optionnel)',
+      required: false,
+      type: 'reference',
+      referenceEntity: 'location',
+      referenceColumn: 'name',
+      description:
+        'Laissez vide pour appliquer à toute l’organisation.',
+    },
+  ],
+  async parseRow(row, ctx) {
+    const errors: string[] = [];
+    const name = parseString(row.name, { required: true, label: 'Nom' });
+    if (name.error) errors.push(name.error);
+    const startDate = parseDate(row.startDate, {
+      required: true,
+      label: 'Date de début',
+    });
+    if (startDate.error) errors.push(startDate.error);
+    const endDate = parseDate(row.endDate, {
+      required: true,
+      label: 'Date de fin',
+    });
+    if (endDate.error) errors.push(endDate.error);
+    if (
+      startDate.value &&
+      endDate.value &&
+      startDate.value.getTime() > endDate.value.getTime()
+    ) {
+      errors.push('La date de début doit être avant la date de fin');
+    }
+    const locationName = parseString(row.location);
+    if (locationName.error) errors.push(locationName.error);
+    let locationId: string | null = null;
+    if (locationName.value) {
+      locationId = await resolveLocationId(locationName.value, ctx);
+      if (!locationId) {
+        errors.push(`Lieu "${locationName.value}" introuvable.`);
+      }
+    }
+    if (errors.length > 0) return { errors };
+    return {
+      data: {
+        name: name.value!,
+        startDate: startDate.value!,
+        endDate: endDate.value!,
+        locationId,
+      },
+    };
+  },
+  async upsert(data, ctx) {
+    const existing = await ctx.prisma.closure.findFirst({
+      where: { organizationId: ctx.organizationId, name: data.name as string },
+      select: { id: true },
+    });
+    if (existing) {
+      await ctx.prisma.closure.update({
+        where: { id: existing.id },
+        data: {
+          startDate: data.startDate as Date,
+          endDate: data.endDate as Date,
+          locationId: data.locationId as string | null,
+        },
+      });
+      return { id: existing.id, action: 'updated' };
+    }
+    const created = await ctx.prisma.closure.create({
+      data: {
+        organizationId: ctx.organizationId,
+        name: data.name as string,
+        startDate: data.startDate as Date,
+        endDate: data.endDate as Date,
+        locationId: data.locationId as string | null,
+      },
+      select: { id: true },
+    });
+    return { id: created.id, action: 'created' };
+  },
+};
