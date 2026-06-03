@@ -62,6 +62,11 @@ export const closureSpec: ImportEntitySpec = {
   ],
   async parseRow(row, ctx) {
     const errors: string[] = [];
+    // Closure.locationId is OPTIONAL → missing location is a warning,
+    // not an error. The closure is created org-wide (applies to every
+    // location); a later re-import after creating the target location
+    // will scope it correctly.
+    const warnings: string[] = [];
     const name = parseString(row.name, { required: true, label: 'Nom' });
     if (name.error) errors.push(name.error);
     const startDate = parseDate(row.startDate, {
@@ -87,11 +92,14 @@ export const closureSpec: ImportEntitySpec = {
     if (locationName.value) {
       locationId = await resolveLocationId(locationName.value, ctx);
       if (!locationId) {
-        errors.push(`Lieu "${locationName.value}" introuvable.`);
+        warnings.push(
+          `Lieu "${locationName.value}" introuvable — fermeture créée sans rattachement à un lieu.`,
+        );
       }
     }
-    if (errors.length > 0) return { errors };
+    if (errors.length > 0) return { errors, warnings };
     return {
+      warnings: warnings.length > 0 ? warnings : undefined,
       data: {
         name: name.value!,
         startDate: startDate.value!,

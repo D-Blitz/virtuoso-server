@@ -81,6 +81,7 @@ export async function previewImport(params: {
       entityType: params.entityType,
       totalRows: 0,
       validRows: 0,
+      warningRows: 0,
       errorRows: 0,
       rows: [],
       globalError: `Type d’import inconnu : ${params.entityType}`,
@@ -92,6 +93,7 @@ export async function previewImport(params: {
       entityType: spec.type,
       totalRows: 0,
       validRows: 0,
+      warningRows: 0,
       errorRows: 0,
       rows: [],
       globalError: parsed.error,
@@ -101,27 +103,36 @@ export async function previewImport(params: {
   const ctx = makeContext(params.organizationId);
   const rows: ParsedRow[] = [];
   let validRows = 0;
+  let warningRows = 0;
   let errorRows = 0;
   for (let i = 0; i < parsedRows.length; i++) {
     const raw = parsedRows[i];
     const result = await spec.parseRow(raw, ctx);
     const rowNumber = i + 2; // header is line 1
-    if (result.errors && result.errors.length > 0) {
+    const errors = result.errors ?? [];
+    const warnings = result.warnings ?? [];
+    if (errors.length > 0) {
       errorRows++;
-      if (rows.length < PREVIEW_ROW_CAP) {
-        rows.push({ rowNumber, raw, errors: result.errors });
-      }
+    } else if (warnings.length > 0) {
+      warningRows++;
     } else {
       validRows++;
-      if (rows.length < PREVIEW_ROW_CAP) {
-        rows.push({ rowNumber, raw, data: result.data, errors: [] });
-      }
+    }
+    if (rows.length < PREVIEW_ROW_CAP) {
+      rows.push({
+        rowNumber,
+        raw,
+        data: errors.length === 0 ? result.data : undefined,
+        errors,
+        warnings,
+      });
     }
   }
   return {
     entityType: spec.type,
     totalRows: parsedRows.length,
     validRows,
+    warningRows,
     errorRows,
     rows,
   };
@@ -140,8 +151,10 @@ export async function commitImport(params: {
       created: 0,
       updated: 0,
       skipped: 0,
+      warned: 0,
       errored: 0,
       errors: [],
+      warnings: [],
     };
   }
   const parsed = parseCsv(params.csvText);
@@ -152,8 +165,12 @@ export async function commitImport(params: {
       created: 0,
       updated: 0,
       skipped: 0,
+      warned: 0,
       errored: 0,
-      errors: [{ rowNumber: 0, raw: {}, errors: [parsed.error] }],
+      errors: [
+        { rowNumber: 0, raw: {}, errors: [parsed.error], warnings: [] },
+      ],
+      warnings: [],
     };
   }
   const parsedRows = parsed.rows!;
@@ -161,15 +178,24 @@ export async function commitImport(params: {
   let created = 0;
   let updated = 0;
   let skipped = 0;
+  let warned = 0;
   let errored = 0;
   const errors: ParsedRow[] = [];
+  const warnings: ParsedRow[] = [];
   for (let i = 0; i < parsedRows.length; i++) {
     const raw = parsedRows[i];
     const rowNumber = i + 2;
     const result = await spec.parseRow(raw, ctx);
-    if (result.errors && result.errors.length > 0) {
+    const rowErrors = result.errors ?? [];
+    const rowWarnings = result.warnings ?? [];
+    if (rowErrors.length > 0) {
       errored++;
-      errors.push({ rowNumber, raw, errors: result.errors });
+      errors.push({
+        rowNumber,
+        raw,
+        errors: rowErrors,
+        warnings: rowWarnings,
+      });
       continue;
     }
     try {
@@ -177,6 +203,16 @@ export async function commitImport(params: {
       if (upserted.action === 'created') created++;
       else if (upserted.action === 'updated') updated++;
       else skipped++;
+      if (rowWarnings.length > 0) {
+        warned++;
+        warnings.push({
+          rowNumber,
+          raw,
+          data: result.data,
+          errors: [],
+          warnings: rowWarnings,
+        });
+      }
     } catch (err) {
       errored++;
       errors.push({
@@ -187,6 +223,7 @@ export async function commitImport(params: {
             err instanceof Error ? err.message : String(err)
           }`,
         ],
+        warnings: rowWarnings,
       });
     }
   }
@@ -196,8 +233,10 @@ export async function commitImport(params: {
     created,
     updated,
     skipped,
+    warned,
     errored,
     errors,
+    warnings,
   };
 }
 

@@ -7,6 +7,7 @@
 import {
   parseDate,
   parseEmail,
+  parseJson,
   parseString,
 } from '../parsers';
 import type { ImportEntitySpec } from '../types';
@@ -68,6 +69,12 @@ export const clientSpec: ImportEntitySpec = {
       type: 'string',
       example: 'Allergie aux noix',
     },
+    {
+      key: 'metadata',
+      label: 'Métadonnées (JSON)',
+      required: false,
+      type: 'json',
+    },
   ],
   async parseRow(row) {
     const errors: string[] = [];
@@ -100,6 +107,8 @@ export const clientSpec: ImportEntitySpec = {
     if (address.error) errors.push(address.error);
     const notes = parseString(row.notes);
     if (notes.error) errors.push(notes.error);
+    const metadata = parseJson(row.metadata, { label: 'Métadonnées' });
+    if (metadata.error) errors.push(metadata.error);
     if (errors.length > 0) return { errors };
     return {
       data: {
@@ -110,10 +119,20 @@ export const clientSpec: ImportEntitySpec = {
         birthdate: birthdate.value!,
         address: address.value!,
         notes: notes.value,
+        metadata: metadata.value,
       },
     };
   },
   async upsert(data, ctx) {
+    const scalars = {
+      firstname: data.firstname as string,
+      lastname: data.lastname as string,
+      phone: data.phone as string,
+      birthdate: data.birthdate as Date,
+      address: data.address as string,
+      notes: data.notes as string | null,
+      ...(data.metadata != null ? { metadata: data.metadata as object } : {}),
+    };
     const existing = await ctx.prisma.client.findFirst({
       where: { organizationId: ctx.organizationId, email: data.email as string },
       select: { id: true },
@@ -121,27 +140,15 @@ export const clientSpec: ImportEntitySpec = {
     if (existing) {
       await ctx.prisma.client.update({
         where: { id: existing.id },
-        data: {
-          firstname: data.firstname as string,
-          lastname: data.lastname as string,
-          phone: data.phone as string,
-          birthdate: data.birthdate as Date,
-          address: data.address as string,
-          notes: data.notes as string | null,
-        },
+        data: scalars,
       });
       return { id: existing.id, action: 'updated' };
     }
     const created = await ctx.prisma.client.create({
       data: {
         organizationId: ctx.organizationId,
-        firstname: data.firstname as string,
-        lastname: data.lastname as string,
         email: data.email as string,
-        phone: data.phone as string,
-        birthdate: data.birthdate as Date,
-        address: data.address as string,
-        notes: data.notes as string | null,
+        ...scalars,
       },
       select: { id: true },
     });
@@ -159,6 +166,7 @@ export const clientSpec: ImportEntitySpec = {
         birthdate: true,
         address: true,
         notes: true,
+        metadata: true,
       },
     });
     return rows.map(
@@ -170,6 +178,7 @@ export const clientSpec: ImportEntitySpec = {
         birthdate: Date;
         address: string;
         notes: string | null;
+        metadata: unknown;
       }) => ({
         firstname: r.firstname,
         lastname: r.lastname,
@@ -179,6 +188,7 @@ export const clientSpec: ImportEntitySpec = {
         birthdate: r.birthdate.toISOString().slice(0, 10),
         address: r.address,
         notes: r.notes ?? '',
+        metadata: r.metadata == null ? '' : JSON.stringify(r.metadata),
       }),
     );
   },

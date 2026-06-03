@@ -102,6 +102,33 @@ export function parseDate(
   return { value: d };
 }
 
+/**
+ * Parse a HH:MM (24h) clock string into a `{ hours, minutes }` pair.
+ * Used by ScheduledEvent's startTime / endTime columns where date and
+ * time are split into separate cells (admin-friendly in Excel — easier
+ * than typing a full ISO timestamp). Combined with the row's date cell
+ * to produce the final Date in the spec.
+ */
+const TIME_RE = /^([01]?\d|2[0-3]):([0-5]\d)$/;
+
+export function parseTime(
+  cell: string | undefined,
+  opts: { required?: boolean; label?: string } = {},
+): ParseResult<{ hours: number; minutes: number } | null> {
+  const v = (cell ?? '').trim();
+  if (v.length === 0) {
+    if (opts.required) return { error: `${opts.label ?? 'champ'} est requis` };
+    return { value: null };
+  }
+  const m = TIME_RE.exec(v);
+  if (!m) {
+    return {
+      error: `${opts.label ?? 'champ'} doit être au format HH:MM (24h, reçu : "${v}")`,
+    };
+  }
+  return { value: { hours: Number(m[1]), minutes: Number(m[2]) } };
+}
+
 export function parseEnum<T extends string>(
   cell: string | undefined,
   values: readonly T[],
@@ -174,4 +201,55 @@ export function parseHexColor(
     };
   }
   return { value: v };
+}
+
+/**
+ * Parse a raw JSON cell into a parsed value (object / array /
+ * primitive). Empty cell → null. Used for metadata + complex shapes
+ * like Facilitator.availability or Facilitator.ageScores where the
+ * admin pastes a JSON blob into one cell.
+ */
+export function parseJson(
+  cell: string | undefined,
+  opts: { required?: boolean; label?: string; default?: unknown } = {},
+): ParseResult<unknown> {
+  const v = (cell ?? '').trim();
+  if (v.length === 0) {
+    if (opts.required) return { error: `${opts.label ?? 'champ'} est requis` };
+    return { value: opts.default ?? null };
+  }
+  try {
+    return { value: JSON.parse(v) };
+  } catch (err) {
+    return {
+      error: `${opts.label ?? 'champ'} : JSON invalide (${
+        err instanceof Error ? err.message : 'erreur de parse'
+      })`,
+    };
+  }
+}
+
+/**
+ * Parse a comma-separated cell of natural keys (e.g. "Studio A, Studio B")
+ * into a string array. Used for m2m relation columns + plain string
+ * arrays (Facilitator.languages). Returns null on empty cell when
+ * not required, an empty array isn't distinguishable from "no relation"
+ * in CSV semantics so we collapse them.
+ */
+export function parseMultiReference(
+  cell: string | undefined,
+  opts: { required?: boolean; label?: string; separator?: string } = {},
+): ParseResult<string[]> {
+  const v = (cell ?? '').trim();
+  if (v.length === 0) {
+    if (opts.required) return { error: `${opts.label ?? 'champ'} est requis` };
+    return { value: [] };
+  }
+  const sep = opts.separator ?? ',';
+  return {
+    value: v
+      .split(sep)
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0),
+  };
 }

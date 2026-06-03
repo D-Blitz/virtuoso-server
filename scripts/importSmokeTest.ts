@@ -2,11 +2,18 @@
  * Smoke test for the CSV bulk-import pipeline.
  *
  * Spins up an Express app with the import routes, drives preview +
- * commit via real HTTP fetch calls for two entity types (Location +
- * Facilitator), asserts:
+ * commit via real HTTP fetch calls across the 11 entity types,
+ * asserts:
  *   - preview catches invalid rows + counts them
  *   - commit creates new rows, updates re-runs, surfaces row errors
  *   - re-running the same CSV updates instead of duplicating
+ *   - m2m relations round-trip through export
+ *   - lenient relations (m2m / optional FK misses) become warnings
+ *   - composite-key upsert on entities without @@unique
+ *   - event ↔ enrollment linkage
+ *   - auto-event-generation on enrollment commit (frequency-aware)
+ *   - service-default fallback on duration / price
+ *   - non-weekly frequencies (BIWEEKLY / CUSTOM) + pricing rename
  *
  * Uses dev-auth-bypass: NODE_ENV != 'production' + DEV_AUTH_BYPASS=true
  * + DEV_DEFAULT_ORG_ID.
@@ -72,11 +79,106 @@ function buildApp() {
   return app;
 }
 
+/**
+ * Create-or-skip helper for smoke seeds. Client doesn't have an
+ * @@unique(organizationId, email) constraint so `upsert` with that
+ * composite throws "Unknown argument" — we hand-roll find-then-create.
+ */
+async function ensureClient(
+  organizationId: string,
+  data: {
+    email: string;
+    firstname: string;
+    lastname: string;
+    phone: string;
+  },
+): Promise<void> {
+  const existing = await prisma.client.findFirst({
+    where: { organizationId, email: data.email },
+    select: { id: true },
+  });
+  if (existing) return;
+  await prisma.client.create({
+    data: {
+      organizationId,
+      email: data.email,
+      firstname: data.firstname,
+      lastname: data.lastname,
+      phone: data.phone,
+      birthdate: new Date('2010-01-01'),
+      address: 'test',
+    },
+  });
+}
+
 async function purgeSmokeData(organizationId: string) {
+  // ScheduledEvents reference room + service + facilitator + sometimes
+  // enrollment, so they must be hard-deleted first to clear the FK
+  // chain before we can delete the seeded dependencies.
+  await prisma.scheduledEvent.deleteMany({
+    where: {
+      organizationId,
+      OR: [
+        { room: { name: { startsWith: '[csv-smoke]' } } },
+        { enrollment: { term: { name: { startsWith: '[csv-smoke]' } } } },
+      ],
+    },
+  });
+  await prisma.enrollment.deleteMany({
+    where: {
+      organizationId,
+      OR: [
+        { term: { name: { startsWith: '[csv-smoke]' } } },
+        { client: { email: { startsWith: 'smoke-evt-cli' } } },
+      ],
+    },
+  });
+  await prisma.term.deleteMany({
+    where: {
+      organizationId,
+      name: { startsWith: '[csv-smoke]' },
+    },
+  });
   await prisma.facilitator.deleteMany({
     where: {
       organizationId,
-      email: { in: ['smoke-csv-1@test.io', 'smoke-csv-2@test.io'] },
+      email: {
+        in: [
+          'smoke-csv-1@test.io',
+          'smoke-csv-2@test.io',
+          'smoke-rel@test.io',
+          'smoke-evt-fac@test.io',
+        ],
+      },
+    },
+  });
+  await prisma.client.deleteMany({
+    where: {
+      organizationId,
+      email: {
+        in: [
+          'smoke-evt-cli1@test.io',
+          'smoke-evt-cli2@test.io',
+          'smoke-evt-cli-bi@test.io',
+          'smoke-evt-cli-cu@test.io',
+          'smoke-evt-cli-ps@test.io',
+        ],
+      },
+    },
+  });
+  await prisma.room.deleteMany({
+    where: { organizationId, name: { startsWith: '[csv-smoke]' } },
+  });
+  await prisma.service.deleteMany({
+    where: { organizationId, name: { startsWith: '[csv-smoke]' } },
+  });
+  await prisma.serviceCategory.deleteMany({
+    where: { organizationId, name: { startsWith: '[csv-smoke]' } },
+  });
+  await prisma.tag.deleteMany({
+    where: {
+      organizationId,
+      label: { in: ['[csv-smoke] piano', '[csv-smoke] débutant'] },
     },
   });
   await prisma.location.deleteMany({
@@ -119,7 +221,7 @@ async function main() {
     const locCsv = [
       'name,address,description',
       '[csv-smoke] Studio A,1 rue Test,Petite salle',
-      '[csv-smoke] Studio B,2 rue Test,', // empty desc ok
+      '[csv-smoke] Studio B,2 rue Test,',
       ',3 rue Test,no name — should error',
     ].join('\n');
     {
@@ -147,10 +249,7 @@ async function main() {
       assertEq(r.json.updated, 2, 'second run: 2 updated');
     }
     const locsInDb = await prisma.location.findMany({
-      where: {
-        organizationId,
-        name: { startsWith: '[csv-smoke]' },
-      },
+      where: { organizationId, name: { startsWith: '[csv-smoke]' } },
     });
     assertEq(locsInDb.length, 2, 'exactly 2 smoke locations in DB after re-run');
 
@@ -160,7 +259,7 @@ async function main() {
       'firstname,lastname,email,phone,color,isBookable',
       'Alice,Smoke,smoke-csv-1@test.io,5555550101,#5b5bff,oui',
       'Bob,Smoke,smoke-csv-2@test.io,5555550102,#fa8072,oui',
-      'Charlie,Smoke,not-an-email,5555550103,not-a-color,oui', // 2 errors
+      'Charlie,Smoke,not-an-email,5555550103,not-a-color,oui',
     ].join('\n');
     {
       const preview = await postCsv('/api/import/preview/facilitator', facCsv);
@@ -173,9 +272,7 @@ async function main() {
         'invalid-row reports email error',
       );
       assert(
-        errRow.errors.some((e: string) =>
-          e.toLowerCase().includes('couleur'),
-        ),
+        errRow.errors.some((e: string) => e.toLowerCase().includes('couleur')),
         'invalid-row reports color error',
       );
     }
@@ -185,7 +282,494 @@ async function main() {
       assertEq(commit.json.errored, 1, '1 facilitator row errored');
     }
 
-    // ── 5. Template endpoint returns valid CSV ──────────────
+    // ── 4b. Facilitator with m2m relations (locations + tags) ─
+    console.log('\n4b. Facilitator with m2m relations');
+    {
+      const tagCsv = [
+        'label',
+        '[csv-smoke] piano',
+        '[csv-smoke] débutant',
+      ].join('\n');
+      const tagCommit = await postCsv('/api/import/commit/tag', tagCsv);
+      assertEq(tagCommit.json.errored, 0, 'tag seed: 0 errored');
+    }
+    const relCsv = [
+      'firstname,lastname,email,phone,color,isBookable,locations,tags',
+      [
+        'Rel',
+        'Smoke',
+        'smoke-rel@test.io',
+        '5555550104',
+        '#33aa33',
+        'oui',
+        '"[csv-smoke] Studio A, [csv-smoke] Studio B"',
+        '"[csv-smoke] piano, [csv-smoke] débutant"',
+      ].join(','),
+    ].join('\n');
+    {
+      const commit = await postCsv('/api/import/commit/facilitator', relCsv);
+      assertEq(commit.json.created, 1, 'relations row: 1 created');
+      assertEq(commit.json.errored, 0, 'relations row: 0 errored');
+    }
+    const facWithRels = await prisma.facilitator.findFirst({
+      where: { organizationId, email: 'smoke-rel@test.io' },
+      select: {
+        locations: { select: { name: true } },
+        tags: { select: { label: true } },
+      },
+    });
+    assertEq(facWithRels?.locations.length ?? 0, 2, 'fac has 2 locations linked');
+    assertEq(facWithRels?.tags.length ?? 0, 2, 'fac has 2 tags linked');
+
+    // ── 4c. Missing m2m target → warning (not error) ──────────
+    console.log('\n4c. Missing m2m target → warning');
+    await prisma.facilitator.deleteMany({
+      where: { organizationId, email: 'smoke-rel@test.io' },
+    });
+    const warnCsv = [
+      'firstname,lastname,email,phone,color,isBookable,locations',
+      [
+        'Rel',
+        'Smoke',
+        'smoke-rel@test.io',
+        '5555550104',
+        '#33aa33',
+        'oui',
+        '"[csv-smoke] Studio A, [csv-smoke] DOES NOT EXIST"',
+      ].join(','),
+    ].join('\n');
+    {
+      const preview = await postCsv('/api/import/preview/facilitator', warnCsv);
+      assertEq(preview.json.errorRows, 0, 'warn preview: 0 errors');
+      assertEq(preview.json.warningRows, 1, 'warn preview: 1 warning');
+      const row = preview.json.rows[0];
+      assert(
+        row.warnings.some((w: string) => w.includes('DOES NOT EXIST')),
+        'warning mentions the missing target name',
+      );
+    }
+    {
+      const commit = await postCsv('/api/import/commit/facilitator', warnCsv);
+      assertEq(commit.json.warned, 1, 'warn commit: 1 warned');
+      assertEq(commit.json.created, 1, 'warn commit: 1 created');
+    }
+    const partial = await prisma.facilitator.findFirst({
+      where: { organizationId, email: 'smoke-rel@test.io' },
+      select: { locations: { select: { name: true } } },
+    });
+    assertEq(partial?.locations.length ?? 0, 1, 'attached only the existing location');
+
+    // ── 4d. ScheduledEvent import + composite-key upsert ────
+    console.log('\n4d. ScheduledEvent import + composite-key upsert');
+    {
+      const catCsv = [
+        'name,description',
+        '[csv-smoke] Piano,Cours de piano',
+      ].join('\n');
+      const c = await postCsv('/api/import/commit/serviceCategory', catCsv);
+      assertEq(c.json.errored, 0, 'event seed: category 0 errored');
+
+      const svcCsv = [
+        'name,description,category,defaultDurationMinutes,defaultPrice',
+        '[csv-smoke] Piano 30min,Cours individuel,[csv-smoke] Piano,30,35',
+      ].join('\n');
+      const s = await postCsv('/api/import/commit/service', svcCsv);
+      assertEq(s.json.errored, 0, 'event seed: service 0 errored');
+
+      const roomCsv = [
+        'name,location,color',
+        '[csv-smoke] Salle A,[csv-smoke] Studio A,#5b5bff',
+      ].join('\n');
+      const r = await postCsv('/api/import/commit/room', roomCsv);
+      assertEq(r.json.errored, 0, 'event seed: room 0 errored');
+
+      const facSeed = [
+        'firstname,lastname,email,phone,color',
+        'Eve,Smoke,smoke-evt-fac@test.io,5555550200,#33aa33',
+      ].join('\n');
+      const f = await postCsv('/api/import/commit/facilitator', facSeed);
+      assertEq(f.json.errored, 0, 'event seed: facilitator 0 errored');
+
+      const cliCsv = [
+        'firstname,lastname,email,phone,birthdate,address',
+        'Sam,Smoke,smoke-evt-cli1@test.io,5550300,2010-01-01,1 rue Test',
+        'Lou,Smoke,smoke-evt-cli2@test.io,5550301,2011-02-02,2 rue Test',
+      ].join('\n');
+      const cl = await postCsv('/api/import/commit/client', cliCsv);
+      assertEq(cl.json.errored, 0, 'event seed: client 0 errored');
+    }
+    const evtCsv = [
+      'date,startTime,endTime,service,room,facilitators,clients,color,price,notes,tags',
+      [
+        '2026-09-15',
+        '14:00',
+        '15:00',
+        '[csv-smoke] Piano 30min',
+        '[csv-smoke] Salle A',
+        'smoke-evt-fac@test.io',
+        '"smoke-evt-cli1@test.io, smoke-evt-cli2@test.io"',
+        '#5b5bff',
+        '35.00',
+        '',
+        '"[csv-smoke] piano"',
+      ].join(','),
+      [
+        '2026-09-15',
+        '15:00',
+        '16:00',
+        '[csv-smoke] Piano 30min',
+        '[csv-smoke] Salle A',
+        'smoke-evt-fac@test.io',
+        'smoke-evt-cli1@test.io',
+        '#5b5bff',
+        '35.00',
+        '',
+        '',
+      ].join(','),
+      [
+        '2026-09-22',
+        '14:00',
+        '15:00',
+        'Does Not Exist',
+        '[csv-smoke] Salle A',
+        'smoke-evt-fac@test.io',
+        '',
+        '#5b5bff',
+        '35.00',
+        '',
+        '',
+      ].join(','),
+    ].join('\n');
+    {
+      const commit = await postCsv('/api/import/commit/scheduledEvent', evtCsv);
+      assertEq(commit.json.created, 2, 'event commit: 2 created');
+      assertEq(commit.json.errored, 1, 'event commit: 1 errored');
+    }
+    const firstEvt = await prisma.scheduledEvent.findFirst({
+      where: {
+        organizationId,
+        startTime: new Date('2026-09-15T14:00:00'),
+        room: { name: '[csv-smoke] Salle A' },
+      },
+      select: {
+        location: { select: { name: true } },
+        serviceCategory: { select: { name: true } },
+        clients: { select: { email: true } },
+      },
+    });
+    assertEq(firstEvt?.location.name, '[csv-smoke] Studio A', 'derived locationId');
+    assertEq(
+      firstEvt?.serviceCategory.name,
+      '[csv-smoke] Piano',
+      'derived serviceCategoryId',
+    );
+    assertEq(firstEvt?.clients.length ?? 0, 2, '2 clients linked');
+
+    // Re-import: composite-key upsert.
+    {
+      const recommit = await postCsv('/api/import/commit/scheduledEvent', evtCsv);
+      assertEq(recommit.json.updated, 2, 'event re-import: 2 updated');
+      assertEq(recommit.json.created, 0, 'event re-import: 0 created');
+    }
+
+    // ── 4e. Enrollment import + auto-event-generation ───────
+    console.log('\n4e. Enrollment import + auto-event-generation');
+    {
+      const termCsv = [
+        'name,startDate,endDate',
+        '[csv-smoke] Trimestre,2026-09-01,2026-12-19',
+      ].join('\n');
+      const t = await postCsv('/api/import/commit/term', termCsv);
+      assertEq(t.json.errored, 0, 'term seed: 0 errored');
+    }
+    const enrCsv = [
+      'client,service,term,room,facilitator,weekday,startTime,durationMinutes,startDate,endDate,priceCharged,pricingStrategy,status',
+      [
+        'smoke-evt-cli1@test.io',
+        '[csv-smoke] Piano 30min',
+        '[csv-smoke] Trimestre',
+        '[csv-smoke] Salle A',
+        'smoke-evt-fac@test.io',
+        'mardi',
+        '17:00',
+        '60',
+        '2026-09-15',
+        '2026-12-15',
+        '350.00',
+        'PERIOD_PRORATED',
+        'ACTIVE',
+      ].join(','),
+    ].join('\n');
+    {
+      const c = await postCsv('/api/import/commit/enrollment', enrCsv);
+      assertEq(c.json.created, 1, 'enrollment: 1 created');
+      assertEq(c.json.errored, 0, 'enrollment: 0 errored');
+    }
+    const enrInDb = await prisma.enrollment.findFirst({
+      where: {
+        organizationId,
+        term: { name: '[csv-smoke] Trimestre' },
+        client: { email: 'smoke-evt-cli1@test.io' },
+      },
+      select: {
+        id: true,
+        frequency: true,
+        weekday: true,
+        events: { select: { id: true } },
+      },
+    });
+    assert(enrInDb != null, 'enrollment exists in DB');
+    assertEq(enrInDb?.frequency, 'WEEKLY', 'default frequency = WEEKLY');
+    assertEq(enrInDb?.weekday, 2, 'weekday = 2 (mardi)');
+    assert(
+      (enrInDb?.events.length ?? 0) >= 10,
+      'auto-gen produced ≥10 weekly events',
+    );
+
+    // ── 4e.i — Empty duration/price fall back to service ─────
+    console.log('\n4e.i Service-default fallback');
+    const fallbackCsv = [
+      'client,service,term,room,facilitator,weekday,startTime,durationMinutes,startDate,endDate,priceCharged,pricingStrategy,status',
+      [
+        'smoke-evt-cli2@test.io',
+        '[csv-smoke] Piano 30min',
+        '[csv-smoke] Trimestre',
+        '[csv-smoke] Salle A',
+        'smoke-evt-fac@test.io',
+        'mercredi',
+        '18:00',
+        '', // empty → service default
+        '2026-09-15',
+        '2026-12-15',
+        '', // empty → service default
+        'PERIOD_PRORATED',
+        'ACTIVE',
+      ].join(','),
+    ].join('\n');
+    {
+      const c = await postCsv('/api/import/commit/enrollment', fallbackCsv);
+      assertEq(c.json.created, 1, 'fallback: 1 created');
+      assertEq(c.json.errored, 0, 'fallback: 0 errored');
+    }
+    const fb = await prisma.enrollment.findFirst({
+      where: {
+        organizationId,
+        client: { email: 'smoke-evt-cli2@test.io' },
+      },
+      select: { durationMinutes: true, priceCharged: true },
+    });
+    assertEq(fb?.durationMinutes, 30, 'duration inherited (30)');
+    assertEq(fb?.priceCharged, 35, 'price inherited (35)');
+
+    // ── 4e.ii — BIWEEKLY + CUSTOM + pricing rename ──────────
+    console.log('\n4e.ii Non-weekly frequencies + pricing rename');
+    // BIWEEKLY
+    await ensureClient(organizationId, {
+      email: 'smoke-evt-cli-bi@test.io',
+      firstname: 'Bi',
+      lastname: 'Weekly',
+      phone: '5559990001',
+    });
+    const biCsv = [
+      'client,service,term,room,facilitator,frequency,weekday,startTime,durationMinutes,startDate,endDate,priceCharged,pricingStrategy,status',
+      [
+        'smoke-evt-cli-bi@test.io',
+        '[csv-smoke] Piano 30min',
+        '[csv-smoke] Trimestre',
+        '[csv-smoke] Salle A',
+        'smoke-evt-fac@test.io',
+        'BIWEEKLY',
+        'mardi',
+        '19:00',
+        '60',
+        '2026-09-15',
+        '2026-12-15',
+        '',
+        'PERIOD_PRORATED',
+        'ACTIVE',
+      ].join(','),
+    ].join('\n');
+    {
+      const c = await postCsv('/api/import/commit/enrollment', biCsv);
+      assertEq(c.json.created, 1, 'BIWEEKLY: 1 created');
+    }
+    const bi = await prisma.enrollment.findFirst({
+      where: {
+        organizationId,
+        client: { email: 'smoke-evt-cli-bi@test.io' },
+      },
+      select: {
+        frequency: true,
+        weekday: true,
+        events: { select: { id: true } },
+      },
+    });
+    assertEq(bi?.frequency, 'BIWEEKLY', 'BIWEEKLY stored');
+    assertEq(bi?.weekday, 2, 'BIWEEKLY weekday stored');
+    assert(
+      (bi?.events.length ?? 0) >= 5 && (bi?.events.length ?? 0) <= 8,
+      'BIWEEKLY produced ~6 events',
+    );
+
+    // CUSTOM
+    await ensureClient(organizationId, {
+      email: 'smoke-evt-cli-cu@test.io',
+      firstname: 'Custom',
+      lastname: 'Dates',
+      phone: '5559990002',
+    });
+    const cuCsv = [
+      'client,service,term,room,facilitator,frequency,weekday,startTime,durationMinutes,startDate,endDate,customDates,priceCharged,pricingStrategy,status',
+      [
+        'smoke-evt-cli-cu@test.io',
+        '[csv-smoke] Piano 30min',
+        '[csv-smoke] Trimestre',
+        '[csv-smoke] Salle A',
+        'smoke-evt-fac@test.io',
+        'CUSTOM',
+        '',
+        '20:00',
+        '45',
+        '2026-09-15',
+        '2026-12-15',
+        '"2026-09-20T20:00:00|2026-10-04T20:00:00|2026-11-15T20:00:00"',
+        '',
+        'PERIOD_PRORATED',
+        'ACTIVE',
+      ].join(','),
+    ].join('\n');
+    {
+      const c = await postCsv('/api/import/commit/enrollment', cuCsv);
+      assertEq(c.json.created, 1, 'CUSTOM: 1 created');
+    }
+    const cu = await prisma.enrollment.findFirst({
+      where: {
+        organizationId,
+        client: { email: 'smoke-evt-cli-cu@test.io' },
+      },
+      select: {
+        frequency: true,
+        weekday: true,
+        customDates: true,
+        events: { select: { id: true } },
+      },
+    });
+    assertEq(cu?.frequency, 'CUSTOM', 'CUSTOM stored');
+    assertEq(cu?.weekday, null, 'weekday null for CUSTOM');
+    assertEq(
+      Array.isArray(cu?.customDates) ? (cu?.customDates as string[]).length : 0,
+      3,
+      'customDates stores 3 entries',
+    );
+    assertEq(cu?.events.length ?? 0, 3, 'CUSTOM auto-gen: 3 events');
+
+    // Pricing rename: PERIOD_FIXED stores verbatim
+    await ensureClient(organizationId, {
+      email: 'smoke-evt-cli-ps@test.io',
+      firstname: 'Pricing',
+      lastname: 'Strategy',
+      phone: '5559990003',
+    });
+    const psCsv = [
+      'client,service,term,room,frequency,weekday,startTime,durationMinutes,startDate,endDate,priceCharged,pricingStrategy,status',
+      [
+        'smoke-evt-cli-ps@test.io',
+        '[csv-smoke] Piano 30min',
+        '[csv-smoke] Trimestre',
+        '[csv-smoke] Salle A',
+        'WEEKLY',
+        'lundi',
+        '17:00',
+        '60',
+        '2026-09-15',
+        '2026-12-15',
+        '350',
+        'PERIOD_FIXED',
+        'ACTIVE',
+      ].join(','),
+    ].join('\n');
+    {
+      const c = await postCsv('/api/import/commit/enrollment', psCsv);
+      assertEq(c.json.created, 1, 'pricing rename: 1 created');
+    }
+    const ps = await prisma.enrollment.findFirst({
+      where: {
+        organizationId,
+        client: { email: 'smoke-evt-cli-ps@test.io' },
+      },
+      select: { pricingStrategy: true },
+    });
+    assertEq(
+      ps?.pricingStrategy,
+      'PERIOD_FIXED',
+      'new pricing strategy value stored',
+    );
+
+    // ── 4f. Event ↔ enrollment linkage ───────────────────────
+    console.log('\n4f. Event with enrollment-column linkage');
+    const linkedEvtCsv = [
+      'date,startTime,endTime,service,room,facilitators,clients,color,price,notes,tags,enrollment',
+      [
+        '2026-09-22',
+        '17:00',
+        '18:00',
+        '[csv-smoke] Piano 30min',
+        '[csv-smoke] Salle A',
+        'smoke-evt-fac@test.io',
+        'smoke-evt-cli1@test.io',
+        '#5b5bff',
+        '0',
+        '',
+        '',
+        'smoke-evt-cli1@test.io|[csv-smoke] Trimestre|[csv-smoke] Piano 30min',
+      ].join(','),
+    ].join('\n');
+    {
+      const c = await postCsv('/api/import/commit/scheduledEvent', linkedEvtCsv);
+      assertEq(c.json.errored, 0, 'linked event: 0 errored');
+    }
+    const linkedEvt = await prisma.scheduledEvent.findFirst({
+      where: {
+        organizationId,
+        startTime: new Date('2026-09-22T17:00:00'),
+        room: { name: '[csv-smoke] Salle A' },
+      },
+      select: { enrollmentId: true },
+    });
+    assertEq(
+      linkedEvt?.enrollmentId,
+      enrInDb!.id,
+      'event linked to enrollment',
+    );
+
+    // Bad composite = warning, not error
+    const badLinkedCsv = [
+      'date,startTime,endTime,service,room,facilitators,clients,color,price,notes,tags,enrollment',
+      [
+        '2026-09-29',
+        '09:00',
+        '10:00',
+        '[csv-smoke] Piano 30min',
+        '[csv-smoke] Salle A',
+        'smoke-evt-fac@test.io',
+        '',
+        '#5b5bff',
+        '0',
+        '',
+        '',
+        'unknown@example.com|nonexistent|nonexistent',
+      ].join(','),
+    ].join('\n');
+    {
+      const preview = await postCsv(
+        '/api/import/preview/scheduledEvent',
+        badLinkedCsv,
+      );
+      assertEq(preview.json.warningRows, 1, 'bad-link: 1 warning');
+      assertEq(preview.json.errorRows, 0, 'bad-link: 0 errors');
+    }
+
+    // ── 5. Template endpoint ─────────────────────────────────
     console.log('\n5. Template endpoint returns headers + example');
     {
       const res = await fetch(`${baseUrl}/api/import/template/facilitator`);
@@ -196,22 +780,32 @@ async function main() {
       assert(headerLine.includes('firstname'), 'template includes firstname');
     }
 
-    // ── 6. Registry endpoint lists all 9 entities ──────────
+    // ── 6. Registry endpoint lists all entities ──────────────
     console.log('\n6. Registry endpoint surfaces all importable entities');
     {
       const res = await fetch(`${baseUrl}/api/import/registry`);
       const body = (await res.json()) as { entities: { type: string }[] };
       assertEq(res.status, 200, 'registry status = 200');
-      assertEq(body.entities.length, 9, 'registry returns 9 entities');
+      assertEq(body.entities.length, 11, 'registry returns 11 entities');
       const types = new Set(body.entities.map((e) => e.type));
-      ['location', 'facilitator', 'service', 'room', 'tag', 'serviceCategory', 'term', 'closure', 'client'].forEach(
-        (t) => {
-          assert(types.has(t), `registry includes "${t}"`);
-        },
-      );
+      [
+        'location',
+        'facilitator',
+        'service',
+        'room',
+        'tag',
+        'serviceCategory',
+        'term',
+        'closure',
+        'client',
+        'enrollment',
+        'scheduledEvent',
+      ].forEach((t) => {
+        assert(types.has(t), `registry includes "${t}"`);
+      });
     }
 
-    // ── 7. Export endpoint round-trips through commit ───────
+    // ── 7. Export round-trip ─────────────────────────────────
     console.log('\n7. Export endpoint returns CSV that re-imports clean');
     {
       const res = await fetch(`${baseUrl}/api/import/export/location`);
@@ -222,13 +816,11 @@ async function main() {
         csv.split('\n')[0].replace(/^﻿/, '').startsWith('name,address'),
         'export header matches the import template',
       );
-      // Re-import the export — should be all updates.
       const stripped = csv.replace(/^﻿/, '');
       const reimport = await postCsv('/api/import/commit/location', stripped);
       assertEq(reimport.json.created, 0, 'export re-import: 0 created');
       assert(reimport.json.updated >= 2, 'export re-import: ≥2 updated');
     }
-
   } finally {
     await purgeSmokeData(organizationId);
     server.close();

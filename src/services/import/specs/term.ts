@@ -63,6 +63,10 @@ export const termSpec: ImportEntitySpec = {
   ],
   async parseRow(row, ctx) {
     const errors: string[] = [];
+    // Term.locationId is OPTIONAL → missing location is a warning,
+    // not an error. The term is created org-wide; a later re-import
+    // after creating the location will scope it correctly.
+    const warnings: string[] = [];
     const name = parseString(row.name, { required: true, label: 'Nom' });
     if (name.error) errors.push(name.error);
     const startDate = parseDate(row.startDate, {
@@ -88,11 +92,14 @@ export const termSpec: ImportEntitySpec = {
     if (locationName.value) {
       locationId = await resolveLocationId(locationName.value, ctx);
       if (!locationId) {
-        errors.push(`Lieu "${locationName.value}" introuvable.`);
+        warnings.push(
+          `Lieu "${locationName.value}" introuvable — période créée sans rattachement à un lieu.`,
+        );
       }
     }
-    if (errors.length > 0) return { errors };
+    if (errors.length > 0) return { errors, warnings };
     return {
+      warnings: warnings.length > 0 ? warnings : undefined,
       data: {
         name: name.value!,
         startDate: startDate.value!,

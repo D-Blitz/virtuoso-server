@@ -31,7 +31,9 @@ export type ImportColumnType =
   | 'date' // ISO 8601 — yyyy-mm-dd or full ISO
   | 'enum'
   | 'array' // comma-separated values in the CSV cell
-  | 'reference'; // looks up another entity by a natural key
+  | 'reference' // looks up another entity by a natural key (single FK)
+  | 'multiReference' // comma-separated natural keys → m2m relation
+  | 'json'; // raw JSON pasted in the cell (objects, arrays, etc.)
 
 export type ImportColumn = {
   /** Field key on the Prisma model (matches the CSV header). */
@@ -79,7 +81,18 @@ export type ParsedRow = {
   raw: Record<string, string>;
   /** Successfully parsed payload ready for the spec's upsert. */
   data?: Record<string, unknown>;
+  /**
+   * Hard errors — the row CANNOT be committed. Examples: required
+   * field missing, invalid email shape, required-FK target not found.
+   */
   errors: string[];
+  /**
+   * Soft warnings — the row CAN be committed but with degraded data.
+   * Examples: a missing m2m relation target was dropped from the cell,
+   * an optional-FK target was set to null. The admin confirms these
+   * in the UI via the ValidationModal before commit proceeds.
+   */
+  warnings: string[];
 };
 
 export type ImportEntitySpec = {
@@ -95,14 +108,21 @@ export type ImportEntitySpec = {
 
   /**
    * Validate + transform one CSV row into a Prisma-ready payload.
-   * MUST return either `{ data }` (validation passed) or `{ errors }`
-   * (validation failed). The orchestrator collects errors across all
-   * rows before deciding to commit or not.
+   * Returns `{ data?, errors?, warnings? }`:
+   *   - errors present → row cannot commit (e.g. required FK missing)
+   *   - warnings present + data present → row commits but with degraded
+   *     data (e.g. an m2m target was dropped). The UI requires the user
+   *     to confirm before commit.
+   *   - data alone → row is clean.
    */
   parseRow: (
     row: Record<string, string>,
     ctx: ImportContext,
-  ) => Promise<{ data?: Record<string, unknown>; errors?: string[] }>;
+  ) => Promise<{
+    data?: Record<string, unknown>;
+    errors?: string[];
+    warnings?: string[];
+  }>;
 
   /**
    * Upsert one parsed row. Returns the resulting id + whether it
@@ -128,7 +148,11 @@ export type ImportEntitySpec = {
 export type ImportPreviewResult = {
   entityType: string;
   totalRows: number;
+  /** Rows clean of both errors AND warnings — commit straight through. */
   validRows: number;
+  /** Rows with at least one warning (but no errors) — commit with confirmation. */
+  warningRows: number;
+  /** Rows with at least one error — blocked from commit. */
   errorRows: number;
   /** Per-row summary — only the first ~100 returned to keep payloads small. */
   rows: ParsedRow[];
@@ -142,7 +166,11 @@ export type ImportCommitResult = {
   created: number;
   updated: number;
   skipped: number;
+  /** Rows that committed but carried warnings (e.g. partial m2m). */
+  warned: number;
   errored: number;
-  /** Per-row error details — same shape as preview. */
+  /** Per-row error details — rows blocked from commit. */
   errors: ParsedRow[];
+  /** Per-row warning details — rows committed with degraded data. */
+  warnings: ParsedRow[];
 };

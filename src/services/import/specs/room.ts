@@ -5,7 +5,7 @@
 // within the same organization. Empty cell = error (relation is
 // required).
 
-import { parseHexColor, parseString } from '../parsers';
+import { parseHexColor, parseJson, parseString } from '../parsers';
 import type { ImportContext, ImportEntitySpec } from '../types';
 
 async function resolveLocationId(
@@ -62,6 +62,19 @@ export const roomSpec: ImportEntitySpec = {
       required: false,
       type: 'string',
     },
+    {
+      key: 'availability',
+      label: 'Disponibilités (JSON)',
+      required: false,
+      type: 'json',
+      description: 'Objet JSON — laissez vide pour conserver la valeur actuelle ou {}.',
+    },
+    {
+      key: 'metadata',
+      label: 'Métadonnées (JSON)',
+      required: false,
+      type: 'json',
+    },
   ],
   async parseRow(row, ctx) {
     const errors: string[] = [];
@@ -79,6 +92,13 @@ export const roomSpec: ImportEntitySpec = {
     if (color.error) errors.push(color.error);
     const notes = parseString(row.notes);
     if (notes.error) errors.push(notes.error);
+    const availability = parseJson(row.availability, {
+      label: 'Disponibilités',
+      default: {},
+    });
+    if (availability.error) errors.push(availability.error);
+    const metadata = parseJson(row.metadata, { label: 'Métadonnées' });
+    if (metadata.error) errors.push(metadata.error);
 
     let locationId: string | null = null;
     if (locationName.value) {
@@ -94,10 +114,19 @@ export const roomSpec: ImportEntitySpec = {
         locationId,
         color: color.value!,
         notes: notes.value,
+        availability: availability.value,
+        metadata: metadata.value,
       },
     };
   },
   async upsert(data, ctx) {
+    const scalars = {
+      color: data.color as string,
+      locationId: data.locationId as string,
+      notes: data.notes as string | null,
+      availability: data.availability as object,
+      ...(data.metadata != null ? { metadata: data.metadata as object } : {}),
+    };
     const existing = await ctx.prisma.room.findFirst({
       where: { organizationId: ctx.organizationId, name: data.name as string },
       select: { id: true },
@@ -105,11 +134,7 @@ export const roomSpec: ImportEntitySpec = {
     if (existing) {
       await ctx.prisma.room.update({
         where: { id: existing.id },
-        data: {
-          color: data.color as string,
-          locationId: data.locationId as string,
-          notes: data.notes as string | null,
-        },
+        data: scalars,
       });
       return { id: existing.id, action: 'updated' };
     }
@@ -117,10 +142,7 @@ export const roomSpec: ImportEntitySpec = {
       data: {
         organizationId: ctx.organizationId,
         name: data.name as string,
-        color: data.color as string,
-        locationId: data.locationId as string,
-        availability: {},
-        notes: data.notes as string | null,
+        ...scalars,
       },
       select: { id: true },
     });
@@ -134,6 +156,8 @@ export const roomSpec: ImportEntitySpec = {
         name: true,
         color: true,
         notes: true,
+        availability: true,
+        metadata: true,
         location: { select: { name: true } },
       },
     });
@@ -142,12 +166,16 @@ export const roomSpec: ImportEntitySpec = {
         name: string;
         color: string;
         notes: string | null;
+        availability: unknown;
+        metadata: unknown;
         location: { name: string } | null;
       }) => ({
         name: r.name,
         location: r.location?.name ?? '',
         color: r.color,
         notes: r.notes ?? '',
+        availability: JSON.stringify(r.availability ?? {}),
+        metadata: r.metadata == null ? '' : JSON.stringify(r.metadata),
       }),
     );
   },
