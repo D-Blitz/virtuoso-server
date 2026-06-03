@@ -4,7 +4,8 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "dev": "ts-node -r tsconfig-paths/register src/index.ts",
+    "dev": "nodemon --watch src --ext ts,json --exec \"ts-node -r tsconfig-paths/register src/index.ts\"",
+    "dev:once": "ts-node -r tsconfig-paths/register src/index.ts",
     "start": "node dist/index.js",
     "build": "tsc",
     "seed": "ts-node prisma/seed.ts"
