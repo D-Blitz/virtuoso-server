@@ -583,22 +583,45 @@ model Enrollment {
   roomId String
   room   Room   @relation(fields: [roomId], references: [id])
 
-  // which trimester
+  // billing period (was named "trimester" — terms can be any duration)
   termId String
   term   Term   @relation(fields: [termId], references: [id])
 
-  // recurrence rule (weekly)
-  weekday         Int // 0..6
-  startTime       String // "17:00" (easy v1)
+  // Recurrence rule.
+  // - frequency drives which other fields the generator uses:
+  //     WEEKLY / BIWEEKLY  → weekday + startTime + duration
+  //     MONTHLY            → same; "weekday of month" semantics deferred,
+  //                          MONTHLY today = "every 4 weeks anchored on
+  //                          weekday" (clarify later if monthnumber semantics
+  //                          are needed)
+  //     DAILY              → startTime + duration (weekday ignored)
+  //     CUSTOM             → customDates list (weekday + startDate/endDate
+  //                          ignored except for billing-window purposes)
+  // - weekday becomes nullable: only WEEKLY / BIWEEKLY / MONTHLY need it.
+  // - customDates: JSON array of ISO datetime strings, used only when
+  //   frequency = 'CUSTOM'. Each entry is the exact start datetime of
+  //   one occurrence.
+  frequency       String   @default("WEEKLY")
+  weekday         Int?     // 0..6 — nullable for DAILY / CUSTOM
+  startTime       String   // "HH:MM" (24h, anchored in org's timezone)
   durationMinutes Int
+  customDates     Json?    // ISO datetime strings, e.g. ["2026-09-15T17:00:00", ...]
 
-  // active window
+  // active window — for non-CUSTOM frequencies this bounds the
+  // recurrence; for CUSTOM it's informational (min/max of customDates).
   startDate DateTime
   endDate   DateTime
 
-  // billing snapshot
+  // billing snapshot.
+  // pricingStrategy values:
+  //   PERIOD_PRORATED  - billed at base × (remaining / total occurrences)
+  //   PERIOD_FIXED     - flat term price regardless of remaining occurrences
+  //   PER_OCCURRENCE   - billed per occurrence
+  // Pre-rename values (TERM_FIXED_PRORATED, TERM_FIXED,
+  // TERM_PRORATED_BY_LESSONS) are migrated to the new names by
+  // migration `20260602000001_rename_pricing_strategy_values`.
   priceCharged    Float
-  pricingStrategy String // "TERM_FIXED_PRORATED" etc.
+  pricingStrategy String
   status          String // "DRAFT"|"PAID"|"ACTIVE"|"CANCELED"
 
   createdAt DateTime @default(now())

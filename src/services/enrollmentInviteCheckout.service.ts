@@ -445,7 +445,9 @@ export class EnrollmentInviteCheckoutService {
           startDate: enrollmentStart,
           endDate: enrollmentEnd,
           priceCharged: payment.amountCents / 100,
-          pricingStrategy: 'TERM_PRORATED_BY_LESSONS',
+          // June 2026: renamed from TERM_PRORATED_BY_LESSONS.
+          // Existing rows migrated by `rename_pricing_strategy_values`.
+          pricingStrategy: 'PERIOD_PRORATED',
           status: 'ACTIVE',
         },
       });

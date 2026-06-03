@@ -45,7 +45,16 @@ function formatTrialDateLabel(d: Date): string {
   return `${date} à ${time}`;
 }
 
-function formatRecurringSlotLabel(weekday: number, time: string, minutes: number): string {
+function formatRecurringSlotLabel(
+  weekday: number | null,
+  time: string,
+  minutes: number,
+): string {
+  // June 2026: weekday is nullable on Enrollment (DAILY / CUSTOM
+  // frequencies don't have one). Fall back to a generic label
+  // rather than crashing — the email recipient still gets the
+  // time / duration.
+  if (weekday == null) return `à ${time} (${minutes} min)`;
   const days = ['dimanches', 'lundis', 'mardis', 'mercredis', 'jeudis', 'vendredis', 'samedis'];
   const dayLabel = days[weekday] ?? '—';
   return `tous les ${dayLabel} à ${time} (${minutes} min)`;

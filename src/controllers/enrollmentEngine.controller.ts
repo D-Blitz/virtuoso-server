@@ -7,6 +7,7 @@ import { EnrollmentQuoteService } from '../services/enrollment/enrollmentQuote.s
 
 // domain
 import { generateWeeklyOccurrences } from '../domain/recurrence/weeklyRecurrence.utils';
+import { generateEnrollmentOccurrences } from '../domain/recurrence/enrollmentRecurrence.utils';
 import { isInAnyClosure } from '../domain/recurrence/closures.utils';
 
 const quoteService = new EnrollmentQuoteService();
@@ -14,12 +15,40 @@ const quoteService = new EnrollmentQuoteService();
 export class EnrollmentEngineController {
   async quote(req: Request, res: Response) {
     try {
-      const { serviceId, locationId, startDate, weekday, startTime, durationMinutes, termId } =
-        req.body;
+      const {
+        serviceId,
+        locationId,
+        startDate,
+        endDate,
+        weekday,
+        startTime,
+        durationMinutes,
+        termId,
+        // Phase B fields — admin form sends frequency + customDates;
+        // legacy widget callers omit them and default to WEEKLY for
+        // backward compatibility.
+        frequency,
+        customDates,
+        pricingStrategy,
+      } = req.body;
 
-      if (!serviceId || !locationId || !startDate || weekday == null || !startTime) {
+      const effectiveFrequency = (frequency as string) || 'WEEKLY';
+      const isCustom = effectiveFrequency === 'CUSTOM';
+      const isDaily = effectiveFrequency === 'DAILY';
+      const needsWeekday = !isCustom && !isDaily;
+
+      if (
+        !serviceId ||
+        !locationId ||
+        !startDate ||
+        !startTime ||
+        (needsWeekday && weekday == null) ||
+        (isCustom && (!Array.isArray(customDates) || customDates.length === 0))
+      ) {
         res.status(400).json({
-          error: 'Missing required fields: serviceId, locationId, startDate, weekday, startTime',
+          error:
+            'Missing required fields. Required: serviceId, locationId, startDate, startTime. ' +
+            'WEEKLY/BIWEEKLY/MONTHLY require weekday. CUSTOM requires customDates array.',
         });
         return;
       }
@@ -29,6 +58,12 @@ export class EnrollmentEngineController {
         res.status(400).json({ error: 'Invalid startDate' });
         return;
       }
+
+      // Optional active-window end. Invalid / absent → null, in which
+      // case the quote bills through the term end (legacy behaviour).
+      const parsedEnd = endDate ? new Date(endDate) : null;
+      const end =
+        parsedEnd && !Number.isNaN(parsedEnd.getTime()) ? parsedEnd : null;
 
       const service = await prisma.service.findUnique({ where: { id: serviceId } });
       if (!service) {
@@ -61,9 +96,13 @@ export class EnrollmentEngineController {
         service,
         term,
         startDate: start,
-        weekday: Number(weekday),
+        endDate: end,
+        frequency: effectiveFrequency as any,
+        weekday: needsWeekday ? Number(weekday) : null,
         startTime: String(startTime),
         durationMinutes: finalDuration,
+        customDates: isCustom ? (customDates as string[]) : null,
+        pricingStrategy: pricingStrategy as any,
       });
 
       res.status(200).json(result);
@@ -103,12 +142,14 @@ export class EnrollmentEngineController {
         return;
       }
 
-      const occurrences = generateWeeklyOccurrences({
+      const occurrences = generateEnrollmentOccurrences({
+        frequency: (enrollment.frequency as any) || 'WEEKLY',
         startDate: enrollment.startDate,
         endDate: enrollment.endDate,
         weekday: enrollment.weekday,
-        startTimeHHmm: enrollment.startTime,
+        startTime: enrollment.startTime,
         durationMinutes: enrollment.durationMinutes,
+        customDates: (enrollment.customDates as string[] | null) ?? null,
       });
 
       if (!occurrences.length) {

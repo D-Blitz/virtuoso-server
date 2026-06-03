@@ -13,15 +13,27 @@ export class EnrollmentController {
         locationId,
         roomId,
         termId,
+        // Phase B: frequency drives which other fields are required.
+        // WEEKLY/BIWEEKLY/MONTHLY need weekday; CUSTOM needs
+        // customDates; DAILY needs neither.
+        frequency,
         weekday,
         startTime,
         durationMinutes,
         startDate,
         endDate,
+        customDates,
         priceCharged,
         pricingStrategy,
         status,
       } = req.body;
+
+      const effectiveFrequency = (frequency as string) || 'WEEKLY';
+      const needsWeekday =
+        effectiveFrequency === 'WEEKLY' ||
+        effectiveFrequency === 'BIWEEKLY' ||
+        effectiveFrequency === 'MONTHLY';
+      const needsCustomDates = effectiveFrequency === 'CUSTOM';
 
       if (
         !serviceId ||
@@ -29,17 +41,20 @@ export class EnrollmentController {
         !locationId ||
         !roomId ||
         !termId ||
-        weekday == null ||
         !startTime ||
         !startDate ||
         !endDate ||
         priceCharged == null ||
         !pricingStrategy ||
-        !status
+        !status ||
+        (needsWeekday && weekday == null) ||
+        (needsCustomDates &&
+          (!Array.isArray(customDates) || customDates.length === 0))
       ) {
         res.status(400).json({
           error:
-            'Missing required fields: serviceId, clientId, locationId, roomId, termId, weekday, startTime, startDate, endDate, priceCharged, pricingStrategy, status',
+            'Missing required fields. Always required: serviceId, clientId, locationId, roomId, termId, startTime, startDate, endDate, priceCharged, pricingStrategy, status. ' +
+            'WEEKLY/BIWEEKLY/MONTHLY require weekday. CUSTOM requires customDates array.',
         });
         return;
       }
