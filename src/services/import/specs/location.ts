@@ -9,7 +9,7 @@ export const locationSpec: ImportEntitySpec = {
   type: 'location',
   label: 'Lieux',
   description:
-    'Adresses physiques où ont lieu les cours / événements (école, annexe, …).',
+    'Adresses physiques où ont lieu les cours / événements (site principal, annexe, …).',
   uniqueBy: 'name',
   columns: [
     {

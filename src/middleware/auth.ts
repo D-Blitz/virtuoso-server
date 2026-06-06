@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import type { Permission } from '@prisma/client';
 import { verifySessionToken } from '../auth/jwt';
 import { requestContext, RequestContext } from '../auth/context';
+import { ALL_PERMISSIONS } from '../auth/permissions';
 import prisma from '../prisma';
 
 const SESSION_COOKIE_NAMES = [
@@ -67,21 +68,10 @@ function devBypassContext(): RequestContext | null {
   const organizationId = process.env.DEV_DEFAULT_ORG_ID;
   if (!organizationId) return null;
 
-  // All permissions — keeps dev bypass at the "Propriétaire" privilege level.
-  const allPerms: Permission[] = [
-    'ADMIN_ACCESS', 'ORG_MANAGE', 'USER_MANAGE', 'ROLE_MANAGE',
-    'CLIENT_VIEW', 'CLIENT_MANAGE', 'CLIENT_ANONYMIZE',
-    'FACILITATOR_VIEW', 'FACILITATOR_MANAGE',
-    'SERVICE_MANAGE', 'SERVICE_CATEGORY_MANAGE',
-    'LOCATION_MANAGE', 'ROOM_MANAGE', 'TAG_MANAGE',
-    'TERM_MANAGE', 'CLOSURE_MANAGE',
-    'EVENT_VIEW', 'EVENT_MANAGE_ALL', 'EVENT_MANAGE_SCOPED',
-    'SERIES_MANAGE', 'ENROLLMENT_MANAGE',
-    'PAYMENT_VIEW', 'PAYMENT_MANAGE', 'REFUND_ISSUE',
-    'ARCHIVE_ACCESS', 'TRASH_ACCESS', 'PURGE_PERMANENTLY', 'AUDIT_LOG_VIEW',
-    'WIDGET_MANAGE',
-  ];
-  const permissions = new Set(allPerms);
+  // All permissions — keeps dev bypass at the "Propriétaire" privilege
+  // level. Derived from the Prisma enum (ALL_PERMISSIONS) so it never
+  // drifts when a new permission is added. See src/auth/permissions.ts.
+  const permissions = new Set<Permission>(ALL_PERMISSIONS);
 
   return {
     userId: 'dev-bypass-user',

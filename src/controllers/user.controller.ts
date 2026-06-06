@@ -63,6 +63,7 @@ export class UserController {
         manageableFacilitatorIds,
         manageableLocationIds,
         manageableRoomIds,
+        invoiceFacilitatorIds,
       } = req.body ?? {};
       if (typeof email !== 'string' || typeof password !== 'string') {
         res
@@ -78,6 +79,7 @@ export class UserController {
         manageableFacilitatorIds: asStringList(manageableFacilitatorIds),
         manageableLocationIds: asStringList(manageableLocationIds),
         manageableRoomIds: asStringList(manageableRoomIds),
+        invoiceFacilitatorIds: asStringList(invoiceFacilitatorIds),
       });
       res.status(201).json(row);
     } catch (err) {
@@ -95,6 +97,7 @@ export class UserController {
         manageableFacilitatorIds,
         manageableLocationIds,
         manageableRoomIds,
+        invoiceFacilitatorIds,
       } = req.body ?? {};
       const row = await service.update(req.params.id, {
         email: asString(email),
@@ -120,6 +123,10 @@ export class UserController {
           manageableRoomIds === undefined
             ? undefined
             : asStringList(manageableRoomIds),
+        invoiceFacilitatorIds:
+          invoiceFacilitatorIds === undefined
+            ? undefined
+            : asStringList(invoiceFacilitatorIds),
       });
       res.json(row);
     } catch (err) {

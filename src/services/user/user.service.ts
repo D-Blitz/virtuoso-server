@@ -177,6 +177,8 @@ export class UserService {
     manageableFacilitatorIds: string[];
     manageableLocationIds: string[];
     manageableRoomIds: string[];
+    /** INVOICE_VIEW_SCOPED scopes — facilitators whose invoices this user sees. */
+    invoiceFacilitatorIds: string[];
   }): Promise<UserDto> {
     const organizationId = getOrganizationId();
     if (!organizationId) throw new Error('No organization context');
@@ -216,6 +218,11 @@ export class UserService {
       ...input.manageableRoomIds.map((id) => ({
         permission: 'EVENT_MANAGE_SCOPED' as Permission,
         resourceType: 'Room',
+        resourceId: id,
+      })),
+      ...input.invoiceFacilitatorIds.map((id) => ({
+        permission: 'INVOICE_VIEW_SCOPED' as Permission,
+        resourceType: 'Facilitator',
         resourceId: id,
       })),
     ];
@@ -260,6 +267,9 @@ export class UserService {
       manageableFacilitatorIds?: string[];
       manageableLocationIds?: string[];
       manageableRoomIds?: string[];
+      // INVOICE_VIEW_SCOPED facilitator scopes. Same semantics:
+      // undefined = leave unchanged, [] = clear.
+      invoiceFacilitatorIds?: string[];
     },
   ): Promise<UserDto> {
     const existing = await prisma.user.findFirst({
@@ -344,6 +354,28 @@ export class UserService {
             userId: id,
             permission: 'EVENT_MANAGE_SCOPED' as Permission,
             resourceType: dim.resourceType,
+            resourceId: rid,
+          })),
+        });
+      }
+    }
+
+    // INVOICE_VIEW_SCOPED scopes (Facilitator dimension only). Rewritten
+    // independently of the event scopes above.
+    if (input.invoiceFacilitatorIds !== undefined) {
+      await prisma.userPermissionScope.deleteMany({
+        where: {
+          userId: id,
+          permission: 'INVOICE_VIEW_SCOPED',
+          resourceType: 'Facilitator',
+        },
+      });
+      if (input.invoiceFacilitatorIds.length > 0) {
+        await prisma.userPermissionScope.createMany({
+          data: input.invoiceFacilitatorIds.map((rid) => ({
+            userId: id,
+            permission: 'INVOICE_VIEW_SCOPED' as Permission,
+            resourceType: 'Facilitator',
             resourceId: rid,
           })),
         });

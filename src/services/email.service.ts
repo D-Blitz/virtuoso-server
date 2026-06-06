@@ -373,7 +373,7 @@ export class EmailService {
         <p style="line-height:1.55;color:#333">
           Cette modification est définitive : un cours d&rsquo;essai ne peut être
           reprogrammé qu&rsquo;une seule fois en ligne. Pour toute autre demande,
-          contactez l&rsquo;école.
+          contactez l&rsquo;organisation.
         </p>
         <hr style="margin:32px 0;border:none;border-top:1px solid #eee" />
         <p style="font-size:12px;color:#999">
@@ -392,7 +392,7 @@ export class EmailService {
       `Lieu : ${params.locationName}`,
       ``,
       `Cette modification est définitive : un cours d'essai ne peut être reprogrammé qu'une seule fois en ligne.`,
-      `Pour toute autre demande, contactez l'école.`,
+      `Pour toute autre demande, contactez l'organisation.`,
     ].join('\n');
 
     const r = getResend();
@@ -734,7 +734,7 @@ export class EmailService {
             <strong>Cours :</strong> ${escape(params.serviceName)}
           </div>
           <div style="font-size:15px;color:#333;margin-bottom:6px">
-            <strong>Enseignant·e :</strong> ${escape(params.facilitatorName)}
+            <strong>Intervenant·e :</strong> ${escape(params.facilitatorName)}
           </div>
           <div style="font-size:15px;color:#333;margin-bottom:6px">
             <strong>Créneau :</strong> ${escape(params.recurringSlotLabel)}
@@ -764,7 +764,7 @@ export class EmailService {
 
         <p style="line-height:1.55;color:#333">
           Pour toute modification après inscription (changement de créneau,
-          absence, etc.), contactez directement l&rsquo;école — les changements
+          absence, etc.), contactez directement l&rsquo;organisation — les changements
           en ligne ne sont plus possibles à ce stade.
         </p>
 
@@ -781,7 +781,7 @@ export class EmailService {
       `Votre inscription au ${params.termName} est confirmée.`,
       ``,
       `Cours : ${params.serviceName}`,
-      `Enseignant·e : ${params.facilitatorName}`,
+      `Intervenant·e : ${params.facilitatorName}`,
       `Créneau : ${params.recurringSlotLabel}`,
       `Lieu : ${params.locationName}`,
       `Premier cours : ${params.firstLessonLabel}`,
@@ -803,7 +803,7 @@ export class EmailService {
       ``,
       `Un fichier .ics est joint pour ajouter le trimestre à votre calendrier en un clic.`,
       ``,
-      `Pour toute modification après inscription, contactez l'école.`,
+      `Pour toute modification après inscription, contactez l'organisation.`,
     ].join('\n');
 
     const icsContent = buildIcsCalendar({

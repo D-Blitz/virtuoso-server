@@ -8,6 +8,12 @@ const controller = new EnrollmentController();
 router.get('/', requirePermission('ENROLLMENT_MANAGE'), (req, res) =>
   controller.getAll(req, res),
 );
+// Detail + billing footprint for one enrollment (invoices + payments).
+// Declared after '/' (no literal GET collisions on this router; the quote /
+// generate-events POST routes live on the engine router).
+router.get('/:id', requirePermission('ENROLLMENT_MANAGE'), (req, res) =>
+  controller.getOne(req, res),
+);
 router.post('/', requirePermission('ENROLLMENT_MANAGE'), (req, res) =>
   controller.create(req, res),
 );

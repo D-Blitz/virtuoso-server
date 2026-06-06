@@ -27,27 +27,30 @@ model Organization {
   // What stays: identity (handled by the columns above) + tax rate.
   vatRate Float @default(20) // % tax applied on invoices
 
-  users             User[]
-  roles             Role[]
-  locations         Location[]
-  facilitators      Facilitator[]
-  rooms             Room[]
-  clients           Client[]
-  tags              Tag[]
-  services          Service[]
-  serviceCategories ServiceCategory[]
-  scheduledEvents   ScheduledEvent[]
-  terms             Term[]
-  enrollments       Enrollment[]
-  closures          Closure[]
-  widgets           BookingWidget[]
-  slotHolds         SlotHold[]
-  payments          Payment[]
-  widgetSubmissions WidgetSubmission[]
-  enrollmentInvites EnrollmentInvite[]
-  rescheduleTokens  ScheduledEventRescheduleToken[]
-  recurrenceSeries  RecurrenceSeries[]
-  auditLogEntries   AuditLogEntry[]
+  users              User[]
+  roles              Role[]
+  locations          Location[]
+  facilitators       Facilitator[]
+  rooms              Room[]
+  clients            Client[]
+  tags               Tag[]
+  services           Service[]
+  serviceCategories  ServiceCategory[]
+  scheduledEvents    ScheduledEvent[]
+  terms              Term[]
+  enrollments        Enrollment[]
+  closures           Closure[]
+  widgets            BookingWidget[]
+  slotHolds          SlotHold[]
+  payments           Payment[]
+  invoices           Invoice[]
+  billingIdentities  BillingIdentity[]
+  paymentAllocations PaymentAllocation[]
+  widgetSubmissions  WidgetSubmission[]
+  enrollmentInvites  EnrollmentInvite[]
+  rescheduleTokens   ScheduledEventRescheduleToken[]
+  recurrenceSeries   RecurrenceSeries[]
+  auditLogEntries    AuditLogEntry[]
 
   // Phase 2.0 — workflow engine
   widgetFlows        WidgetFlow[]
@@ -137,6 +140,8 @@ enum Permission {
   PAYMENT_VIEW
   PAYMENT_MANAGE
   REFUND_ISSUE
+  INVOICE_VIEW_ALL // every invoice in the org
+  INVOICE_VIEW_SCOPED // only invoices tied to intervenants in UserPermissionScope (+ the user's own linked intervenant)
 
   // Ops
   ARCHIVE_ACCESS
@@ -236,12 +241,30 @@ model Facilitator {
   enrollments       Enrollment[]
   user              User?
   slotHolds         SlotHold[]
+  billingIdentity   BillingIdentity?
+
+  // Phase D — teacher split. Invoice lines whose revenue belongs to this
+  // facilitator, and the payment slices allocated to them.
+  invoiceLines       InvoiceLine[]
+  paymentAllocations PaymentAllocation[]
 
   // Recommender scoring (consumed by the booking widget's recommender service)
   ageScores      Json     @default("[]") // [{min:number, max:number, score:number}]
   levelScores    Json     @default("{}") // {BEGINNER:number, INTERMEDIATE:number, ADVANCED:number}
   languages      String[] @default([]) // BCP-47 codes (e.g. "fr-FR", "en-US")
   priorityWeight Float    @default(1.0)
+
+  // Teacher-split config (consumed in Phase D). Inert until then.
+  //   billingMode    NONE          → no split; the school bills everything.
+  //                  BILLS_CLIENT  → the teacher's share is invoiced by the
+  //                                  teacher directly to the client.
+  //                  BILLS_SCHOOL  → the teacher invoices the school.
+  //   splitRuleMode  MANUAL        → per-line amounts entered by hand.
+  //                  PERCENTAGE    → splitRuleValue is a % of each line.
+  //                  FIXED_PER_SESSION → splitRuleValue is cents/session.
+  billingMode    String @default("NONE")
+  splitRuleMode  String @default("MANUAL")
+  splitRuleValue Int    @default(0)
 
   // Trash bin (Phase 0.5)
   deletedAt   DateTime?
@@ -301,6 +324,7 @@ model Client {
   events            ScheduledEvent[]   @relation("EventClients")
   enrollments       Enrollment[]
   payments          Payment[]
+  invoices          Invoice[]
   enrollmentInvites EnrollmentInvite[]
 
   // Trash bin (Phase 0.5)
@@ -601,11 +625,11 @@ model Enrollment {
   // - customDates: JSON array of ISO datetime strings, used only when
   //   frequency = 'CUSTOM'. Each entry is the exact start datetime of
   //   one occurrence.
-  frequency       String   @default("WEEKLY")
-  weekday         Int?     // 0..6 — nullable for DAILY / CUSTOM
-  startTime       String   // "HH:MM" (24h, anchored in org's timezone)
+  frequency       String @default("WEEKLY")
+  weekday         Int? // 0..6 — nullable for DAILY / CUSTOM
+  startTime       String // "HH:MM" (24h, anchored in org's timezone)
   durationMinutes Int
-  customDates     Json?    // ISO datetime strings, e.g. ["2026-09-15T17:00:00", ...]
+  customDates     Json? // ISO datetime strings, e.g. ["2026-09-15T17:00:00", ...]
 
   // active window — for non-CUSTOM frequencies this bounds the
   // recurrence; for CUSTOM it's informational (min/max of customDates).
@@ -770,23 +794,283 @@ model Payment {
   amountCents Int
   currency    String @default("EUR")
 
-  stripePaymentIntentId String  @unique
+  // Null for manually recorded payments (cheque / cash / transfer);
+  // only Stripe-webhook rows carry an intent id. @unique still holds —
+  // Postgres allows many NULLs in a unique column.
+  stripePaymentIntentId String? @unique
   stripeCustomerId      String?
 
   status  String @default("PENDING") // PENDING | SUCCEEDED | FAILED | REFUNDED
   purpose String // TRIAL_LESSON | ENROLLMENT_BALANCE (extend in PR 6)
 
+  // ── 1.9 multi-tender ──────────────────────────────────────────────
+  // How the money arrived. STRIPE rows come from the webhook; every
+  // other method is recorded manually by an admin (null intent id).
+  method String @default("STRIPE") // STRIPE | CHECK | CASH | BANK_TRANSFER | OTHER
+
+  // Invoice this payment settles. One invoice → many payments
+  // (e.g. 3 cheques + 1 cash). Null for legacy rows pre-invoicing.
+  invoiceId String?
+  invoice   Invoice? @relation(fields: [invoiceId], references: [id])
+
+  // Manual-payment metadata (null for STRIPE).
+  receivedAt DateTime? // when cash/transfer received (or cheque handed over)
+  reference  String? // espèces receipt no. / virement reference
+  payerName  String? // espèces / virement payer name
+  note       String? // free-text admin note
+
+  // Cheque-specific. A cheque is only income once it clears, so the
+  // row stays status=PENDING until chequeStatus reaches CASHED.
+  chequeNumber        String?
+  chequeBank          String?
+  chequeDrawerName    String?
+  expectedDepositDate DateTime?
+  chequeStatus        String? // PENDING_DEPOSIT | DEPOSITED | CASHED
+
   relatedScheduledEventId String?
   relatedScheduledEvent   ScheduledEvent? @relation(fields: [relatedScheduledEventId], references: [id])
   relatedEnrollmentId     String?
+
+  // Phase D — teacher split. How this payment is divided across the school
+  // and any freelance teachers, derived from the settled invoice's lines.
+  allocations PaymentAllocation[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([organizationId])
   @@index([clientId])
+  @@index([invoiceId])
   // Payments dashboard sorts/filters by createdAt within an org.
   @@index([organizationId, createdAt])
+  // "Chèques à déposer" tracker: pending cheques by deposit date.
+  @@index([organizationId, chequeStatus, expectedDepositDate])
+}
+
+// =========================================================================
+// Invoice — billing container (Phase 1.9; foundation for 6.5 invoicing).
+// A client is billed via an Invoice with N lines; the total is settled
+// by one or more Payments of any tender (card / cheque / cash / transfer).
+// `paid` + `balance` are derived from settled payments (status=SUCCEEDED)
+// at read time; `status` is recomputed on every payment change.
+// =========================================================================
+model Invoice {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  clientId String
+  client   Client @relation(fields: [clientId], references: [id])
+
+  // Phase C — the BillingIdentity that ISSUES this invoice (the school by
+  // default, or a freelance teacher for their share of a split). Drives
+  // per-issuer numbering; null only for legacy rows predating Phase C.
+  issuerId String?
+  issuer   BillingIdentity? @relation("InvoiceIssuer", fields: [issuerId], references: [id])
+
+  // Phase D — split-invoice linkage. When the school splits a lesson with a
+  // freelance teacher, a child invoice is spun off (issued by the teacher's
+  // BillingIdentity) for the teacher's share; it points back to the school's
+  // source invoice here. The source invoice exposes them via childInvoices.
+  parentInvoiceId String?
+  parentInvoice   Invoice?  @relation("InvoiceSplit", fields: [parentInvoiceId], references: [id])
+  childInvoices   Invoice[] @relation("InvoiceSplit")
+
+  // Phase D — who the invoice is addressed to. CLIENT (default) bills the end
+  // client; SCHOOL bills the org itself — used when a freelance teacher in
+  // BILLS_SCHOOL mode invoices the school for their share. clientId still
+  // records the underlying lesson's client for traceability.
+  billToType String @default("CLIENT") // CLIENT | SCHOOL
+
+  // Human-friendly sequential number, e.g. "2026-0001" (or
+  // "<prefix>-2026-0001" when the issuer sets a prefix). Phase C makes the
+  // counter PER-ISSUER: each BillingIdentity keeps its own gap-free yearly
+  // sequence, unique per (org, issuer).
+  number String
+
+  // DRAFT | SENT | PARTIALLY_PAID | PAID | VOID
+  status String @default("DRAFT")
+
+  currency String @default("EUR")
+
+  // Money snapshot, recomputed from lines on write so list queries
+  // don't aggregate lines. HT = subtotal, TVA = vat, TTC = total.
+  // Payments settle against `totalCents`.
+  //
+  // Phase B — `vatRate` is the invoice-level DEFAULT rate applied to every
+  // line that has no per-line override. Seeded from org.vatRate on create
+  // but editable per invoice. `vatCents` is the SUM of per-line VAT.
+  subtotalCents Int   @default(0)
+  vatRate       Float @default(0)
+  vatCents      Int   @default(0)
+  totalCents    Int   @default(0)
+
+  issueDate DateTime?
+  dueDate   DateTime?
+  notes     String?
+
+  lines       InvoiceLine[]
+  payments    Payment[]
+  allocations PaymentAllocation[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([organizationId, issuerId, number])
+  @@index([organizationId])
+  @@index([clientId])
+  @@index([issuerId])
+  @@index([parentInvoiceId])
+  @@index([organizationId, status])
+}
+
+model InvoiceLine {
+  id        String  @id @default(cuid())
+  invoiceId String
+  invoice   Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  description    String
+  quantity       Int    @default(1)
+  unitPriceCents Int
+  amountCents    Int // quantity * unitPriceCents, stored
+
+  // Phase B — per-line VAT. `vatRate` is an OPTIONAL override; null means
+  // "inherit the invoice's default vatRate". `vatCents` is this line's VAT
+  // (round(amountCents * effectiveRate / 100)), stored so a mixed-rate
+  // invoice can print a per-rate VAT breakdown without recomputing.
+  vatRate  Float?
+  vatCents Int    @default(0)
+
+  // Optional link to the enrollment this line bills for. Kept loose
+  // (no FK) to mirror Payment.relatedEnrollmentId.
+  enrollmentId String?
+
+  // Phase D — teacher split. The revenue owner of this line: null = the
+  // school's own line; set = a freelance teacher whose share this line
+  // represents. Drives split-invoice generation and payment allocation.
+  facilitatorId String?
+  facilitator   Facilitator? @relation(fields: [facilitatorId], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([invoiceId])
+  @@index([facilitatorId])
+}
+
+// =========================================================================
+// PaymentAllocation — Phase D teacher split. Splits a settled Payment into
+// the shares owed to each beneficiary (the school and/or freelance teachers),
+// derived from the settling invoice's per-line ownership (InvoiceLine.
+// facilitatorId). One payment → N allocations that sum to the payment amount.
+// Lets the school see, per teacher, how much collected money is destined for
+// that teacher's payout. NOT tenant-scoped in the Prisma extension (like
+// Payment): PaymentService sets organizationId explicitly.
+// =========================================================================
+model PaymentAllocation {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  paymentId String
+  payment   Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+
+  // Phase D — the invoice that governs this split. Nullable since the
+  // direct-allocation feature: an allocation can also be recorded straight
+  // against a payment with NO invoice ("encaissé pour le compte de" an
+  // intervenant, for any tender), recording money the org owes them.
+  invoiceId String?
+  invoice   Invoice? @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  // SCHOOL | FACILITATOR — whose share this slice of the payment is.
+  beneficiaryType String
+  facilitatorId   String?
+  facilitator     Facilitator? @relation(fields: [facilitatorId], references: [id])
+
+  amountCents Int
+
+  createdAt DateTime @default(now())
+
+  @@index([organizationId])
+  @@index([paymentId])
+  @@index([invoiceId])
+  @@index([facilitatorId])
+  @@index([organizationId, beneficiaryType])
+}
+
+// =========================================================================
+// BillingIdentity — the legal/fiscal "who is issuing/billing" entity.
+// One SCHOOL identity per org (the org itself as an invoicing party) plus
+// one optional identity per FACILITATOR (freelancers who emit their own
+// invoices for their share of a lesson). Kept as a dedicated table rather
+// than inline columns so Organization stays slim (Phase 0.7) and the same
+// shape is reused for school + every teacher. Phase C will reference these
+// from Invoice.issuerId for per-issuer numbering; Phase E reads the theme
+// fields (logoUrl, legalMentions) when rendering the PDF.
+// =========================================================================
+model BillingIdentity {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  // SCHOOL | FACILITATOR. SCHOOL is a per-org singleton enforced in the
+  // service layer (facilitatorId is null for it). FACILITATOR rows are
+  // 1:1 with a facilitator via the @unique FK below.
+  ownerType     String
+  facilitatorId String?      @unique
+  facilitator   Facilitator? @relation(fields: [facilitatorId], references: [id])
+
+  // Phase C — invoices this identity has issued (per-issuer numbering).
+  invoices Invoice[] @relation("InvoiceIssuer")
+
+  // Legal identity printed on the invoice header.
+  legalName String
+  legalForm String? // "Association loi 1901" | "Auto-entrepreneur" | "SARL" ...
+  email     String?
+  phone     String?
+
+  addressLine1 String?
+  addressLine2 String?
+  postalCode   String?
+  city         String?
+  country      String? @default("France")
+
+  // Fiscal identifiers (FR). Optional because a brand-new identity may be
+  // filled in progressively, and micro-entrepreneurs may lack some.
+  siret     String?
+  vatNumber String? // TVA intracommunautaire
+  rcs       String?
+
+  // Bank details for the "à régler par virement" footer.
+  iban String?
+  bic  String?
+
+  // Phase C — optional per-issuer invoice-number prefix. When set, this
+  // identity's invoices read "<prefix>-2026-0001"; when null they use the
+  // plain "2026-0001" namespace. Lets a freelance teacher keep a distinct,
+  // gap-free sequence from the school's.
+  invoicePrefix String?
+
+  // PDF theming / legal footer (consumed in Phase E).
+  logoUrl String?
+
+  // VAT posture. When vatExempt, lines are billed at 0% and the mention
+  // below is printed (typical for auto-entrepreneurs / associations).
+  vatExempt        Boolean @default(false)
+  vatExemptMention String? @default("TVA non applicable, art. 293 B du CGI")
+  legalMentions    String?
+
+  // Phase E — per-issuer PDF theme (colors, font, layout toggles, header/
+  // footer copy). A flexible JSON blob (cf. BookingWidget.draftConfig) so
+  // the theme can evolve without a migration per knob; null = house default.
+  // Shape: see InvoicePdfTheme in services/invoice/invoicePdfTheme.ts.
+  pdfTheme Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([organizationId])
+  @@index([organizationId, ownerType])
 }
 
 // =========================================================================

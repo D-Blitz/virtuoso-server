@@ -35,7 +35,7 @@ export class EnrollmentInviteRescheduleService {
     if (!invite) throw new Error('Invite introuvable ou expirée');
 
     const facilitator = invite.scheduledEvent.facilitators[0];
-    if (!facilitator) throw new Error('Aucun enseignant associé');
+    if (!facilitator) throw new Error('Aucun intervenant associé');
 
     const now = new Date();
     const term = await prisma.term.findFirst({
@@ -88,7 +88,7 @@ export class EnrollmentInviteRescheduleService {
     if (!/^\d{2}:\d{2}$/.test(startTime)) throw new Error('Heure invalide');
 
     const facilitator = invite.scheduledEvent.facilitators[0];
-    if (!facilitator) throw new Error('Aucun enseignant associé');
+    if (!facilitator) throw new Error('Aucun intervenant associé');
 
     const validOptions = await this.getOptions(token);
     const isValid = validOptions.some(

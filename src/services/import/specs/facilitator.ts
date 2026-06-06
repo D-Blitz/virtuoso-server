@@ -74,7 +74,7 @@ export const facilitatorSpec: ImportEntitySpec = {
   type: 'facilitator',
   label: 'Intervenants',
   description:
-    'Professeurs / animateurs. Les relations (lieux, étiquettes, prestations) acceptent une liste séparée par des virgules : les valeurs doivent correspondre à des entités déjà importées.',
+    'Intervenants. Les relations (lieux, étiquettes, prestations) acceptent une liste séparée par des virgules : les valeurs doivent correspondre à des entités déjà importées.',
   uniqueBy: 'email',
   columns: [
     { key: 'firstname', label: 'Prénom', required: true, type: 'string', example: 'Jean' },

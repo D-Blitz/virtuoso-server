@@ -288,3 +288,56 @@ export async function assertEventManageable(args: {
     throw err;
   }
 }
+
+/**
+ * Resolve the facilitator allowlist that constrains which invoices the current
+ * user may read. Mirrors the event-scope model but collapses to a single
+ * dimension (Facilitator). Returns:
+ *
+ *   - `null`     → unrestricted. Granted by INVOICE_VIEW_ALL, or by the legacy
+ *                  PAYMENT_VIEW grant invoices originally shipped under (so
+ *                  existing roles keep full access with no re-seeding).
+ *   - `string[]` → restricted to invoices that touch one of these facilitators
+ *                  (a line tagged to them, or the issuer's own facilitator).
+ *                  The list is the union of the user's INVOICE_VIEW_SCOPED
+ *                  scope rows AND their own linked facilitator — so a
+ *                  facilitator-user always sees at least their own invoices.
+ *                  An empty array means "nothing" (deny-all).
+ *
+ * The route guards admission (requireAnyPermission); this resolves the data
+ * filter the controller applies on top.
+ */
+export async function resolveInvoiceFacilitatorScope(): Promise<string[] | null> {
+  const ctx = getContext();
+  if (!ctx) {
+    const err = new Error('No request context') as Error & { statusCode?: number };
+    err.statusCode = 401;
+    throw err;
+  }
+  if (
+    ctx.permissions.has('INVOICE_VIEW_ALL') ||
+    ctx.permissions.has('PAYMENT_VIEW')
+  ) {
+    return null; // full access
+  }
+
+  const allowed = new Set<string>();
+  const scopes = await prisma.userPermissionScope.findMany({
+    where: {
+      userId: ctx.userId,
+      permission: 'INVOICE_VIEW_SCOPED',
+      resourceType: 'Facilitator',
+    },
+    select: { resourceId: true },
+  });
+  for (const s of scopes) allowed.add(s.resourceId);
+
+  // A facilitator-linked user always sees their own invoices.
+  const user = await prisma.user.findFirst({
+    where: { id: ctx.userId },
+    select: { facilitatorId: true },
+  });
+  if (user?.facilitatorId) allowed.add(user.facilitatorId);
+
+  return [...allowed];
+}

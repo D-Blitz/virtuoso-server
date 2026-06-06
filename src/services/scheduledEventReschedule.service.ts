@@ -184,7 +184,7 @@ export class ScheduledEventRescheduleService {
     }
 
     const facilitator = event.facilitators[0];
-    if (!facilitator) throw new Error('Aucun enseignant associé');
+    if (!facilitator) throw new Error('Aucun intervenant associé');
 
     const durationMs = event.service.defaultDurationMinutes * 60_000;
     const newEndTime = new Date(newStartTime.getTime() + durationMs);

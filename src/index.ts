@@ -32,6 +32,8 @@ import scheduledEventValidationRoutes from './routes/validation/scheduledEventVa
 import enrollmentEngineRoutes from './routes/enrollmentEngine.routes';
 import widgetRoutes from './routes/widget.routes';
 import paymentRoutes from './routes/payment.routes';
+import invoiceRoutes from './routes/invoice.routes';
+import billingIdentityRoutes from './routes/billingIdentity.routes';
 import jobsRoutes from './routes/jobs.routes';
 import closureRoutes from './routes/closure.routes';
 import auditLogRoutes from './routes/auditLog.routes';
@@ -131,6 +133,8 @@ app.use('/api/widget-flows', widgetFlowRoutes);
 // level doesn't try to consume CSV bodies.
 app.use('/api/import', importRoutes);
 app.use('/api/payments', paymentRoutes);
+app.use('/api/invoices', invoiceRoutes);
+app.use('/api/billing-identities', billingIdentityRoutes);
 app.use('/api/jobs', jobsRoutes);
 app.use('/api/closures', closureRoutes);
 app.use('/api/audit-log', auditLogRoutes);

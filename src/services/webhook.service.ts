@@ -6,6 +6,7 @@ import { generateOpaqueToken } from '../auth/tokens';
 import { auditLog } from './audit/audit.service';
 import { snapshotScheduledEvent } from './audit/snapshots';
 import * as bus from './events/bus';
+import { syncAllocationsForPayment } from './invoice/invoiceSplit.service';
 
 /** System actor for webhook-driven mutations. See AUDIT_LOG_DESIGN.md. */
 function webhookActor(eventType: string) {
@@ -481,6 +482,11 @@ export class WebhookService {
       where: { stripePaymentIntentId: paymentIntentId },
       data: { status: 'REFUNDED' },
     });
+
+    // Phase D — a refunded payment is no longer recognised income, so drop
+    // any teacher-split allocations it carried (syncAllocations is a no-op
+    // once status != SUCCEEDED, leaving the rows deleted).
+    if (refunded) await syncAllocationsForPayment(refunded.id);
 
     // Phase 2.0a — emit so future engine triggers can react. Amount
     // is in Stripe cents on the charge object; convert to EUR (or

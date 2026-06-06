@@ -1,5 +1,6 @@
 import prisma from '../../prisma';
 import type { Permission } from '@prisma/client';
+import { ALL_PERMISSIONS } from '../../auth/permissions';
 
 /**
  * Phase 0.3 — seed the starter roles for an organization.
@@ -35,6 +36,13 @@ import type { Permission } from '@prisma/client';
  * Role definitions mirror the migration exactly. If you change a role's
  * default permission set, update BOTH this file AND the migration's
  * SQL — they're the two entry points and we want them to agree.
+ *
+ * Exception: Propriétaire's permission list is derived from the Prisma
+ * enum (ALL_PERMISSIONS) instead of being hand-listed, so it always
+ * holds every permission. Adding a new permission to the schema flows
+ * into Propriétaire automatically for NEW orgs; existing orgs are
+ * backfilled by a one-time data migration (see
+ * prisma/migrations/*_backfill_owner_full_permissions).
  */
 
 type SeedRole = {
@@ -53,20 +61,12 @@ const SEEDED_ROLES: SeedRole[] = [
     color: '#7C3AED',
     // Only true system role — the bootstrap. An org must always have
     // someone with full access to manage users + roles + settings.
+    // Derived from the Prisma enum (ALL_PERMISSIONS) rather than a
+    // hand-kept list: the owner MUST hold every permission, otherwise the
+    // privilege-escalation guard would stop them from granting newly
+    // added permissions to anyone. See src/auth/permissions.ts.
     isSystem: true,
-    permissions: [
-      'ADMIN_ACCESS', 'ORG_MANAGE', 'USER_MANAGE', 'ROLE_MANAGE',
-      'CLIENT_VIEW', 'CLIENT_MANAGE', 'CLIENT_ANONYMIZE',
-      'FACILITATOR_VIEW', 'FACILITATOR_MANAGE',
-      'SERVICE_MANAGE', 'SERVICE_CATEGORY_MANAGE',
-      'LOCATION_MANAGE', 'ROOM_MANAGE', 'TAG_MANAGE',
-      'TERM_MANAGE', 'CLOSURE_MANAGE',
-      'EVENT_VIEW', 'EVENT_MANAGE_ALL', 'EVENT_CANCEL',
-      'SERIES_MANAGE', 'ENROLLMENT_MANAGE',
-      'PAYMENT_VIEW', 'PAYMENT_MANAGE', 'REFUND_ISSUE',
-      'ARCHIVE_ACCESS', 'TRASH_ACCESS', 'PURGE_PERMANENTLY', 'AUDIT_LOG_VIEW',
-      'WIDGET_MANAGE',
-    ],
+    permissions: ALL_PERMISSIONS,
   },
   {
     name: 'Administrateur',
@@ -84,7 +84,7 @@ const SEEDED_ROLES: SeedRole[] = [
       'TERM_MANAGE', 'CLOSURE_MANAGE',
       'EVENT_VIEW', 'EVENT_MANAGE_ALL', 'EVENT_CANCEL',
       'SERIES_MANAGE', 'ENROLLMENT_MANAGE',
-      'PAYMENT_VIEW', 'PAYMENT_MANAGE', 'REFUND_ISSUE',
+      'PAYMENT_VIEW', 'PAYMENT_MANAGE', 'REFUND_ISSUE', 'INVOICE_VIEW_ALL',
       'ARCHIVE_ACCESS', 'TRASH_ACCESS', 'AUDIT_LOG_VIEW',
       'WIDGET_MANAGE',
     ],
@@ -103,6 +103,9 @@ const SEEDED_ROLES: SeedRole[] = [
       'CLIENT_VIEW',
       'FACILITATOR_VIEW',
       'EVENT_VIEW', 'EVENT_MANAGE_SCOPED',
+      // Sees invoices tied to the facilitators in their scope — and, when the
+      // user is linked to a facilitator, their own invoices automatically.
+      'INVOICE_VIEW_SCOPED',
     ],
   },
 ];

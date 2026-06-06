@@ -13,6 +13,20 @@ const TENANT_SCOPED_MODELS = new Set<string>([
   'Term',
   'Enrollment',
   'Closure',
+  // Phase 1.9 — invoicing. Auto-scope so every invoice read/write is
+  // pinned to the caller's org (defence-in-depth on top of the explicit
+  // organizationId filters in InvoiceService). InvoiceLine is NOT listed:
+  // it has no organizationId column and is only ever reached via its
+  // parent Invoice relation, which is already scoped. Payment is also
+  // deliberately left out — its rows are created by the unauthenticated
+  // Stripe webhook (no request context), so auto-injection can't apply;
+  // PaymentService scopes its own queries explicitly instead.
+  'Invoice',
+  // Phase A — billing identities (school + per-facilitator invoicing
+  // parties). Always created via authenticated admin requests, so
+  // auto-injection of organizationId applies cleanly. The service also
+  // scopes explicitly (defence-in-depth, like Invoice).
+  'BillingIdentity',
 ]);
 
 /**

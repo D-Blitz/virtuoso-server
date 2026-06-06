@@ -65,6 +65,16 @@ export class RefundService {
       err.statusCode = 400;
       throw err;
     }
+    // Phase 1.9: manually-recorded tenders (cheque / cash / transfer)
+    // have no Stripe intent and can't be refunded through Stripe. A
+    // manual refund flow will cover those separately.
+    if (!payment.stripePaymentIntentId) {
+      const err = new Error(
+        'Seuls les paiements Stripe peuvent être remboursés ici. Pour un paiement manuel (chèque, espèces, virement), enregistrez un remboursement manuel.',
+      ) as Error & { statusCode?: number };
+      err.statusCode = 400;
+      throw err;
+    }
 
     const requestedCents = input.amountCents ?? payment.amountCents;
     if (requestedCents <= 0 || requestedCents > payment.amountCents) {

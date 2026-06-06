@@ -156,6 +156,33 @@ export function sendError(
 }
 
 /**
+ * Like `sendError`, but first honours an explicit `statusCode` set on the
+ * thrown error. Services in the Phase-1.9 surface (InvoiceService,
+ * PaymentService) throw plain `Error & { statusCode }` for validation /
+ * not-found / conflict cases; this surfaces the intended HTTP status
+ * directly instead of letting it fall through to the Prisma + message
+ * pattern matching (which would mislabel, e.g., a 400 as 500).
+ *
+ * Kept as a separate helper so the existing `sendError` callers are
+ * completely unaffected.
+ */
+export function sendServiceError(
+  res: Response,
+  err: unknown,
+  fallbackMessage: string,
+): void {
+  const statusCode = (err as { statusCode?: unknown })?.statusCode;
+  if (typeof statusCode === 'number' && statusCode >= 400 && statusCode <= 599) {
+    console.error(fallbackMessage, err);
+    res.status(statusCode).json({
+      error: err instanceof Error && err.message ? err.message : fallbackMessage,
+    });
+    return;
+  }
+  sendError(res, err, fallbackMessage);
+}
+
+/**
  * Maps the few FK constraint names admins actually encounter into
  * plain-French descriptions. Returns both a `summary` (for the modal's
  * primary headline, no jargon) and a `detail` (the explanation the

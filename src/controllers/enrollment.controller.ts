@@ -77,6 +77,21 @@ export class EnrollmentController {
     }
   }
 
+  async getOne(req: Request, res: Response) {
+    try {
+      const result = await enrollmentService.getOneWithBilling(req.params.id);
+      if (!result) {
+        res.status(404).json({ error: 'Enrollment not found' });
+        return;
+      }
+      res.json(result);
+      return;
+    } catch (error) {
+      sendError(res, error, 'Failed to fetch enrollment');
+      return;
+    }
+  }
+
   async update(req: Request, res: Response) {
     const { id } = req.params;
 
