@@ -3,6 +3,7 @@ import { getOrganizationId } from '../../auth/context';
 import { auditLog } from '../audit/audit.service';
 import { invoiceService } from './invoice.service';
 import { nextInvoiceNumber } from './invoiceNumber';
+import { payoutRowToDto } from './facilitatorPayout.service';
 
 /**
  * Phase D — teacher split.
@@ -589,11 +590,189 @@ export class InvoiceSplitService {
       }
     }
 
+    // Reversements (manual payouts) recorded against each facilitator settle
+    // part of what's owed. Fold each facilitator's payout total into
+    // paidOutCents so owed = held − (invoice settlements + payouts).
+    const payoutSums = await prisma.facilitatorPayout.groupBy({
+      by: ['facilitatorId'],
+      where: { organizationId },
+      _sum: { amountCents: true },
+    });
+    for (const p of payoutSums) {
+      let e = map.get(p.facilitatorId);
+      if (!e) {
+        // A facilitator may have payouts but no allocations (e.g. paid in
+        // advance, or all their allocations refunded). Fetch their name so
+        // they still surface in the ledger with a negative balance.
+        const fac = await prisma.facilitator.findFirst({
+          where: { id: p.facilitatorId },
+          select: { id: true, firstname: true, lastname: true },
+        });
+        if (!fac) continue;
+        e = {
+          facilitatorId: fac.id,
+          firstname: fac.firstname,
+          lastname: fac.lastname,
+          heldBySchoolCents: 0,
+          paidOutCents: 0,
+          directIncomeCents: 0,
+          pendingClearanceCents: 0,
+        };
+        map.set(p.facilitatorId, e);
+      }
+      e.paidOutCents += p._sum.amountCents ?? 0;
+    }
+
     return [...map.values()]
       .map((e) => ({ ...e, owedCents: e.heldBySchoolCents - e.paidOutCents }))
       .sort((a, b) =>
         `${a.lastname} ${a.firstname}`.localeCompare(`${b.lastname} ${b.firstname}`),
       );
+  }
+
+  /**
+   * Drill-down for ONE facilitator on /admin/soldes-intervenants: the same
+   * money summary as teacherBalances(), plus the underlying allocations (each
+   * tagged held/paidOut/direct/pending, with links to its payment and invoice)
+   * and the list of reversements already paid. Lets the admin see exactly what
+   * makes up "reste dû" and settle it.
+   */
+  async teacherBalanceDetail(facilitatorId: string) {
+    const organizationId = this.requireOrg();
+    const fac = await prisma.facilitator.findFirst({
+      where: { id: facilitatorId },
+      select: {
+        id: true,
+        firstname: true,
+        lastname: true,
+        billingIdentity: { select: { stripeAccountId: true } },
+      },
+    });
+    if (!fac) throw httpError('Intervenant introuvable.', 404);
+
+    const allocs = await prisma.paymentAllocation.findMany({
+      where: { organizationId, beneficiaryType: 'FACILITATOR', facilitatorId },
+      select: {
+        id: true,
+        amountCents: true,
+        invoice: {
+          select: {
+            id: true,
+            number: true,
+            billToType: true,
+            issuer: { select: { ownerType: true } },
+          },
+        },
+        payment: {
+          select: {
+            id: true,
+            method: true,
+            status: true,
+            chequeStatus: true,
+            receivedAt: true,
+            createdAt: true,
+          },
+        },
+      },
+    });
+
+    let heldBySchoolCents = 0;
+    let paidOutCents = 0;
+    let directIncomeCents = 0;
+    let pendingClearanceCents = 0;
+
+    type AllocationDetail = {
+      id: string;
+      amountCents: number;
+      kind: 'held' | 'paidOut' | 'direct' | 'pending';
+      payment: {
+        id: string;
+        method: string;
+        status: string;
+        chequeStatus: string | null;
+        receivedAt: string | null;
+        createdAt: string;
+      } | null;
+      invoice: { id: string; number: string; billToType: string } | null;
+    };
+
+    const allocations: AllocationDetail[] = [];
+    for (const a of allocs) {
+      const isDepositedCheque =
+        a.payment?.method === 'CHECK' && a.payment?.chequeStatus === 'DEPOSITED';
+      let kind: AllocationDetail['kind'];
+      if (isDepositedCheque) {
+        kind = 'pending';
+        pendingClearanceCents += a.amountCents;
+      } else if (a.payment?.status !== 'SUCCEEDED') {
+        // Refunded / failed after the allocation was created — not part of the
+        // ledger maths, so leave it out (keeps the totals reconciling).
+        continue;
+      } else {
+        const billTo = a.invoice?.billToType;
+        const issuerType = a.invoice?.issuer?.ownerType;
+        if (billTo === 'SCHOOL') {
+          kind = 'paidOut';
+          paidOutCents += a.amountCents;
+        } else if (issuerType === 'SCHOOL' || !a.invoice) {
+          kind = 'held';
+          heldBySchoolCents += a.amountCents;
+        } else {
+          kind = 'direct';
+          directIncomeCents += a.amountCents;
+        }
+      }
+      allocations.push({
+        id: a.id,
+        amountCents: a.amountCents,
+        kind,
+        payment: a.payment
+          ? {
+              id: a.payment.id,
+              method: a.payment.method,
+              status: a.payment.status,
+              chequeStatus: a.payment.chequeStatus ?? null,
+              receivedAt: a.payment.receivedAt
+                ? a.payment.receivedAt.toISOString()
+                : null,
+              createdAt:
+                a.payment.createdAt instanceof Date
+                  ? a.payment.createdAt.toISOString()
+                  : a.payment.createdAt,
+            }
+          : null,
+        invoice: a.invoice
+          ? {
+              id: a.invoice.id,
+              number: a.invoice.number,
+              billToType: a.invoice.billToType,
+            }
+          : null,
+      });
+    }
+
+    const payoutRows = await prisma.facilitatorPayout.findMany({
+      where: { organizationId, facilitatorId },
+      orderBy: { paidAt: 'desc' },
+    });
+    const payouts = payoutRows.map(payoutRowToDto);
+    // Manual reversements settle the held balance just like a teacher→school
+    // invoice payment does.
+    paidOutCents += payoutRows.reduce((s, p) => s + p.amountCents, 0);
+
+    return {
+      facilitatorId: fac.id,
+      firstname: fac.firstname,
+      lastname: fac.lastname,
+      stripeAccountId: fac.billingIdentity?.stripeAccountId ?? null,
+      heldBySchoolCents,
+      paidOutCents,
+      directIncomeCents,
+      pendingClearanceCents,
+      owedCents: heldBySchoolCents - paidOutCents,
+      allocations,
+      payouts,
+    };
   }
 }
 

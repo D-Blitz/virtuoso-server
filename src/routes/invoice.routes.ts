@@ -28,6 +28,11 @@ router.get('/', READ_INVOICE, (req, res) => controller.list(req, res));
 router.get('/teacher-balances', READ_INVOICE_FULL, (req, res) =>
   controller.teacherBalances(req, res),
 );
+// N.3 — per-facilitator drill-down (allocations + payouts). Literal first
+// segment, so it can't be swallowed by "/:id".
+router.get('/teacher-balances/:facilitatorId', READ_INVOICE_FULL, (req, res) =>
+  controller.teacherBalanceDetail(req, res),
+);
 router.get('/:id', READ_INVOICE, (req, res) => controller.get(req, res));
 // Phase D — read-only split preview.
 router.get('/:id/split-preview', READ_INVOICE_FULL, (req, res) =>
@@ -53,6 +58,13 @@ router.post('/:id/void', requirePermission('PAYMENT_MANAGE'), (req, res) =>
 // Phase D — generate the teacher split invoices from this source invoice.
 router.post('/:id/split', requirePermission('PAYMENT_MANAGE'), (req, res) =>
   controller.split(req, res),
+);
+// N.3 — record a reversement (payout) to a facilitator. Three literal-ish
+// segments, so no collision with "/:id/..." routes.
+router.post(
+  '/teacher-balances/:facilitatorId/payouts',
+  requirePermission('PAYMENT_MANAGE'),
+  (req, res) => controller.recordPayout(req, res),
 );
 
 export default router;

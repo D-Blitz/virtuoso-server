@@ -90,6 +90,12 @@ export type UpdateInvoiceInput = {
 export type ListInvoicesFilters = {
   status?: string;
   clientId?: string;
+  /**
+   * Filter to invoices touching this facilitator — a line tagged to them, or
+   * issued under their billing identity. Distinct from `facilitatorScope`
+   * (a permission-derived allowlist): both can apply at once, combined with AND.
+   */
+  facilitatorId?: string;
   from?: Date;
   to?: Date;
 };
@@ -366,6 +372,32 @@ export class InvoiceService {
       Math.max(1, Math.floor(args.pageSize ?? DEFAULT_PAGE_SIZE)),
     );
 
+    // Both the access scope and the facilitator FILTER are "line tag OR issuer"
+    // disjunctions. They must intersect (a scoped user filtering by facilitator
+    // sees only invoices satisfying BOTH), so each goes in its own AND clause —
+    // a single shared `OR` key would let one silently overwrite the other.
+    const andClauses: any[] = [];
+    // Invoice-access scope: a restricted user only sees invoices that carry a
+    // line tagged to one of their allowed facilitators OR are issued under one
+    // of their billing identities. null = unrestricted (skip it).
+    if (args.facilitatorScope) {
+      andClauses.push({
+        OR: [
+          { lines: { some: { facilitatorId: { in: args.facilitatorScope } } } },
+          { issuer: { facilitatorId: { in: args.facilitatorScope } } },
+        ],
+      });
+    }
+    // Explicit facilitator filter from the ledger filter bar.
+    if (args.facilitatorId) {
+      andClauses.push({
+        OR: [
+          { lines: { some: { facilitatorId: args.facilitatorId } } },
+          { issuer: { facilitatorId: args.facilitatorId } },
+        ],
+      });
+    }
+
     const where = {
       organizationId,
       ...(args.status ? { status: args.status } : {}),
@@ -378,17 +410,7 @@ export class InvoiceService {
             },
           }
         : {}),
-      // Invoice-access scope: a restricted user only sees invoices that carry a
-      // line tagged to one of their allowed facilitators OR are issued under one
-      // of their billing identities. null = unrestricted (skip the OR).
-      ...(args.facilitatorScope
-        ? {
-            OR: [
-              { lines: { some: { facilitatorId: { in: args.facilitatorScope } } } },
-              { issuer: { facilitatorId: { in: args.facilitatorScope } } },
-            ],
-          }
-        : {}),
+      ...(andClauses.length > 0 ? { AND: andClauses } : {}),
     };
 
     const [rows, total] = await Promise.all([

@@ -46,6 +46,7 @@ model Organization {
   invoices           Invoice[]
   billingIdentities  BillingIdentity[]
   paymentAllocations PaymentAllocation[]
+  facilitatorPayouts FacilitatorPayout[]
   widgetSubmissions  WidgetSubmission[]
   enrollmentInvites  EnrollmentInvite[]
   rescheduleTokens   ScheduledEventRescheduleToken[]
@@ -247,6 +248,8 @@ model Facilitator {
   // facilitator, and the payment slices allocated to them.
   invoiceLines       InvoiceLine[]
   paymentAllocations PaymentAllocation[]
+  // Payouts the org has made to this facilitator (reversements).
+  payouts            FacilitatorPayout[]
 
   // Recommender scoring (consumed by the booking widget's recommender service)
   ageScores      Json     @default("[]") // [{min:number, max:number, score:number}]
@@ -999,6 +1002,45 @@ model PaymentAllocation {
 }
 
 // =========================================================================
+// FacilitatorPayout — a reversement: money the org pays OUT to a freelance
+// facilitator to settle what it collected on their behalf (the "reste dû"
+// on /admin/soldes-intervenants). Independent of the invoice/payment loop:
+// teacherBalances sums these into paidOutCents so a payout reduces what is
+// still owed. `method` mirrors the manual tenders plus STRIPE; a STRIPE
+// payout is a Stripe Connect transfer to the facilitator's connected
+// account (BillingIdentity.stripeAccountId) and records its transfer id.
+// =========================================================================
+model FacilitatorPayout {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  facilitatorId String
+  facilitator   Facilitator @relation(fields: [facilitatorId], references: [id])
+
+  amountCents Int
+  currency    String @default("EUR")
+
+  // CASH | CHECK | BANK_TRANSFER | STRIPE | OTHER
+  method    String
+  reference String?
+  note      String?
+
+  // When the payout actually happened (admin-entered; defaults to now).
+  paidAt DateTime @default(now())
+
+  // Stripe Connect transfer id (tr_…), set only when method = STRIPE.
+  stripeTransferId String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([organizationId])
+  @@index([facilitatorId])
+  @@index([organizationId, facilitatorId])
+}
+
+// =========================================================================
 // BillingIdentity — the legal/fiscal "who is issuing/billing" entity.
 // One SCHOOL identity per org (the org itself as an invoicing party) plus
 // one optional identity per FACILITATOR (freelancers who emit their own
@@ -1044,6 +1086,11 @@ model BillingIdentity {
   // Bank details for the "à régler par virement" footer.
   iban String?
   bic  String?
+
+  // Stripe Connect — the facilitator's connected account id (acct_…). When
+  // set, the org can pay this party directly via a Stripe transfer instead of
+  // a manual tender (cash/cheque/virement). See FacilitatorPayout.
+  stripeAccountId String?
 
   // Phase C — optional per-issuer invoice-number prefix. When set, this
   // identity's invoices read "<prefix>-2026-0001"; when null they use the

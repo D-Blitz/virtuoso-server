@@ -6,6 +6,10 @@ import {
 } from '../services/invoice/invoice.service';
 import { invoiceSplitService } from '../services/invoice/invoiceSplit.service';
 import {
+  facilitatorPayoutService,
+  type PayoutMethod,
+} from '../services/invoice/facilitatorPayout.service';
+import {
   issueBillingService,
   type IssueBillingLineInput,
   type IssueBillingPaymentInput,
@@ -83,9 +87,19 @@ function parseFilters(req: Request): ListInvoicesFilters {
     typeof req.query.clientId === 'string' && req.query.clientId
       ? req.query.clientId
       : undefined;
+  const facilitatorId =
+    typeof req.query.facilitatorId === 'string' && req.query.facilitatorId
+      ? req.query.facilitatorId
+      : undefined;
   const from = parseDate(req.query.from) ?? undefined;
   const to = parseDate(req.query.to) ?? undefined;
-  return { status, clientId, from: from ?? undefined, to: to ?? undefined };
+  return {
+    status,
+    clientId,
+    facilitatorId,
+    from: from ?? undefined,
+    to: to ?? undefined,
+  };
 }
 
 export class InvoiceController {
@@ -294,6 +308,45 @@ export class InvoiceController {
       res.json({ items: result });
     } catch (err) {
       sendServiceError(res, err, 'Failed to load teacher balances');
+    }
+  }
+
+  /**
+   * Drill-down for one facilitator: summary + the allocations behind it
+   * (with payment/invoice links) + the reversements already paid.
+   */
+  async teacherBalanceDetail(req: Request, res: Response) {
+    try {
+      const result = await invoiceSplitService.teacherBalanceDetail(
+        req.params.facilitatorId,
+      );
+      res.json(result);
+    } catch (err) {
+      sendServiceError(res, err, 'Failed to load teacher balance detail');
+    }
+  }
+
+  /** Record a reversement (payout) to a facilitator — cash/cheque/transfer/Stripe. */
+  async recordPayout(req: Request, res: Response) {
+    try {
+      const b = req.body ?? {};
+      const result = await facilitatorPayoutService.record(
+        req.params.facilitatorId,
+        {
+          amountCents: Math.round(Number(b.amountCents)),
+          method:
+            typeof b.method === 'string'
+              ? (b.method.toUpperCase() as PayoutMethod)
+              : ('' as PayoutMethod),
+          currency: typeof b.currency === 'string' ? b.currency : undefined,
+          reference: typeof b.reference === 'string' ? b.reference : null,
+          note: typeof b.note === 'string' ? b.note : null,
+          paidAt: typeof b.paidAt === 'string' ? b.paidAt : null,
+        },
+      );
+      res.status(201).json(result);
+    } catch (err) {
+      sendServiceError(res, err, 'Failed to record facilitator payout');
     }
   }
 }

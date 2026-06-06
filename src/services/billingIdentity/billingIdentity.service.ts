@@ -56,6 +56,7 @@ export type BillingIdentityDto = {
   rcs: string | null;
   iban: string | null;
   bic: string | null;
+  stripeAccountId: string | null;
   invoicePrefix: string | null;
   logoUrl: string | null;
   vatExempt: boolean;
@@ -86,6 +87,7 @@ export type BillingIdentityInput = {
   rcs?: string | null;
   iban?: string | null;
   bic?: string | null;
+  stripeAccountId?: string | null;
   invoicePrefix?: string | null;
   logoUrl?: string | null;
   vatExempt?: boolean;
@@ -127,6 +129,7 @@ const STRING_FIELDS = [
   'rcs',
   'iban',
   'bic',
+  'stripeAccountId',
   'invoicePrefix',
   'logoUrl',
   'vatExemptMention',
@@ -178,6 +181,7 @@ function rowToDto(row: any): BillingIdentityDto {
     rcs: row.rcs ?? null,
     iban: row.iban ?? null,
     bic: row.bic ?? null,
+    stripeAccountId: row.stripeAccountId ?? null,
     invoicePrefix: row.invoicePrefix ?? null,
     logoUrl: row.logoUrl ?? null,
     vatExempt: !!row.vatExempt,

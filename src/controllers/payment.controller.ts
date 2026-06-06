@@ -52,7 +52,25 @@ function parseFilters(req: Request): ListPaymentsFilters {
     typeof req.query.invoiceId === 'string' && req.query.invoiceId
       ? req.query.invoiceId
       : undefined;
-  return { status, purpose, method, chequeStatus, invoiceId, from, to };
+  const clientId =
+    typeof req.query.clientId === 'string' && req.query.clientId
+      ? req.query.clientId
+      : undefined;
+  const facilitatorId =
+    typeof req.query.facilitatorId === 'string' && req.query.facilitatorId
+      ? req.query.facilitatorId
+      : undefined;
+  return {
+    status,
+    purpose,
+    method,
+    chequeStatus,
+    invoiceId,
+    clientId,
+    facilitatorId,
+    from,
+    to,
+  };
 }
 
 function parsePagingInt(raw: unknown, fallback: number): number {
@@ -141,7 +159,22 @@ export class PaymentController {
           : undefined;
       const includeCashed =
         req.query.includeCashed === 'true' || req.query.includeCashed === '1';
-      const result = await paymentService.listCheques({ chequeStatus, includeCashed });
+      const clientId =
+        typeof req.query.clientId === 'string' && req.query.clientId
+          ? req.query.clientId
+          : undefined;
+      const facilitatorId =
+        typeof req.query.facilitatorId === 'string' && req.query.facilitatorId
+          ? req.query.facilitatorId
+          : undefined;
+      const result = await paymentService.listCheques({
+        chequeStatus,
+        includeCashed,
+        clientId,
+        facilitatorId,
+        from: parseDate(req.query.from),
+        to: parseDate(req.query.to),
+      });
       res.json(result);
     } catch (err) {
       sendServiceError(res, err, 'Failed to list cheques');

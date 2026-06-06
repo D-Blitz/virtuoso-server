@@ -29,6 +29,8 @@ export type ListPaymentsFilters = {
   method?: string;     // STRIPE | CHECK | CASH | BANK_TRANSFER | OTHER
   chequeStatus?: string; // PENDING_DEPOSIT | DEPOSITED | CASHED
   invoiceId?: string;
+  clientId?: string;
+  facilitatorId?: string;
   from?: Date;
   to?: Date;
 };
@@ -118,6 +120,24 @@ export class PaymentService {
     return organizationId;
   }
 
+  /**
+   * OR branches that match a payment "touching" a facilitator: a direct
+   * allocation to them ("encaissé pour le compte de"), settling an invoice
+   * with a line tagged to them (teacher split), or being tied to a scheduled
+   * event they run. Shared by the payments list and the cheque tracker.
+   */
+  private facilitatorPaymentOr(facilitatorId: string) {
+    return [
+      { allocations: { some: { facilitatorId } } },
+      {
+        relatedScheduledEvent: {
+          facilitators: { some: { id: facilitatorId } },
+        },
+      },
+      { invoice: { lines: { some: { facilitatorId } } } },
+    ];
+  }
+
   private buildWhere(filters: ListPaymentsFilters) {
     return {
       ...(filters.status ? { status: filters.status } : {}),
@@ -125,6 +145,10 @@ export class PaymentService {
       ...(filters.method ? { method: filters.method } : {}),
       ...(filters.chequeStatus ? { chequeStatus: filters.chequeStatus } : {}),
       ...(filters.invoiceId ? { invoiceId: filters.invoiceId } : {}),
+      ...(filters.clientId ? { clientId: filters.clientId } : {}),
+      ...(filters.facilitatorId
+        ? { OR: this.facilitatorPaymentOr(filters.facilitatorId) }
+        : {}),
       ...(filters.from || filters.to
         ? {
             createdAt: {
@@ -473,7 +497,14 @@ export class PaymentService {
    * filter, or `includeCashed` to see the full history.
    */
   async listCheques(
-    filters: { chequeStatus?: string; includeCashed?: boolean } = {},
+    filters: {
+      chequeStatus?: string;
+      includeCashed?: boolean;
+      clientId?: string;
+      facilitatorId?: string;
+      from?: Date;
+      to?: Date;
+    } = {},
   ) {
     const organizationId = this.requireOrg();
     const where: Record<string, unknown> = { organizationId, method: 'CHECK' };
@@ -485,6 +516,20 @@ export class PaymentService {
       where.chequeStatus = filters.chequeStatus;
     } else if (!filters.includeCashed) {
       where.chequeStatus = { in: ['PENDING_DEPOSIT', 'DEPOSITED'] };
+    }
+
+    // Shared ledger filters (client / intervenant / période). The facilitator
+    // linkage mirrors the payments list — direct allocation, settled-invoice
+    // line tag, or scheduled-event assignment.
+    if (filters.clientId) where.clientId = filters.clientId;
+    if (filters.facilitatorId) {
+      where.OR = this.facilitatorPaymentOr(filters.facilitatorId);
+    }
+    if (filters.from || filters.to) {
+      where.createdAt = {
+        ...(filters.from ? { gte: filters.from } : {}),
+        ...(filters.to ? { lte: filters.to } : {}),
+      };
     }
 
     const items = await prisma.payment.findMany({

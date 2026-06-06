@@ -133,6 +133,34 @@ export class StripeService {
   }
 
   /**
+   * Stripe Connect transfer — move money from the platform balance to a
+   * facilitator's connected account (`destination` = acct_…). Used to pay out
+   * a "reversement" when the admin picks the Stripe method on
+   * /admin/soldes-intervenants. Throws on Stripe errors (no connected account,
+   * insufficient platform balance, Connect not enabled); the caller surfaces
+   * the message. Returns the transfer id (tr_…) recorded on the payout.
+   */
+  async createTransfer(args: {
+    amountCents: number;
+    currency: string;
+    destination: string;
+    metadata?: Record<string, string>;
+    idempotencyKey?: string;
+  }): Promise<{ id: string }> {
+    const stripe = getStripe();
+    const transfer = await stripe.transfers.create(
+      {
+        amount: args.amountCents,
+        currency: args.currency.toLowerCase(),
+        destination: args.destination,
+        metadata: args.metadata,
+      },
+      args.idempotencyKey ? { idempotencyKey: args.idempotencyKey } : undefined,
+    );
+    return { id: transfer.id };
+  }
+
+  /**
    * Verify the webhook signature and parse the event. Throws if invalid.
    * `rawBody` MUST be the unparsed request body (Buffer).
    */
