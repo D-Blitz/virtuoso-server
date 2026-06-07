@@ -90,6 +90,20 @@ export class AvailabilityService {
       select: { facilitatorId: true, startTime: true, endTime: true },
     });
 
+    // N.4 — unavailabilities for the candidate facilitator(s) overlapping
+    // the requested window. Trashed rows are filtered by the scoping
+    // extension. A room-targeted block doesn't surface here because slot
+    // suggestion is room-agnostic — the room is picked later in the flow;
+    // the room-conflict pass catches it then.
+    const unavailabilities = await prisma.unavailability.findMany({
+      where: {
+        facilitatorId: { in: params.facilitatorIds },
+        startTime: { lt: params.to },
+        endTime: { gt: params.from },
+      },
+      select: { facilitatorId: true, startTime: true, endTime: true },
+    });
+
     const slots: Slot[] = [];
 
     for (const f of facilitators) {
@@ -133,8 +147,18 @@ export class AvailabilityService {
                   h.facilitatorId === f.id &&
                   overlaps(h.startTime, h.endTime, slotStart, slotEnd),
               );
+              const conflictUnavailability = unavailabilities.some(
+                (u) =>
+                  u.facilitatorId === f.id &&
+                  overlaps(u.startTime, u.endTime, slotStart, slotEnd),
+              );
 
-              if (!conflictEvent && !conflictClosure && !conflictHold) {
+              if (
+                !conflictEvent &&
+                !conflictClosure &&
+                !conflictHold &&
+                !conflictUnavailability
+              ) {
                 slots.push({
                   facilitatorId: f.id,
                   startTime: slotStart.toISOString(),

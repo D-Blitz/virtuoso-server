@@ -27,6 +27,8 @@ const TENANT_SCOPED_MODELS = new Set<string>([
   // auto-injection of organizationId applies cleanly. The service also
   // scopes explicitly (defence-in-depth, like Invoice).
   'BillingIdentity',
+  // N.4 — facilitator / room blocking ranges. Always admin-created.
+  'Unavailability',
 ]);
 
 /**
@@ -59,6 +61,9 @@ const SOFT_DELETE_MODELS = new Set<string>([
   // flows because the extension scopes findUnique/findFirst by
   // deletedAt: null by default.
   'WidgetFlow',
+  // N.4 — trashable to mirror the lesson model; the booking-flow
+  // scope filter then auto-excludes trashed blocks without extra code.
+  'Unavailability',
 ]);
 
 /**

@@ -182,6 +182,21 @@ export function snapshotClosure(c: Nullable<any>): object | null {
   };
 }
 
+export function snapshotUnavailability(u: Nullable<any>): object | null {
+  if (!u) return null;
+  return {
+    id: u.id,
+    startTime: dateToIso(u.startTime),
+    endTime: dateToIso(u.endTime),
+    reason: u.reason,
+    facilitatorId: u.facilitatorId,
+    roomId: u.roomId,
+    recurrenceGroupId: u.recurrenceGroupId,
+    recurrenceFrequency: u.recurrenceFrequency,
+    recurrenceEndDate: dateToIso(u.recurrenceEndDate),
+  };
+}
+
 export function snapshotEnrollment(e: Nullable<any>): object | null {
   if (!e) return null;
   return {

@@ -18,7 +18,13 @@ export type ValidationCode =
   | 'FACILITATOR_UNAVAILABLE'
   | 'FACILITATOR_LOCATION_MISMATCH'
   | 'SERVICE_NOT_OFFERED'
-  | 'PRICE_MISMATCH';
+  | 'PRICE_MISMATCH'
+  // N.4 — Unavailability conflicts. Distinct from *_UNAVAILABLE (which
+  // means "no weekly window declared") and *_CONFLICT (which means
+  // "another booking is already there"). _BLOCKED means an admin
+  // explicitly marked this time as unavailable.
+  | 'ROOM_BLOCKED'
+  | 'FACILITATOR_BLOCKED';
 
 export interface ValidationIssue {
   type: ValidationType;
@@ -238,6 +244,31 @@ export async function validateScheduledEvent(rawInput: ScheduledEventInput): Pro
     });
   }
 
+  // ---- N.4 Unavailability — room + facilitator blocking ranges --------
+  // One query covers both resources. Trashed rows are filtered by the
+  // scoping extension (so deleted blocks don't haunt the admin).
+  const blocking = await prisma.unavailability.findMany({
+    where: {
+      startTime: { lt: end },
+      endTime: { gt: start },
+      OR: [
+        { roomId: room.id },
+        ...(facilitators.length > 0
+          ? [{ facilitatorId: { in: facilitators } }]
+          : []),
+      ],
+    },
+    select: { roomId: true, facilitatorId: true, reason: true },
+  });
+
+  if (blocking.some((b) => b.roomId === room.id)) {
+    issues.push({
+      type: 'warning',
+      code: 'ROOM_BLOCKED',
+      message: `La salle "${room.name}" est marquée indisponible sur ce créneau.`,
+    });
+  }
+
   // ---- Facilitator warnings (only for selected facilitators) ----
   for (const facilitatorId of facilitators) {
     const facilitator = facilitatorList.find(f => f.id === facilitatorId);
@@ -271,6 +302,14 @@ export async function validateScheduledEvent(rawInput: ScheduledEventInput): Pro
         type: 'warning',
         code: 'FACILITATOR_CONFLICT',
         message: `L'intervenant ${facilitator.firstname} ${facilitator.lastname} a déjà un événement à cette heure.`,
+      });
+    }
+
+    if (blocking.some((b) => b.facilitatorId === facilitator.id)) {
+      issues.push({
+        type: 'warning',
+        code: 'FACILITATOR_BLOCKED',
+        message: `L'intervenant ${facilitator.firstname} ${facilitator.lastname} est marqué indisponible sur ce créneau.`,
       });
     }
 

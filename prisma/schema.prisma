@@ -57,6 +57,9 @@ model Organization {
   widgetFlows        WidgetFlow[]
   widgetRuns         WidgetRun[]
   engineActionEvents EngineActionEvent[]
+
+  // N.4 — one-time / recurring teacher + room unavailability blocks.
+  unavailabilities Unavailability[]
 }
 
 model User {
@@ -251,6 +254,9 @@ model Facilitator {
   // Payouts the org has made to this facilitator (reversements).
   payouts            FacilitatorPayout[]
 
+  // N.4 — time ranges where this facilitator is unbookable.
+  unavailabilities Unavailability[]
+
   // Recommender scoring (consumed by the booking widget's recommender service)
   ageScores      Json     @default("[]") // [{min:number, max:number, score:number}]
   levelScores    Json     @default("{}") // {BEGINNER:number, INTERMEDIATE:number, ADVANCED:number}
@@ -297,6 +303,9 @@ model Room {
   location     Location         @relation(fields: [locationId], references: [id])
   events       ScheduledEvent[]
   enrollments  Enrollment[]
+
+  // N.4 — time ranges where this room is blocked.
+  unavailabilities Unavailability[]
 
   // Trash bin (Phase 0.5)
   deletedAt   DateTime?
@@ -667,6 +676,69 @@ model Enrollment {
   @@index([organizationId, status])
   @@index([clientId])
   @@index([termId])
+  @@index([deletedAt])
+}
+
+// =========================================================================
+// Unavailability (N.4) — a time range during which a SINGLE resource (one
+// facilitator OR one room) is blocked from booking. Used by:
+//   - the booking widget's slot suggester (the slot is dropped)
+//   - the admin event-create validator (the slot raises a conflict warning)
+//   - the room-conflict check on event import
+//
+// Exactly one of facilitatorId / roomId is set; the *.service layer enforces
+// this — Prisma has no `CHECK` constraint surface.
+//
+// Recurrence is delivered by eager materialization: a "every Tuesday morning
+// until June" declaration creates N rows in one transaction, all sharing
+// `recurrenceGroupId`. Each row is editable on its own (THIS scope); a
+// fan-out edit / delete uses the group id (ALL scope). This intentionally
+// does NOT reuse RecurrenceSeries — that table is bound to lesson-specific
+// defaults (price, color, room, location, service) that don't generalize to
+// blocking ranges; making those columns nullable would dilute the lesson
+// schema's invariants. The pure generator in domain/recurrence is reused
+// instead, so the recurrence RULES are identical to those of lessons.
+// =========================================================================
+model Unavailability {
+  id        String   @id @default(cuid())
+  startTime DateTime
+  endTime   DateTime
+
+  // Free-text reason (e.g. "Arrêt maladie", "Travaux de la salle"). Surfaced
+  // in the tooltip on the calendar block; not used for any logic.
+  reason String?
+
+  // Exactly one of these two is set (app-level invariant). Nulls let either
+  // resource be the target without forcing a sentinel row.
+  facilitatorId String?
+  facilitator   Facilitator? @relation(fields: [facilitatorId], references: [id])
+
+  roomId String?
+  room   Room?   @relation(fields: [roomId], references: [id])
+
+  // Recurrence — shared id across the materialized siblings of a single
+  // declaration. NULL for one-shot blocks. The rule fields are denormalized
+  // onto every sibling so each row is self-describing (no parent join just
+  // to render a block in the calendar tooltip).
+  recurrenceGroupId   String?
+  recurrenceFrequency String? // WEEKLY | BIWEEKLY | MONTHLY | BIMONTHLY | TRIMESTRAL | SEMIANNUAL | YEARLY
+  recurrenceEndDate   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Trash bin (Phase 0.5) — soft delete + restore from /admin/corbeille.
+  deletedAt   DateTime?
+  deletedById String?
+
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  // Indexes — calendar range scan + conflict check.
+  @@index([organizationId, startTime])
+  @@index([facilitatorId, startTime, endTime])
+  @@index([roomId, startTime, endTime])
+  @@index([recurrenceGroupId])
   @@index([deletedAt])
 }
 

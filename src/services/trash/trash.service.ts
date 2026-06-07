@@ -13,6 +13,7 @@ import {
   snapshotServiceCategory,
   snapshotTag,
   snapshotTerm,
+  snapshotUnavailability,
   snapshotWidgetFlow,
 } from '../audit/snapshots';
 import { hardPurgeTrashed, restoreSoftDeleted } from './softDelete';
@@ -35,7 +36,8 @@ export type SoftDeletableEntityType =
   | 'Term'
   | 'Closure'
   | 'Enrollment'
-  | 'WidgetFlow';
+  | 'WidgetFlow'
+  | 'Unavailability';
 
 export const SOFT_DELETABLE_ENTITY_TYPES: SoftDeletableEntityType[] = [
   'ScheduledEvent',
@@ -51,6 +53,7 @@ export const SOFT_DELETABLE_ENTITY_TYPES: SoftDeletableEntityType[] = [
   'Closure',
   'Enrollment',
   'WidgetFlow',
+  'Unavailability',
 ];
 
 /**
@@ -95,6 +98,8 @@ function snapshotterFor(
       return snapshotEnrollment;
     case 'WidgetFlow':
       return snapshotWidgetFlow;
+    case 'Unavailability':
+      return snapshotUnavailability;
   }
 }
 
@@ -156,6 +161,21 @@ function labelFor(entityType: SoftDeletableEntityType, row: any): string {
       return `Inscription ${row.id.slice(0, 8)}`;
     case 'WidgetFlow':
       return row.name;
+    case 'Unavailability': {
+      const when = new Date(row.startTime).toLocaleString('fr-FR', {
+        weekday: 'short',
+        day: 'numeric',
+        month: 'short',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+      const who = row.facilitatorId
+        ? `intervenant ${row.facilitatorId.slice(0, 6)}`
+        : row.roomId
+          ? `salle ${row.roomId.slice(0, 6)}`
+          : 'inconnu';
+      return `Indispo ${when} (${who})`;
+    }
   }
 }
 
