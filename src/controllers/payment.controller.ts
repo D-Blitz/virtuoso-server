@@ -129,6 +129,7 @@ export class PaymentController {
         method: b.method as RecordManualPaymentInput['method'],
         currency: typeof b.currency === 'string' ? b.currency : undefined,
         purpose: typeof b.purpose === 'string' ? b.purpose : undefined,
+        expected: b.expected === true,
         receivedAt: parseDate(b.receivedAt) ?? null,
         reference: typeof b.reference === 'string' ? b.reference : null,
         payerName: typeof b.payerName === 'string' ? b.payerName : null,
@@ -146,6 +147,19 @@ export class PaymentController {
       res.status(201).json(result);
     } catch (err) {
       sendServiceError(res, err, 'Failed to record payment');
+    }
+  }
+
+  /**
+   * POST /api/payments/:id/mark-paid — settle an EXPECTED payment (en attente
+   * de règlement → réglé). Flips a PENDING non-cheque tender to SUCCEEDED.
+   */
+  async markPaid(req: Request, res: Response) {
+    try {
+      const result = await paymentService.markManualPaid(req.params.id);
+      res.json(result);
+    } catch (err) {
+      sendServiceError(res, err, 'Failed to mark payment as paid');
     }
   }
 

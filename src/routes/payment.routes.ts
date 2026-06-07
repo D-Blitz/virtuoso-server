@@ -26,6 +26,10 @@ router.post('/manual', requirePermission('PAYMENT_MANAGE'), (req, res) =>
 router.patch('/:id/cheque-status', requirePermission('PAYMENT_MANAGE'), (req, res) =>
   controller.setChequeStatus(req, res),
 );
+// Settle an expected payment (en attente de règlement → réglé).
+router.post('/:id/mark-paid', requirePermission('PAYMENT_MANAGE'), (req, res) =>
+  controller.markPaid(req, res),
+);
 // Payment-first billing — generate a numbered invoice from a standalone payment.
 router.post('/:id/generate-invoice', requirePermission('PAYMENT_MANAGE'), (req, res) =>
   controller.generateInvoice(req, res),

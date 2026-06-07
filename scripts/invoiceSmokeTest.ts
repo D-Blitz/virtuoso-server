@@ -990,6 +990,44 @@ async function main() {
           }
         }
       }
+
+      // ── 17. Expected payment ("en attente de règlement") → settled ────────
+      //     A non-cheque tender recorded as EXPECTED stays PENDING with no
+      //     receivedAt (we don't claim money we haven't collected). markManualPaid
+      //     is what books it: status → SUCCEEDED with receivedAt stamped. Cheques
+      //     are refused here — they settle through the cheque tracker only.
+      console.log('\n17. Expected payment stays PENDING, settles via markManualPaid');
+      {
+        const exp = await paymentService.recordManual({
+          clientId: client.id,
+          amountCents: 6000,
+          method: 'CASH',
+          expected: true,
+        });
+        assertEq(exp.status, 'PENDING', 'expected cash payment is PENDING, not SUCCEEDED');
+        assertEq(exp.receivedAt, null, 'expected payment has no receivedAt yet');
+
+        const settled = await paymentService.markManualPaid(exp.id);
+        assertEq(settled.status, 'SUCCEEDED', 'markManualPaid settles → SUCCEEDED');
+        assert(settled.receivedAt != null, 'markManualPaid stamps receivedAt on settle');
+
+        // Idempotent: re-settling an already-settled payment is a no-op, not an error.
+        const again = await paymentService.markManualPaid(exp.id);
+        assertEq(again.status, 'SUCCEEDED', 'markManualPaid is idempotent on SUCCEEDED');
+
+        // A cheque is NOT settled here — the cheque tracker stays the source of truth.
+        const chqGuard = await paymentService.recordManual({
+          clientId: client.id,
+          amountCents: 4200,
+          method: 'CHECK',
+          chequeNumber: '0007777',
+          chequeBank: 'Crédit Mutuel',
+        });
+        await expectThrow(
+          () => paymentService.markManualPaid(chqGuard.id),
+          'markManualPaid refuses a cheque (settled via the tracker)',
+        );
+      }
     });
   } finally {
     await purge(organizationId);

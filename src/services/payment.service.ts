@@ -96,6 +96,11 @@ export type RecordManualPaymentInput = {
   method: 'CHECK' | 'CASH' | 'BANK_TRANSFER' | 'OTHER';
   currency?: string;
   purpose?: string;
+  // "En attente de règlement" — record the tender as EXPECTED (status PENDING)
+  // rather than settled. For an enrollment whose client hasn't paid yet: the
+  // row shows in the ledger as pending and is settled later via markManualPaid.
+  // Ignored for cheques (they're inherently PENDING until cashed).
+  expected?: boolean;
   receivedAt?: Date | null;
   reference?: string | null;
   payerName?: string | null;
@@ -299,8 +304,13 @@ export class PaymentService {
     }
 
     const isCheque = input.method === 'CHECK';
+    // Expected (en attente de règlement): a non-cheque tender we know is coming
+    // but haven't collected. Recorded PENDING and not yet "received" — settle it
+    // later with markManualPaid. Cheques have their own PENDING lifecycle.
+    const expected = !isCheque && input.expected === true;
     const amountCents = Math.round(input.amountCents);
-    const receivedAt = input.receivedAt ?? new Date();
+    // Don't claim an expected payment was received; stamp the date on settle.
+    const receivedAt = expected ? input.receivedAt ?? null : input.receivedAt ?? new Date();
 
     // Validate direct "encaissé pour le compte de" allocations BEFORE creating
     // the payment, so a bad split (unknown facilitator / over-allocation) can
@@ -317,7 +327,7 @@ export class PaymentService {
         clientId: input.clientId,
         amountCents,
         currency: input.currency ?? 'EUR',
-        status: isCheque ? 'PENDING' : 'SUCCEEDED',
+        status: isCheque || expected ? 'PENDING' : 'SUCCEEDED',
         purpose: input.purpose ?? 'ENROLLMENT_BALANCE',
         method: input.method,
         invoiceId,
@@ -424,6 +434,70 @@ export class PaymentService {
       facilitatorId,
       amountCents: byFacilitator.get(facilitatorId)!,
     }));
+  }
+
+  /**
+   * Settle an EXPECTED payment (en attente de règlement → réglé): flip a
+   * PENDING non-cheque tender to SUCCEEDED, stamp receivedAt, and recompute any
+   * linked invoice + rebuild its allocations (PENDING payments allocate nothing,
+   * so settling is what books the income). Cheques are intentionally NOT settled
+   * here — they clear through the cheque tracker (setChequeStatus → CASHED),
+   * which stays the single source of truth for cheque income. Stripe rows settle
+   * via their webhook, never by hand.
+   */
+  async markManualPaid(paymentId: string) {
+    const organizationId = this.requireOrg();
+
+    const payment = await prisma.payment.findFirst({
+      where: { id: paymentId, organizationId },
+    });
+    if (!payment) throw httpError('Paiement introuvable.', 404);
+    if (payment.method === 'CHECK') {
+      throw httpError(
+        'Un chèque se règle via le suivi des chèques (« marquer encaissé »).',
+        409,
+      );
+    }
+    if (payment.method === 'STRIPE') {
+      throw httpError('Un paiement par carte ne se règle pas manuellement.', 409);
+    }
+    if (payment.status === 'SUCCEEDED') return payment; // idempotent no-op
+    if (payment.status !== 'PENDING') {
+      throw httpError(
+        'Seul un paiement en attente peut être marqué comme réglé.',
+        409,
+      );
+    }
+
+    const updated = await prisma.payment.update({
+      where: { id: paymentId },
+      data: {
+        status: 'SUCCEEDED',
+        receivedAt: payment.receivedAt ?? new Date(),
+      },
+      include: {
+        client: { select: paymentClientSelect },
+        invoice: { select: { id: true, number: true } },
+      },
+    });
+
+    // Now recognised income: settle the linked invoice (if any) and (re)build
+    // allocations — invoice-derived for an invoiced payment, or the direct
+    // "encaissé pour le compte de" rows that were stored at record time.
+    if (updated.invoiceId) {
+      await invoiceService.recomputeStatus(updated.invoiceId);
+    }
+    await syncAllocationsForPayment(updated.id);
+
+    void auditLog.record({
+      action: 'UPDATE',
+      entityType: 'Payment',
+      entityId: paymentId,
+      before: { status: payment.status },
+      after: { status: updated.status },
+    });
+
+    return updated;
   }
 
   /**
