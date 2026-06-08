@@ -8,6 +8,10 @@ const controller = new RoomController();
 router.get('/', requirePermission('ROOM_MANAGE'), (req, res) =>
   controller.getAll(req, res),
 );
+// N.6.9 — aggregated activity + revenue for the room UID page.
+router.get('/:id/insights', requirePermission('ROOM_MANAGE'), (req, res) =>
+  controller.insights(req, res),
+);
 router.post('/', requirePermission('ROOM_MANAGE'), (req, res) =>
   controller.create(req, res),
 );

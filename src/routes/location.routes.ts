@@ -8,6 +8,10 @@ const controller = new LocationController();
 router.get('/', requirePermission('LOCATION_MANAGE'), (req, res) =>
   controller.getAll(req, res),
 );
+// N.6.9 — aggregated activity + revenue for the location UID page.
+router.get('/:id/insights', requirePermission('LOCATION_MANAGE'), (req, res) =>
+  controller.insights(req, res),
+);
 router.post('/', requirePermission('LOCATION_MANAGE'), (req, res) =>
   controller.create(req, res),
 );
