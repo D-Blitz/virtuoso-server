@@ -1,8 +1,15 @@
 import { Request, Response } from 'express';
 import { FacilitatorService } from '../services/facilitator.service';
+import { facilitatorInsightsService } from '../services/facilitatorInsights.service';
 import { sendError } from './httpErrors';
 
 const facilitatorService = new FacilitatorService();
+
+function parseDateOr(raw: unknown, fallback: Date): Date {
+  if (typeof raw !== 'string' || !raw) return fallback;
+  const d = new Date(raw);
+  return Number.isNaN(d.getTime()) ? fallback : d;
+}
 
 export class FacilitatorController {
   async create(req: Request, res: Response) {
@@ -40,6 +47,30 @@ export class FacilitatorController {
       res.status(204).send();
     } catch (error) {
       sendError(res, error, 'Failed to delete facilitator');
+    }
+  }
+
+  /**
+   * N.6.3 — aggregated insights for the facilitator UID page. Defaults
+   * to the last 90 days when no `from` / `to` are supplied.
+   */
+  async insights(req: Request, res: Response) {
+    const { id } = req.params;
+    try {
+      const now = new Date();
+      const from = parseDateOr(
+        req.query.from,
+        new Date(now.getTime() - 90 * 24 * 3600_000),
+      );
+      const to = parseDateOr(req.query.to, now);
+      const payload = await facilitatorInsightsService.get({
+        facilitatorId: id,
+        from,
+        to,
+      });
+      res.json(payload);
+    } catch (error) {
+      sendError(res, error, 'Failed to compute facilitator insights');
     }
   }
 }

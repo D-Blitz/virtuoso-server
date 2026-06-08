@@ -10,6 +10,12 @@ router.get(
   requirePermission('FACILITATOR_VIEW'),
   (req, res) => controller.getAll(req, res),
 );
+// N.6.3 — aggregated metrics for the UID page's chart panel.
+router.get(
+  '/:id/insights',
+  requirePermission('FACILITATOR_VIEW'),
+  (req, res) => controller.insights(req, res),
+);
 router.post(
   '/',
   requirePermission('FACILITATOR_MANAGE'),
