@@ -14,5 +14,9 @@ router.get('/me', requirePermission('ADMIN_ACCESS'), (req, res) =>
 router.patch('/me', requirePermission('ORG_MANAGE'), (req, res) =>
   controller.updateMe(req, res),
 );
+// N.6.9 — org-wide aggregated dashboard payload for /admin/dashboard.
+router.get('/me/insights', requirePermission('ADMIN_ACCESS'), (req, res) =>
+  controller.insights(req, res),
+);
 
 export default router;
