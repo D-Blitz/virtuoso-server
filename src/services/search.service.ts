@@ -414,7 +414,7 @@ export class SearchService {
       label: `${r.firstname} ${r.lastname}`.trim(),
       sublabel: r.email || r.phone || null,
       meta: r.isBookable ? null : 'non réservable',
-      url: `/admin/prestataires?focus=${r.id}`,
+      url: `/admin/prestataires/${r.id}`,
       matchedField: matchedFieldFor(q, [r.firstname, r.lastname, r.email, r.phone]),
       image: r.profilePictureUrl || null,
       color: r.color || hashColor(r.id),
