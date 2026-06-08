@@ -658,13 +658,23 @@ export class SearchService {
       const who = firstClient
         ? `${firstClient.firstname} ${firstClient.lastname}`.trim()
         : '—';
+      // Encode the calendar destination directly in the URL so the
+      // calendar page can jump straight to the right day + location
+      // without a follow-up fetch. `date` is the YYYY-MM-DD form of the
+      // event's startTime (local) — selectedDate represents a day, the
+      // time-of-day is irrelevant here.
+      const start = r.startTime;
+      const yyyy = start.getFullYear();
+      const mm = String(start.getMonth() + 1).padStart(2, '0');
+      const dd = String(start.getDate()).padStart(2, '0');
+      const dateParam = `${yyyy}-${mm}-${dd}`;
       return {
         kind: 'event' as const,
         id: r.id,
         label: `${r.service?.name ?? 'Événement'} — ${fmtDateTime(r.startTime)}`,
         sublabel: who,
         meta: r.room?.name ? `Salle ${r.room.name}` : null,
-        url: `/?focus=${r.id}`,
+        url: `/?focus=${r.id}&date=${dateParam}&location=${r.locationId}`,
         matchedField: r.notes?.toLowerCase().includes(q.toLowerCase())
           ? 'notes'
           : 'mixed',
