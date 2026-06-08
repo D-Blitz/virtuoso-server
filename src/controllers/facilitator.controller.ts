@@ -63,10 +63,16 @@ export class FacilitatorController {
         new Date(now.getTime() - 90 * 24 * 3600_000),
       );
       const to = parseDateOr(req.query.to, now);
+      const str = (raw: unknown): string | undefined =>
+        typeof raw === 'string' && raw.length > 0 ? raw : undefined;
       const payload = await facilitatorInsightsService.get({
         facilitatorId: id,
         from,
         to,
+        locationId: str(req.query.locationId),
+        serviceId: str(req.query.serviceId),
+        roomId: str(req.query.roomId),
+        clientId: str(req.query.clientId),
       });
       res.json(payload);
     } catch (error) {

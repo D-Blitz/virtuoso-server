@@ -31,6 +31,22 @@ export interface InsightsParams {
   facilitatorId: string;
   from: Date;
   to: Date;
+  /**
+   * Optional dimension filters (N.6.7). When set, every aggregate in the
+   * payload is recomputed over events / payments that match. They
+   * compose with AND: passing locationId + serviceId scopes to events
+   * at THAT location AND for THAT service.
+   *
+   * Filters apply to:
+   *  - the events used in revenueByDimension + stats (sessions, hours,
+   *    cancellationRate, unique clients, topClients);
+   *  - the payment allocations used in revenueOverTime + revenueSplit
+   *    (via the payment's linked event matching the filter).
+   */
+  locationId?: string;
+  serviceId?: string;
+  roomId?: string;
+  clientId?: string;
 }
 
 interface BucketRow {
@@ -81,15 +97,24 @@ export class FacilitatorInsightsService {
    * with all aggregation done in JS so the shape stays explicit.
    */
   async get(params: InsightsParams): Promise<FacilitatorInsights> {
-    const { facilitatorId, from, to } = params;
+    const { facilitatorId, from, to, locationId, serviceId, roomId, clientId } =
+      params;
 
     // ── 1. Events the facilitator is on within the window ─────────────
+    // Dimension filters compose with AND. The client filter goes through
+    // the m2m relation; the rest are scalar matches on ScheduledEvent.
+    const eventFilter: any = {
+      facilitators: { some: { id: facilitatorId } },
+      startTime: { lte: to },
+      endTime: { gte: from },
+    };
+    if (locationId) eventFilter.locationId = locationId;
+    if (serviceId) eventFilter.serviceId = serviceId;
+    if (roomId) eventFilter.roomId = roomId;
+    if (clientId) eventFilter.clients = { some: { id: clientId } };
+
     const events = await prisma.scheduledEvent.findMany({
-      where: {
-        facilitators: { some: { id: facilitatorId } },
-        startTime: { lte: to },
-        endTime: { gte: from },
-      },
+      where: eventFilter,
       select: {
         id: true,
         startTime: true,
@@ -107,35 +132,66 @@ export class FacilitatorInsightsService {
     });
 
     // ── 2. PaymentAllocations attributed to the facilitator (FAC share)
-    // and to the school FOR INVOICES involving this facilitator. We use
-    // these for the headline revenue numbers.
+    // and to the school FOR INVOICES / PAYMENTS involving this facilitator.
+    // We use these for the headline revenue numbers.
     //
+    // When dimension filters are set, we narrow to allocations on payments
+    // whose linked event matches the filter — keeping the revenue chart
+    // in sync with the dimension breakdowns.
+    const paymentFilter: any = {};
+    const hasDimFilter = !!(locationId || serviceId || roomId || clientId);
+    if (hasDimFilter) {
+      const relatedEvent: any = {};
+      if (locationId) relatedEvent.locationId = locationId;
+      if (serviceId) relatedEvent.serviceId = serviceId;
+      if (roomId) relatedEvent.roomId = roomId;
+      if (clientId) relatedEvent.clients = { some: { id: clientId } };
+      paymentFilter.relatedScheduledEvent = relatedEvent;
+    }
+
     // (a) FAC slices that name this facilitator.
     const facAllocations = await prisma.paymentAllocation.findMany({
       where: {
         facilitatorId,
         beneficiaryType: 'FACILITATOR',
         createdAt: { gte: from, lte: to },
+        ...(hasDimFilter ? { payment: paymentFilter } : {}),
       },
       select: {
         amountCents: true,
         createdAt: true,
         invoiceId: true,
+        paymentId: true,
       },
     });
 
-    // (b) Invoices touched by a FAC allocation in (a) — we sum the SCHOOL
-    // slices on the SAME invoices so the donut compares the FAC's share
+    // (b) SCHOOL slices on the SAME payments / invoices that produced the
+    // FAC slices above. Invoices first (Phase D split), then payments
+    // (for invoice-less direct allocations). Pairing by the same
+    // payments / invoices keeps the donut comparing the FAC's share
     // against the school's share for the same body of work.
     const invoiceIds = Array.from(
-      new Set(facAllocations.map((a) => a.invoiceId).filter(Boolean)),
+      new Set(
+        facAllocations.map((a) => a.invoiceId).filter(Boolean),
+      ),
     ) as string[];
+    const paymentIds = Array.from(
+      new Set(facAllocations.map((a) => a.paymentId).filter(Boolean)),
+    ) as string[];
+
     const schoolAllocations =
-      invoiceIds.length > 0
+      invoiceIds.length > 0 || paymentIds.length > 0
         ? await prisma.paymentAllocation.findMany({
             where: {
-              invoiceId: { in: invoiceIds },
               beneficiaryType: 'SCHOOL',
+              OR: [
+                ...(invoiceIds.length > 0
+                  ? [{ invoiceId: { in: invoiceIds } }]
+                  : []),
+                ...(paymentIds.length > 0
+                  ? [{ paymentId: { in: paymentIds } }]
+                  : []),
+              ],
             },
             select: { amountCents: true, createdAt: true },
           })
