@@ -496,7 +496,7 @@ export class SearchService {
       label: `${r.firstname} ${r.lastname}`.trim(),
       sublabel: r.email || r.phone || null,
       meta: r.address || null,
-      url: `/admin/clients?focus=${r.id}`,
+      url: `/admin/clients/${r.id}`,
       matchedField: matchedFieldFor(q, [r.firstname, r.lastname, r.email, r.phone]),
       image: null,
       color: hashColor(r.id),

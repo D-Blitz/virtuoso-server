@@ -12,6 +12,12 @@ router.get(
   requirePermission('CLIENT_VIEW'),
   (req, res) => controller.getAll(req, res),
 );
+// N.6.8 — aggregated metrics for the UID page's chart panel.
+router.get(
+  '/:id/insights',
+  requirePermission('CLIENT_VIEW'),
+  (req, res) => controller.insights(req, res),
+);
 router.post(
   '/',
   requirePermission('CLIENT_MANAGE'),
