@@ -46,6 +46,15 @@ export interface SearchHit {
   url: string;
   /** Which column matched — purely diagnostic, the UI may surface it. */
   matchedField: string;
+  // ── Visual fields (N.5 polish 2026-06-08) ─────────────────────────
+  /** Profile picture URL (facilitators). Falls back to `initials` + `color`. */
+  image: string | null;
+  /** Hex colour for the avatar / status chip. */
+  color: string | null;
+  /** 1-2 letters drawn over the colour avatar (people only). */
+  initials: string | null;
+  /** Lifecycle status surfaced as a pill (invoice / payment / enrollment / event). */
+  status: string | null;
 }
 
 export interface SearchGroup {
@@ -135,6 +144,33 @@ function fmtDate(d: Date): string {
     month: 'short',
     year: 'numeric',
   });
+}
+
+function initialsOf(first?: string | null, last?: string | null): string {
+  const f = (first ?? '').trim();
+  const l = (last ?? '').trim();
+  const parts = [f.charAt(0), l.charAt(0)].filter(Boolean);
+  if (parts.length > 0) return parts.join('').toUpperCase();
+  // Single token (label-only entities) — first two letters.
+  const single = `${f}${l}`.trim();
+  return single.slice(0, 2).toUpperCase() || '—';
+}
+
+/**
+ * Deterministic colour from a string id — for entities that don't have an
+ * explicit `color` column (clients, locations). Stable across requests so
+ * the same client always gets the same avatar tint.
+ */
+function hashColor(seed: string): string {
+  const palette = [
+    '#5B8DEF', '#7A57D1', '#22A06B', '#E8985E', '#D85C5C',
+    '#3FB3CC', '#A3A647', '#C4659A', '#6F7B85', '#4D72A1',
+  ];
+  let h = 0;
+  for (let i = 0; i < seed.length; i++) {
+    h = (h * 31 + seed.charCodeAt(i)) | 0;
+  }
+  return palette[Math.abs(h) % palette.length];
 }
 
 // ── Where-clause builders (used for both findMany + count) ────────────
@@ -380,6 +416,10 @@ export class SearchService {
       meta: r.isBookable ? null : 'non réservable',
       url: `/admin/prestataires?focus=${r.id}`,
       matchedField: matchedFieldFor(q, [r.firstname, r.lastname, r.email, r.phone]),
+      image: r.profilePictureUrl || null,
+      color: r.color || hashColor(r.id),
+      initials: initialsOf(r.firstname, r.lastname),
+      status: r.isBookable ? null : 'NON_BOOKABLE',
     }));
     return { hits, total };
   }
@@ -404,6 +444,10 @@ export class SearchService {
       meta: r.notes?.slice(0, 80) ?? null,
       url: `/admin/salles?focus=${r.id}`,
       matchedField: 'name',
+      image: null,
+      color: r.color || hashColor(r.id),
+      initials: initialsOf(r.name),
+      status: null,
     }));
     return { hits, total };
   }
@@ -427,6 +471,10 @@ export class SearchService {
       meta: r.description?.slice(0, 100) ?? null,
       url: `/admin/etablissements?focus=${r.id}`,
       matchedField: 'name',
+      image: null,
+      color: hashColor(r.id),
+      initials: initialsOf(r.name),
+      status: null,
     }));
     return { hits, total };
   }
@@ -450,6 +498,10 @@ export class SearchService {
       meta: r.address || null,
       url: `/admin/clients?focus=${r.id}`,
       matchedField: matchedFieldFor(q, [r.firstname, r.lastname, r.email, r.phone]),
+      image: null,
+      color: hashColor(r.id),
+      initials: initialsOf(r.firstname, r.lastname),
+      status: null,
     }));
     return { hits, total };
   }
@@ -473,6 +525,10 @@ export class SearchService {
       meta: r.description?.slice(0, 100) ?? null,
       url: `/admin/services?focus=${r.id}`,
       matchedField: 'name',
+      image: null,
+      color: hashColor(r.id),
+      initials: initialsOf(r.name),
+      status: r.bookingMode || null,
     }));
     return { hits, total };
   }
@@ -496,11 +552,15 @@ export class SearchService {
         id: r.id,
         label: `Facture ${r.number ?? r.id.slice(0, 8)}`,
         sublabel: `${who} — ${money(r.totalCents, r.currency)}`,
-        meta: `${r.status}${r.issueDate ? ` · ${fmtDate(r.issueDate)}` : ''}`,
+        meta: r.issueDate ? fmtDate(r.issueDate) : null,
         url: `/admin/invoices/${r.id}`,
         matchedField: r.number?.toLowerCase().includes(q.toLowerCase())
           ? 'number'
           : 'client',
+        image: null,
+        color: null,
+        initials: null,
+        status: r.status || null,
       };
     });
     return { hits, total };
@@ -526,11 +586,15 @@ export class SearchService {
         id: r.id,
         label: who || `Paiement ${r.id.slice(0, 8)}`,
         sublabel: what,
-        meta: `${r.status} · ${fmtDate(r.createdAt)}`,
+        meta: fmtDate(r.createdAt),
         url: `/admin/payments?focus=${r.id}`,
         matchedField: r.chequeNumber?.toLowerCase().includes(q.toLowerCase())
           ? 'chequeNumber'
           : 'client',
+        image: null,
+        color: null,
+        initials: null,
+        status: r.status || null,
       };
     });
     return { hits, total };
@@ -561,9 +625,13 @@ export class SearchService {
         id: r.id,
         label: who,
         sublabel: `${r.service?.name ?? '—'}${r.term ? ` · ${r.term.name}` : ''}`,
-        meta: `${r.status} · ${fmtDate(r.startDate)} → ${fmtDate(r.endDate)}`,
+        meta: `${fmtDate(r.startDate)} → ${fmtDate(r.endDate)}`,
         url: `/admin/enrollments/${r.id}`,
         matchedField: 'mixed',
+        image: null,
+        color: hashColor(r.id),
+        initials: initialsOf(r.client?.firstname, r.client?.lastname),
+        status: r.status || null,
       };
     });
     return { hits, total };
@@ -600,6 +668,10 @@ export class SearchService {
         matchedField: r.notes?.toLowerCase().includes(q.toLowerCase())
           ? 'notes'
           : 'mixed',
+        image: null,
+        color: r.color || null,
+        initials: null,
+        status: r.status || null,
       };
     });
     return { hits, total };
