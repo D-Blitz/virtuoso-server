@@ -1,6 +1,9 @@
 /**
  * Unavailability — N.4. One-time or recurring time ranges during which a
- * single resource (one facilitator OR one room) is blocked from booking.
+ * single target (one facilitator OR one room OR one location) is blocked
+ * from booking. A location-wide block (N.4.8) cascades to every room and
+ * every facilitator-on-this-location booking during the window —
+ * complements the date-only `Closure` model with time-of-day precision.
  *
  * Recurrence is delivered by eager materialization, mirroring lessons: a
  * single "every Tuesday morning until June" declaration writes N rows in
@@ -44,9 +47,10 @@ export interface CreateUnavailabilityInput {
   startTime: string; // ISO
   endTime: string; // ISO
   reason?: string | null;
-  /** Exactly one of facilitatorId / roomId. */
+  /** Exactly one of facilitatorId / roomId / locationId. */
   facilitatorId?: string | null;
   roomId?: string | null;
+  locationId?: string | null;
   /** Optional rule — when present, N rows are materialized. */
   recurrence?: UnavailabilityRecurrenceInput | null;
 }
@@ -57,6 +61,7 @@ export interface UpdateUnavailabilityInput {
   reason?: string | null;
   facilitatorId?: string | null;
   roomId?: string | null;
+  locationId?: string | null;
 }
 
 export interface ListUnavailabilityFilters {
@@ -66,6 +71,7 @@ export interface ListUnavailabilityFilters {
   to?: Date;
   facilitatorId?: string;
   roomId?: string;
+  locationId?: string;
 }
 
 function parseDateStrict(s: string, label: string): Date {
@@ -76,12 +82,16 @@ function parseDateStrict(s: string, label: string): Date {
   return d;
 }
 
-function assertSingleResource(facilitatorId?: string | null, roomId?: string | null) {
-  const hasFac = !!facilitatorId;
-  const hasRoom = !!roomId;
-  if (hasFac === hasRoom) {
+function assertSingleResource(
+  facilitatorId?: string | null,
+  roomId?: string | null,
+  locationId?: string | null,
+) {
+  const count =
+    (facilitatorId ? 1 : 0) + (roomId ? 1 : 0) + (locationId ? 1 : 0);
+  if (count !== 1) {
     throw new Error(
-      'Unavailability targets exactly one resource: facilitatorId XOR roomId.',
+      'Unavailability targets exactly one of facilitatorId / roomId / locationId.',
     );
   }
 }
@@ -92,7 +102,7 @@ export class UnavailabilityService {
    * the materialized row(s) in `startTime` order.
    */
   async create(input: CreateUnavailabilityInput) {
-    assertSingleResource(input.facilitatorId, input.roomId);
+    assertSingleResource(input.facilitatorId, input.roomId, input.locationId);
     const startTime = parseDateStrict(input.startTime, 'startTime');
     const endTime = parseDateStrict(input.endTime, 'endTime');
     if (endTime <= startTime) {
@@ -104,6 +114,7 @@ export class UnavailabilityService {
       reason: input.reason ?? null,
       facilitatorId: input.facilitatorId ?? null,
       roomId: input.roomId ?? null,
+      locationId: input.locationId ?? null,
     };
 
     // One-shot block. `organizationId` is auto-injected by the scoping
@@ -180,11 +191,13 @@ export class UnavailabilityService {
     if (filters.to) where.startTime = { lt: filters.to };
     if (filters.facilitatorId) where.facilitatorId = filters.facilitatorId;
     if (filters.roomId) where.roomId = filters.roomId;
+    if (filters.locationId) where.locationId = filters.locationId;
     return prisma.unavailability.findMany({
       where,
       include: {
         facilitator: { select: { id: true, firstname: true, lastname: true } },
         room: { select: { id: true, name: true } },
+        location: { select: { id: true, name: true } },
       },
       orderBy: { startTime: 'asc' },
     });
@@ -205,6 +218,12 @@ export class UnavailabilityService {
     endTime: Date;
     facilitatorIds?: string[];
     roomId?: string;
+    /**
+     * Location of the candidate event. Used to surface location-wide blocks
+     * that cover this booking (a location-block doesn't target a single
+     * resource, so it has to be checked separately from facilitator / room).
+     */
+    locationId?: string;
     /** Exclude a row from the conflict list (e.g. self on update). */
     excludeId?: string;
   }) {
@@ -214,6 +233,9 @@ export class UnavailabilityService {
     }
     if (params.roomId) {
       orClauses.push({ roomId: params.roomId });
+    }
+    if (params.locationId) {
+      orClauses.push({ locationId: params.locationId });
     }
     if (orClauses.length === 0) return [];
 
@@ -227,6 +249,7 @@ export class UnavailabilityService {
       include: {
         facilitator: { select: { id: true, firstname: true, lastname: true } },
         room: { select: { id: true, name: true } },
+        location: { select: { id: true, name: true } },
       },
     });
   }
@@ -238,10 +261,15 @@ export class UnavailabilityService {
    * if the targeted facilitator/room/frequency needs to change.
    */
   async update(id: string, patch: UpdateUnavailabilityInput, scope: UnavailabilityScope = 'THIS') {
-    if (patch.facilitatorId !== undefined || patch.roomId !== undefined) {
+    if (
+      patch.facilitatorId !== undefined ||
+      patch.roomId !== undefined ||
+      patch.locationId !== undefined
+    ) {
       assertSingleResource(
         patch.facilitatorId ?? undefined,
         patch.roomId ?? undefined,
+        patch.locationId ?? undefined,
       );
     }
 
@@ -257,6 +285,7 @@ export class UnavailabilityService {
     if (patch.reason !== undefined) scalarPatch.reason = patch.reason;
     if (patch.facilitatorId !== undefined) scalarPatch.facilitatorId = patch.facilitatorId;
     if (patch.roomId !== undefined) scalarPatch.roomId = patch.roomId;
+    if (patch.locationId !== undefined) scalarPatch.locationId = patch.locationId;
 
     if (
       scalarPatch.startTime &&

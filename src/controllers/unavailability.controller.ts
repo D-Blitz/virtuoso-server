@@ -27,6 +27,10 @@ export class UnavailabilityController {
             : undefined,
         roomId:
           typeof req.query.roomId === 'string' ? req.query.roomId : undefined,
+        locationId:
+          typeof req.query.locationId === 'string'
+            ? req.query.locationId
+            : undefined,
       });
       res.json(rows);
     } catch (error) {

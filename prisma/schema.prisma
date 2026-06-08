@@ -197,16 +197,18 @@ model UserPermissionScope {
 }
 
 model Location {
-  id           String           @id @default(cuid())
-  name         String
-  description  String?
-  address      String
-  rooms        Room[]
-  facilitators Facilitator[]    @relation("FacilitatorLocations")
-  events       ScheduledEvent[]
-  terms        Term[]
-  enrollments  Enrollment[]
-  closures     Closure[]
+  id               String           @id @default(cuid())
+  name             String
+  description      String?
+  address          String
+  rooms            Room[]
+  facilitators     Facilitator[]    @relation("FacilitatorLocations")
+  events           ScheduledEvent[]
+  terms            Term[]
+  enrollments      Enrollment[]
+  closures         Closure[]
+  // N.4.8 — location-wide time-of-day blocks (time-precise cousin of Closure).
+  unavailabilities Unavailability[]
 
   // Trash bin (Phase 0.5)
   deletedAt   DateTime?
@@ -680,14 +682,17 @@ model Enrollment {
 }
 
 // =========================================================================
-// Unavailability (N.4) — a time range during which a SINGLE resource (one
-// facilitator OR one room) is blocked from booking. Used by:
+// Unavailability (N.4) — a time range during which a SINGLE target (one
+// facilitator OR one room OR one location) is blocked from booking. Used by:
 //   - the booking widget's slot suggester (the slot is dropped)
 //   - the admin event-create validator (the slot raises a conflict warning)
 //   - the room-conflict check on event import
 //
-// Exactly one of facilitatorId / roomId is set; the *.service layer enforces
-// this — Prisma has no `CHECK` constraint surface.
+// Exactly one of facilitatorId / roomId / locationId is set; the *.service
+// layer enforces this — Prisma has no `CHECK` constraint surface. A
+// location-wide block cascades to every room (and facilitator booking) AT
+// that location during the window, complementing the date-only Closure
+// model with time-of-day precision.
 //
 // Recurrence is delivered by eager materialization: a "every Tuesday morning
 // until June" declaration creates N rows in one transaction, all sharing
@@ -708,13 +713,19 @@ model Unavailability {
   // in the tooltip on the calendar block; not used for any logic.
   reason String?
 
-  // Exactly one of these two is set (app-level invariant). Nulls let either
-  // resource be the target without forcing a sentinel row.
+  // Exactly one of these three is set (app-level invariant). Nulls let any
+  // target shape be expressed without forcing a sentinel row.
   facilitatorId String?
   facilitator   Facilitator? @relation(fields: [facilitatorId], references: [id])
 
   roomId String?
   room   Room?   @relation(fields: [roomId], references: [id])
+
+  // Location-wide block: every room (and every facilitator booking) at this
+  // location during the window is unavailable. Independent from Closure
+  // (which is date-only, multi-day, used for school holidays etc.).
+  locationId String?
+  location   Location? @relation(fields: [locationId], references: [id])
 
   // Recurrence — shared id across the materialized siblings of a single
   // declaration. NULL for one-shot blocks. The rule fields are denormalized
@@ -738,6 +749,7 @@ model Unavailability {
   @@index([organizationId, startTime])
   @@index([facilitatorId, startTime, endTime])
   @@index([roomId, startTime, endTime])
+  @@index([locationId, startTime, endTime])
   @@index([recurrenceGroupId])
   @@index([deletedAt])
 }

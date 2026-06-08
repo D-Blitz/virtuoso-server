@@ -244,21 +244,30 @@ export async function validateScheduledEvent(rawInput: ScheduledEventInput): Pro
     });
   }
 
-  // ---- N.4 Unavailability — room + facilitator blocking ranges --------
-  // One query covers both resources. Trashed rows are filtered by the
-  // scoping extension (so deleted blocks don't haunt the admin).
+  // ---- N.4 Unavailability — room + facilitator + location blocks -----
+  // One query covers all three target types. Trashed rows are filtered
+  // by the scoping extension (so deleted blocks don't haunt the admin).
+  // A location-block at this event's location surfaces as a ROOM_BLOCKED
+  // warning — admins see "ce créneau est bloqué" without needing to
+  // distinguish whether the block was placed on the room or the location.
   const blocking = await prisma.unavailability.findMany({
     where: {
       startTime: { lt: end },
       endTime: { gt: start },
       OR: [
         { roomId: room.id },
+        { locationId: location.id },
         ...(facilitators.length > 0
           ? [{ facilitatorId: { in: facilitators } }]
           : []),
       ],
     },
-    select: { roomId: true, facilitatorId: true, reason: true },
+    select: {
+      roomId: true,
+      facilitatorId: true,
+      locationId: true,
+      reason: true,
+    },
   });
 
   if (blocking.some((b) => b.roomId === room.id)) {
@@ -266,6 +275,13 @@ export async function validateScheduledEvent(rawInput: ScheduledEventInput): Pro
       type: 'warning',
       code: 'ROOM_BLOCKED',
       message: `La salle "${room.name}" est marquée indisponible sur ce créneau.`,
+    });
+  }
+  if (blocking.some((b) => b.locationId === location.id)) {
+    issues.push({
+      type: 'warning',
+      code: 'ROOM_BLOCKED',
+      message: `L’établissement "${location.name}" est marqué indisponible sur ce créneau.`,
     });
   }
 

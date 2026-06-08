@@ -91,17 +91,26 @@ export class AvailabilityService {
     });
 
     // N.4 — unavailabilities for the candidate facilitator(s) overlapping
-    // the requested window. Trashed rows are filtered by the scoping
+    // the requested window, plus N.4.8 location-wide blocks if the caller
+    // passed a locationId. Trashed rows are filtered by the scoping
     // extension. A room-targeted block doesn't surface here because slot
     // suggestion is room-agnostic — the room is picked later in the flow;
     // the room-conflict pass catches it then.
     const unavailabilities = await prisma.unavailability.findMany({
       where: {
-        facilitatorId: { in: params.facilitatorIds },
         startTime: { lt: params.to },
         endTime: { gt: params.from },
+        OR: [
+          { facilitatorId: { in: params.facilitatorIds } },
+          ...(params.locationId ? [{ locationId: params.locationId }] : []),
+        ],
       },
-      select: { facilitatorId: true, startTime: true, endTime: true },
+      select: {
+        facilitatorId: true,
+        locationId: true,
+        startTime: true,
+        endTime: true,
+      },
     });
 
     const slots: Slot[] = [];
@@ -147,9 +156,14 @@ export class AvailabilityService {
                   h.facilitatorId === f.id &&
                   overlaps(h.startTime, h.endTime, slotStart, slotEnd),
               );
+              // Block applies if it targets this facilitator OR it's a
+              // location-wide block matching the caller's location.
               const conflictUnavailability = unavailabilities.some(
                 (u) =>
-                  u.facilitatorId === f.id &&
+                  ((u.facilitatorId && u.facilitatorId === f.id) ||
+                    (u.locationId &&
+                      params.locationId &&
+                      u.locationId === params.locationId)) &&
                   overlaps(u.startTime, u.endTime, slotStart, slotEnd),
               );
 

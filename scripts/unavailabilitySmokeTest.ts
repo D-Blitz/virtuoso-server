@@ -449,6 +449,82 @@ async function main() {
       });
       assert(!stillThere, 'the row no longer reads on default scope');
 
+      // ── 15. N.4.8 — location-wide block ───────────────────────────────
+      console.log('\n15. Location-wide block — slot suggester + validator');
+      {
+        const lt0 = new Date(t0.getTime() + 48 * 3600_000);
+        lt0.setUTCHours(11, 0, 0, 0);
+        const lt1 = new Date(lt0.getTime() + 60 * 60_000);
+        const locBlocks = await service.create({
+          startTime: lt0.toISOString(),
+          endTime: lt1.toISOString(),
+          reason: 'Coupure générale',
+          locationId: location.id,
+        });
+        assertEq(locBlocks.length, 1, 'one-shot location block created');
+        assertEq(
+          locBlocks[0].locationId,
+          location.id,
+          'block carries the location',
+        );
+        assert(
+          locBlocks[0].facilitatorId == null && locBlocks[0].roomId == null,
+          'block has no facilitator / room targets',
+        );
+
+        // 3-way invariant rejects facilitator + location combos.
+        await expectThrow(
+          () =>
+            service.create({
+              startTime: lt0.toISOString(),
+              endTime: lt1.toISOString(),
+              facilitatorId: facilitator.id,
+              locationId: location.id,
+            }),
+          'rejects when BOTH facilitator and location are set',
+        );
+
+        // Slot suggester drops a window covered by a location block when
+        // the caller passes locationId.
+        const slotsLoc = await availability.getAvailableSlots({
+          serviceId: svc.id,
+          facilitatorIds: [facilitator.id],
+          from: new Date(lt0.getTime() - 3600_000),
+          to: new Date(lt0.getTime() + 2 * 3600_000),
+          locationId: location.id,
+        });
+        const slotsCoveringLocBlock = slotsLoc.filter(
+          (s) =>
+            new Date(s.startTime).getTime() < lt1.getTime() &&
+            new Date(s.endTime).getTime() > lt0.getTime(),
+        );
+        assertEq(
+          slotsCoveringLocBlock.length,
+          0,
+          'no slot overlaps the location-wide block',
+        );
+
+        // Validator surfaces ROOM_BLOCKED with the établissement message.
+        const blockedLocResult = await validateScheduledEvent({
+          startTime: lt0.toISOString(),
+          endTime: lt1.toISOString(),
+          roomId: room.id,
+          locationId: location.id,
+          serviceId: svc.id,
+          price: 0,
+          facilitators: [facilitator.id],
+          clients: [client.id],
+        });
+        assert(
+          blockedLocResult.issues.some(
+            (i) =>
+              i.code === 'ROOM_BLOCKED' &&
+              i.message.toLowerCase().includes('établissement'),
+          ),
+          'validator surfaces the location-wide block as ROOM_BLOCKED',
+        );
+      }
+
       // ── 14. delete ALL soft-deletes the rest of the group ─────────────
       console.log('\n14. delete ALL soft-deletes every sibling');
       const remainingGroup = await raw.unavailability.findMany({

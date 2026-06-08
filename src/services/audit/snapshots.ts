@@ -191,6 +191,7 @@ export function snapshotUnavailability(u: Nullable<any>): object | null {
     reason: u.reason,
     facilitatorId: u.facilitatorId,
     roomId: u.roomId,
+    locationId: u.locationId,
     recurrenceGroupId: u.recurrenceGroupId,
     recurrenceFrequency: u.recurrenceFrequency,
     recurrenceEndDate: dateToIso(u.recurrenceEndDate),
