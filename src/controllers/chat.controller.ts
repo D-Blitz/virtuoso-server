@@ -11,6 +11,11 @@ function asStringList(v: unknown): string[] {
 }
 
 export class ChatController {
+  /** GET /api/chat/heartbeat — presence ping (requireUser already stamps it). */
+  async heartbeat(_req: Request, res: Response) {
+    res.status(204).send();
+  }
+
   /** GET /api/chat/users — directory to start a chat with. */
   async listUsers(_req: Request, res: Response) {
     try {

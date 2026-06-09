@@ -4,6 +4,7 @@ import { verifySessionToken } from '../auth/jwt';
 import { requestContext, RequestContext } from '../auth/context';
 import { ALL_PERMISSIONS } from '../auth/permissions';
 import prisma from '../prisma';
+import { touchPresence } from '../presence/presence';
 
 const SESSION_COOKIE_NAMES = [
   'authjs.session-token',
@@ -139,6 +140,10 @@ export async function requireUser(req: Request, res: Response, next: NextFunctio
     res.status(401).json({ error: 'Unauthenticated' });
     return;
   }
+
+  // M — presence: stamp "last seen" for every authenticated request so
+  // the chat can show who's online.
+  touchPresence(ctx.userId);
 
   requestContext.run(ctx, () => next());
 }

@@ -9,6 +9,8 @@ const controller = new ChatController();
 // between colleagues); the parent app.use('/api', requireUser) already
 // enforces auth. Membership is checked per-conversation in the service.
 
+router.get('/heartbeat', (req, res) => controller.heartbeat(req, res));
+
 router.get('/users', (req, res) => controller.listUsers(req, res));
 
 router.get('/conversations', (req, res) =>

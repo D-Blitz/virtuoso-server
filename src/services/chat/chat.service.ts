@@ -1,5 +1,6 @@
 import prisma from '../../prisma';
 import { getContext, getOrganizationId } from '../../auth/context';
+import { isOnline } from '../../presence/presence';
 
 /**
  * M — Chat center service (user ↔ user messaging within an org).
@@ -21,6 +22,7 @@ export type ChatUserDto = {
   email: string;
   color: string | null;
   avatarUrl: string | null;
+  online: boolean;
 };
 
 export type ChatMessageDto = {
@@ -61,6 +63,7 @@ function userToDto(row: any): ChatUserDto {
     email: row.email,
     color: f?.color ?? null,
     avatarUrl: f?.profilePictureUrl ?? null,
+    online: isOnline(row.id),
   };
 }
 
@@ -334,6 +337,7 @@ export class ChatService {
           email: '',
           color: null,
           avatarUrl: null,
+          online: false,
         },
     }));
     return { items, hasMore };
@@ -374,6 +378,7 @@ export class ChatService {
         email: '',
         color: null,
         avatarUrl: null,
+        online: true,
       },
     };
   }
