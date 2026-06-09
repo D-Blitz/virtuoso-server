@@ -74,9 +74,42 @@ export type UserDto = {
   updatedAt: string;
 };
 
+/**
+ * N.9 — per-user UI preferences. Both nullable: a fresh user has no
+ * stored preference and the frontend falls back to its own defaults
+ * (client theme default; NEXT_LOCALE cookie for locale).
+ */
+export type UserPreferencesDto = {
+  theme: string | null;
+  locale: string | null;
+};
+
+export type UserPreferencesInput = {
+  theme?: string | null;
+  locale?: string | null;
+};
+
 export type CurrentUserDto = UserDto & {
   permissions: Permission[];
+  // Bundled into /me so the client gets the user's theme + locale in
+  // the same round-trip that powers useCurrentUser — no second fetch
+  // needed to reconcile the boot theme against the account.
+  preferences: UserPreferencesDto;
 };
+
+// Cap stored preference strings so a malformed client can't write
+// unbounded data into the row. Theme keys + locale codes are short.
+const PREF_MAX_LEN = 64;
+
+function sanitizePref(v: unknown): string | null | undefined {
+  // undefined → "field absent, leave unchanged"; null → "clear it".
+  if (v === undefined) return undefined;
+  if (v === null) return null;
+  if (typeof v !== 'string') return undefined;
+  const trimmed = v.trim();
+  if (!trimmed) return null;
+  return trimmed.slice(0, PREF_MAX_LEN);
+}
 
 function rowToDto(row: any): UserDto {
   return {
@@ -156,7 +189,66 @@ export class UserService {
     if (!row) return null;
     const dto = rowToDto(row);
     const permissions = (row.roleRef?.permissions ?? []) as Permission[];
-    return { ...dto, permissions };
+    return {
+      ...dto,
+      permissions,
+      preferences: {
+        theme: row.themePreference ?? null,
+        locale: row.localePreference ?? null,
+      },
+    };
+  }
+
+  /**
+   * N.9 — read the caller's UI preferences. Self-service: keyed off the
+   * request context's userId, so a user can only ever read their own.
+   */
+  async getMyPreferences(): Promise<UserPreferencesDto> {
+    const ctx = getContext();
+    if (!ctx) throw new Error('No request context');
+    const row = await prisma.user.findFirst({
+      where: { id: ctx.userId },
+      select: { themePreference: true, localePreference: true },
+    });
+    return {
+      theme: row?.themePreference ?? null,
+      locale: row?.localePreference ?? null,
+    };
+  }
+
+  /**
+   * N.9 — patch the caller's UI preferences. Partial: omit a field to
+   * leave it unchanged, pass null to clear it. No permission gate (a
+   * user editing their own theme/language needs no admin grant); the
+   * userId comes from the auth context, never the body, so there's no
+   * way to write another user's row.
+   */
+  async updateMyPreferences(
+    input: UserPreferencesInput,
+  ): Promise<UserPreferencesDto> {
+    const ctx = getContext();
+    if (!ctx) throw new Error('No request context');
+
+    const data: Record<string, string | null> = {};
+    const theme = sanitizePref(input.theme);
+    if (theme !== undefined) data.themePreference = theme;
+    const locale = sanitizePref(input.locale);
+    if (locale !== undefined) data.localePreference = locale;
+
+    // Nothing to write → just return the current values.
+    if (Object.keys(data).length === 0) {
+      return this.getMyPreferences();
+    }
+
+    const row = await prisma.user.update({
+      where: { id: ctx.userId },
+      data,
+      select: { themePreference: true, localePreference: true },
+    });
+    return {
+      theme: row.themePreference ?? null,
+      locale: row.localePreference ?? null,
+    };
   }
 
   /**

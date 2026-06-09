@@ -11,6 +11,17 @@ const controller = new UserController();
 // useCurrentUser hook from Phase 0.3 Step 5.
 router.get('/me', (req, res) => controller.me(req, res));
 
+// N.9 — self-service UI preferences (theme + interface language).
+// No USER_MANAGE gate: a user edits only their own row, and the
+// target userId comes from the auth context, not the URL/body. Sits
+// above the '/:id' routes so "me" can't be swallowed as an id param.
+router.get('/me/preferences', (req, res) =>
+  controller.getMyPreferences(req, res),
+);
+router.patch('/me/preferences', (req, res) =>
+  controller.updateMyPreferences(req, res),
+);
+
 // All other User endpoints are gated by USER_MANAGE.
 router.get('/', requirePermission('USER_MANAGE'), (req, res) =>
   controller.list(req, res),

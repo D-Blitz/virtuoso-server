@@ -38,6 +38,38 @@ export class UserController {
     }
   }
 
+  /** GET /api/users/me/preferences — the caller's UI theme + locale. */
+  async getMyPreferences(_req: Request, res: Response) {
+    try {
+      const prefs = await service.getMyPreferences();
+      res.json(prefs);
+    } catch (err) {
+      sendError(res, err, 'Failed to load user preferences');
+    }
+  }
+
+  /**
+   * PATCH /api/users/me/preferences — partial update of the caller's
+   * theme/locale. Body: { theme?, locale? }. Self-service; the userId
+   * is taken from the auth context, never the body.
+   */
+  async updateMyPreferences(req: Request, res: Response) {
+    try {
+      const { theme, locale } = req.body ?? {};
+      const prefs = await service.updateMyPreferences({
+        // Pass through verbatim — the service distinguishes
+        // undefined (absent) / null (clear) / string (set) and
+        // sanitises length. Anything non-string is coerced to "leave
+        // unchanged" there.
+        theme: theme === undefined ? undefined : (theme ?? null),
+        locale: locale === undefined ? undefined : (locale ?? null),
+      });
+      res.json(prefs);
+    } catch (err) {
+      sendError(res, err, 'Failed to update user preferences');
+    }
+  }
+
   /** GET /api/users/:id */
   async getById(req: Request, res: Response) {
     try {

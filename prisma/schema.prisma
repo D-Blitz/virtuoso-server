@@ -89,8 +89,22 @@ model User {
   organization   Organization @relation(fields: [organizationId], references: [id])
   facilitatorId  String?      @unique
   facilitator    Facilitator? @relation(fields: [facilitatorId], references: [id])
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
+
+  // N.9 — per-user UI preferences. Self-service (each user edits their
+  // own via /api/users/me/preferences), distinct from org-level
+  // OrganizationSettings.locale. Nullable so existing rows keep working
+  // and the frontend can fall back to its own defaults (theme: client
+  // default; locale: the NEXT_LOCALE cookie / DEFAULT_LOCALE).
+  //   - themePreference: a theme key from the admin theme catalog
+  //     (e.g. "light", "dark", "dracula", "matrix"). Free-form string;
+  //     the frontend validates against its known set and ignores
+  //     unknown values, so renaming/removing a theme never 500s here.
+  //   - localePreference: a BCP-47-ish locale code ("fr", "en").
+  themePreference  String?
+  localePreference String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@unique([organizationId, email])
   @@index([roleId])
