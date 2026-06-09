@@ -8,6 +8,10 @@ const controller = new ServiceController();
 router.get('/', requirePermission('SERVICE_MANAGE'), (req, res) =>
   controller.getAll(req, res),
 );
+// N.7.14 — aggregated activity + revenue for the service UID page.
+router.get('/:id/insights', requirePermission('SERVICE_MANAGE'), (req, res) =>
+  controller.insights(req, res),
+);
 router.post('/', requirePermission('SERVICE_MANAGE'), (req, res) =>
   controller.create(req, res),
 );
