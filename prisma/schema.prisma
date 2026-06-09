@@ -60,6 +60,10 @@ model Organization {
 
   // N.4 — one-time / recurring teacher + room unavailability blocks.
   unavailabilities Unavailability[]
+
+  // M.1 — messaging center: outbound message log + reusable templates.
+  messages         Message[]
+  messageTemplates MessageTemplate[]
 }
 
 model User {
@@ -169,6 +173,11 @@ enum Permission {
 
   // Widget
   WIDGET_MANAGE
+
+  // M.1 — messaging center. VIEW gates the history + templates surface;
+  // SEND gates composing/sending and managing templates.
+  MESSAGE_VIEW
+  MESSAGE_SEND
 }
 
 model Role {
@@ -1726,4 +1735,71 @@ model WidgetScheduledResume {
 
   @@index([runId])
   @@index([fireAt, consumed])
+}
+
+// =============================================================================
+// M.1 — Messaging center
+// =============================================================================
+
+/**
+ * One outbound message to one recipient — the history log of the
+ * messaging center. A single "compose & send" to N recipients writes N
+ * rows sharing a `batchId`, so the UI can group them as one send while
+ * still tracking per-recipient delivery status.
+ *
+ * The recipient contact is denormalised (name/email/phone snapshot)
+ * because the message log is a permanent record of what was sent to
+ * which address at the time — it must survive the source row being
+ * edited, anonymised, or deleted. `recipientType` + `recipientId` keep
+ * a soft link back to the Client / Facilitator for filtering.
+ */
+model Message {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  // The admin user who sent it (nullable: future system-originated sends).
+  senderUserId String?
+
+  recipientType  String // 'CLIENT' | 'FACILITATOR'
+  recipientId    String? // Client.id / Facilitator.id — soft link, nullable for ad-hoc
+  recipientName  String
+  recipientEmail String?
+  recipientPhone String?
+
+  channel String // 'EMAIL' (v1) | 'SMS' | 'IN_APP'
+  subject String?
+  body    String  @db.Text // rendered body, after {variable} merge
+
+  status String // 'SENT' | 'FAILED'
+  error  String? @db.Text
+
+  // Groups the N rows of a single multi-recipient send.
+  batchId String?
+
+  sentAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([organizationId, createdAt])
+  @@index([organizationId, recipientType, recipientId])
+  @@index([batchId])
+}
+
+/**
+ * A reusable message template with `{variable}` placeholders the
+ * composer can insert and merge per recipient (e.g. {firstname}).
+ */
+model MessageTemplate {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  name    String
+  subject String?
+  body    String  @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([organizationId])
 }
