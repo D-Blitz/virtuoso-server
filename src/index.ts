@@ -46,7 +46,7 @@ import anonymizeRoutes from './routes/anonymize.routes';
 import roleRoutes from './routes/role.routes';
 import userRoutes from './routes/user.routes';
 import organizationRoutes from './routes/organization.routes';
-import messageRoutes from './routes/message.routes';
+import chatRoutes from './routes/chat.routes';
 import widgetFlowRoutes from './routes/widgetFlow.routes';
 import importRoutes from './routes/import.routes';
 
@@ -150,7 +150,7 @@ app.use('/api/anonymize', anonymizeRoutes);
 app.use('/api/roles', roleRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/organizations', organizationRoutes);
-app.use('/api/messages', messageRoutes);
+app.use('/api/chat', chatRoutes);
 
 // Background jobs
 startSlotHoldSweep();

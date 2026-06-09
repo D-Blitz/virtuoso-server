@@ -61,9 +61,8 @@ model Organization {
   // N.4 — one-time / recurring teacher + room unavailability blocks.
   unavailabilities Unavailability[]
 
-  // M.1 — messaging center: outbound message log + reusable templates.
-  messages         Message[]
-  messageTemplates MessageTemplate[]
+  // M — chat center: user ↔ user conversations.
+  conversations Conversation[]
 }
 
 model User {
@@ -1738,68 +1737,60 @@ model WidgetScheduledResume {
 }
 
 // =============================================================================
-// M.1 — Messaging center
+// M — Chat center (user ↔ user messaging)
 // =============================================================================
 
 /**
- * One outbound message to one recipient — the history log of the
- * messaging center. A single "compose & send" to N recipients writes N
- * rows sharing a `batchId`, so the UI can group them as one send while
- * still tracking per-recipient delivery status.
- *
- * The recipient contact is denormalised (name/email/phone snapshot)
- * because the message log is a permanent record of what was sent to
- * which address at the time — it must survive the source row being
- * edited, anonymised, or deleted. `recipientType` + `recipientId` keep
- * a soft link back to the Client / Facilitator for filtering.
+ * A conversation between org users — a 1:1 DM (isGroup = false, exactly
+ * two participants) or a named group (isGroup = true). `lastMessageAt`
+ * is denormalised so a user's inbox can be ordered "most recent first"
+ * without scanning ChatMessage.
  */
-model Message {
+model Conversation {
   id             String       @id @default(cuid())
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id])
 
-  // The admin user who sent it (nullable: future system-originated sends).
-  senderUserId String?
+  isGroup     Boolean @default(false)
+  title       String? // group name; DMs derive their title from the other participant
+  createdById String?
 
-  recipientType  String // 'CLIENT' | 'FACILITATOR'
-  recipientId    String? // Client.id / Facilitator.id — soft link, nullable for ad-hoc
-  recipientName  String
-  recipientEmail String?
-  recipientPhone String?
+  lastMessageAt DateTime @default(now())
+  createdAt     DateTime @default(now())
 
-  channel String // 'EMAIL' (v1) | 'SMS' | 'IN_APP'
-  subject String?
-  body    String  @db.Text // rendered body, after {variable} merge
+  participants ConversationParticipant[]
+  messages     ChatMessage[]
 
-  status String // 'SENT' | 'FAILED'
-  error  String? @db.Text
-
-  // Groups the N rows of a single multi-recipient send.
-  batchId String?
-
-  sentAt    DateTime?
-  createdAt DateTime  @default(now())
-
-  @@index([organizationId, createdAt])
-  @@index([organizationId, recipientType, recipientId])
-  @@index([batchId])
+  @@index([organizationId, lastMessageAt])
 }
 
 /**
- * A reusable message template with `{variable}` placeholders the
- * composer can insert and merge per recipient (e.g. {firstname}).
+ * Membership of a user in a conversation. `lastReadAt` drives unread
+ * counts: messages newer than it, authored by someone else, are unread.
  */
-model MessageTemplate {
+model ConversationParticipant {
   id             String       @id @default(cuid())
-  organizationId String
-  organization   Organization @relation(fields: [organizationId], references: [id])
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  userId         String
 
-  name    String
-  subject String?
-  body    String  @db.Text
+  // Group admin flag (the creator); informational for now.
+  isAdmin    Boolean   @default(false)
+  lastReadAt DateTime?
+  joinedAt   DateTime  @default(now())
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  @@unique([conversationId, userId])
+  @@index([userId])
+}
 
-  @@index([organizationId])
+/** One message in a conversation. */
+model ChatMessage {
+  id             String       @id @default(cuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  senderUserId   String
+  body           String       @db.Text
+  createdAt      DateTime     @default(now())
+
+  @@index([conversationId, createdAt])
 }
