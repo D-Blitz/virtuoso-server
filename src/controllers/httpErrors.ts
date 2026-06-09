@@ -19,7 +19,62 @@ import { Prisma } from '@prisma/client';
  *
  * Always logs the full error to stderr first so the server log has the
  * stack trace; the response body only carries the message string.
+ *
+ * Response shape (N.8.2):
+ *   { messageCode, summary, error, code? }
+ *
+ *   - `messageCode`  — stable i18n key (preferred by the admin frontend
+ *                      via the `errors` namespace in messages/{fr,en}.json).
+ *                      One of the values in ERROR_MESSAGE_CODE below.
+ *   - `summary`      — French fallback the frontend falls back to when
+ *                      it doesn't recognise messageCode (e.g. a brand-new
+ *                      code added by the server before the admin ships
+ *                      its translation).
+ *   - `error`        — technical detail line. NOT translated; the admin
+ *                      surfaces it in a "details" expander.
+ *   - `code`         — original Prisma error code (P2025, P2003, …) when
+ *                      we're forwarding a Prisma exception.
+ *
+ * Adding a new code: add the literal to ERROR_MESSAGE_CODE here, then
+ * mirror it in artcetera_admin/messages/{fr,en}.json under "errors".
+ * No type wiring needed — the frontend hook reads it loosely with a
+ * fallback path.
  */
+
+/**
+ * Closed set of message codes the backend produces. Keep this aligned
+ * with the `errors` namespace in admin/messages/{fr,en}.json. When you
+ * add a code here:
+ *   1. Pick or extend a `summary` (French fallback) in the relevant
+ *      branch below.
+ *   2. Add the same key to fr.json AND en.json under "errors".
+ *      (Both must exist — that's the same-shape rule from N.8.1.)
+ */
+export const ERROR_MESSAGE_CODE = {
+  NOT_FOUND: 'NOT_FOUND',
+  UNIQUE_CONFLICT: 'UNIQUE_CONFLICT',
+  BAD_REQUEST: 'BAD_REQUEST',
+  INTERNAL: 'INTERNAL',
+  TRASH_NOT_FOUND: 'TRASH_NOT_FOUND',
+  FACILITATOR_HAS_PAYMENTS: 'FACILITATOR_HAS_PAYMENTS',
+  FK_BLOCKED: 'FK_BLOCKED',
+  FK_PAYMENT_CLIENT: 'FK_PAYMENT_CLIENT',
+  FK_PAYMENT_EVENT: 'FK_PAYMENT_EVENT',
+  FK_ENROLLMENT_CLIENT: 'FK_ENROLLMENT_CLIENT',
+  FK_ENROLLMENT_FACILITATOR: 'FK_ENROLLMENT_FACILITATOR',
+  FK_ENROLLMENT_ROOM: 'FK_ENROLLMENT_ROOM',
+  FK_ENROLLMENT_LOCATION: 'FK_ENROLLMENT_LOCATION',
+  FK_ENROLLMENT_SERVICE: 'FK_ENROLLMENT_SERVICE',
+  FK_ENROLLMENT_TERM: 'FK_ENROLLMENT_TERM',
+  FK_EVENT_ROOM: 'FK_EVENT_ROOM',
+  FK_EVENT_LOCATION: 'FK_EVENT_LOCATION',
+  FK_EVENT_SERVICE: 'FK_EVENT_SERVICE',
+  FK_EVENT_CATEGORY: 'FK_EVENT_CATEGORY',
+  FK_ROOM_LOCATION: 'FK_ROOM_LOCATION',
+} as const;
+
+export type ErrorMessageCode =
+  (typeof ERROR_MESSAGE_CODE)[keyof typeof ERROR_MESSAGE_CODE];
 export function sendError(
   res: Response,
   err: unknown,
@@ -32,11 +87,8 @@ export function sendError(
   if (err instanceof Prisma.PrismaClientKnownRequestError) {
     switch (err.code) {
       case 'P2025':
-        // Summary: short, plain-French headline for non-dev users.
-        // Error: the detailed technical line a developer would grep
-        // for. Both go in the body; the admin renders summary as the
-        // primary message and error as a "details" expander.
         res.status(404).json({
+          messageCode: ERROR_MESSAGE_CODE.NOT_FOUND,
           summary: 'Cet élément est introuvable ou a déjà été supprimé.',
           error: err.message || 'Élément introuvable ou déjà supprimé.',
           code: err.code,
@@ -62,6 +114,7 @@ export function sendError(
             ? ` (contrainte : ${constraint})`
             : '';
         res.status(409).json({
+          messageCode: ref.messageCode ?? ERROR_MESSAGE_CODE.FK_BLOCKED,
           summary:
             ref.summary ??
             'Cet élément ne peut pas être supprimé car il est lié à d’autres données.',
@@ -73,6 +126,7 @@ export function sendError(
       }
       case 'P2002':
         res.status(409).json({
+          messageCode: ERROR_MESSAGE_CODE.UNIQUE_CONFLICT,
           summary: 'Une autre entrée utilise déjà cette valeur.',
           error:
             'Conflit d’unicité — un élément avec cette valeur existe déjà.',
@@ -81,6 +135,7 @@ export function sendError(
         return;
       default:
         res.status(400).json({
+          messageCode: ERROR_MESSAGE_CODE.BAD_REQUEST,
           summary: 'La requête a été refusée par la base de données.',
           error: err.message || fallbackMessage,
           code: err.code,
@@ -120,6 +175,7 @@ export function sendError(
     const constraint = fkMatch[1];
     const ref = describeBlockingReference(constraint);
     res.status(409).json({
+      messageCode: ref.messageCode ?? ERROR_MESSAGE_CODE.FK_BLOCKED,
       summary:
         ref.summary ??
         'Cet élément ne peut pas être supprimé car il est lié à d’autres données.',
@@ -135,6 +191,7 @@ export function sendError(
   // guard) — recognized by keywords in the French message.
   if (lower.includes('no trashed')) {
     res.status(404).json({
+      messageCode: ERROR_MESSAGE_CODE.TRASH_NOT_FOUND,
       summary: 'Cet élément n’est plus dans la corbeille.',
       error: msg,
     });
@@ -142,6 +199,7 @@ export function sendError(
   }
   if (lower.includes('paiement') || lower.includes('anonymiser')) {
     res.status(409).json({
+      messageCode: ERROR_MESSAGE_CODE.FACILITATOR_HAS_PAYMENTS,
       summary:
         'Cet intervenant a des paiements liés et ne peut pas être supprimé définitivement.',
       error: msg,
@@ -150,6 +208,7 @@ export function sendError(
   }
 
   res.status(500).json({
+    messageCode: ERROR_MESSAGE_CODE.INTERNAL,
     summary: 'Une erreur serveur est survenue.',
     error: msg,
   });
@@ -174,7 +233,20 @@ export function sendServiceError(
   const statusCode = (err as { statusCode?: unknown })?.statusCode;
   if (typeof statusCode === 'number' && statusCode >= 400 && statusCode <= 599) {
     console.error(fallbackMessage, err);
+    // N.8.2 — service errors don't currently carry a code dimension
+    // (they're throw-with-statusCode from validation paths). Pick a
+    // matching messageCode by status family so the admin still gets a
+    // translated message rather than the raw `error` line.
+    const messageCode =
+      statusCode === 404
+        ? ERROR_MESSAGE_CODE.NOT_FOUND
+        : statusCode === 409
+          ? ERROR_MESSAGE_CODE.UNIQUE_CONFLICT
+          : statusCode >= 500
+            ? ERROR_MESSAGE_CODE.INTERNAL
+            : ERROR_MESSAGE_CODE.BAD_REQUEST;
     res.status(statusCode).json({
+      messageCode,
       error: err instanceof Error && err.message ? err.message : fallbackMessage,
     });
     return;
@@ -194,73 +266,87 @@ export function sendServiceError(
  * are blocking the delete.
  */
 export function describeBlockingReference(constraint: string): {
+  messageCode?: ErrorMessageCode;
   summary?: string;
   detail?: string;
 } {
   switch (constraint) {
     case 'Payment_clientId_fkey':
       return {
+        messageCode: ERROR_MESSAGE_CODE.FK_PAYMENT_CLIENT,
         summary: 'Ce client a des paiements liés et ne peut pas être supprimé définitivement.',
         detail:
           'Des paiements lui sont liés (conservés pour la comptabilité). Utilisez "Anonymiser" plutôt que la suppression définitive.',
       };
     case 'Payment_relatedScheduledEventId_fkey':
       return {
+        messageCode: ERROR_MESSAGE_CODE.FK_PAYMENT_EVENT,
         summary: 'Cet événement a des paiements liés et ne peut pas être supprimé définitivement.',
         detail: 'Des paiements référencent cet événement.',
       };
     case 'Enrollment_clientId_fkey':
       return {
+        messageCode: ERROR_MESSAGE_CODE.FK_ENROLLMENT_CLIENT,
         summary: 'Ce client a des inscriptions en cours.',
         detail: 'Des inscriptions sont liées à ce client.',
       };
     case 'Enrollment_facilitatorId_fkey':
       return {
+        messageCode: ERROR_MESSAGE_CODE.FK_ENROLLMENT_FACILITATOR,
         summary: 'Cet intervenant a des inscriptions en cours.',
         detail: 'Des inscriptions sont liées à cet intervenant.',
       };
     case 'Enrollment_roomId_fkey':
       return {
+        messageCode: ERROR_MESSAGE_CODE.FK_ENROLLMENT_ROOM,
         summary: 'Cette salle est utilisée par des inscriptions.',
         detail: 'Des inscriptions utilisent cette salle.',
       };
     case 'Enrollment_locationId_fkey':
       return {
+        messageCode: ERROR_MESSAGE_CODE.FK_ENROLLMENT_LOCATION,
         summary: 'Cet établissement a des inscriptions en cours.',
         detail: 'Des inscriptions sont liées à cet établissement.',
       };
     case 'Enrollment_serviceId_fkey':
       return {
+        messageCode: ERROR_MESSAGE_CODE.FK_ENROLLMENT_SERVICE,
         summary: 'Ce service a des inscriptions en cours.',
         detail: 'Des inscriptions utilisent ce service.',
       };
     case 'Enrollment_termId_fkey':
       return {
+        messageCode: ERROR_MESSAGE_CODE.FK_ENROLLMENT_TERM,
         summary: 'Ce trimestre a des inscriptions liées.',
         detail: 'Des inscriptions sont liées à ce trimestre.',
       };
     case 'ScheduledEvent_roomId_fkey':
       return {
+        messageCode: ERROR_MESSAGE_CODE.FK_EVENT_ROOM,
         summary: 'Cette salle est utilisée par des événements.',
         detail: 'Des événements utilisent cette salle.',
       };
     case 'ScheduledEvent_locationId_fkey':
       return {
+        messageCode: ERROR_MESSAGE_CODE.FK_EVENT_LOCATION,
         summary: 'Cet établissement a des événements programmés.',
         detail: 'Des événements sont liés à cet établissement.',
       };
     case 'ScheduledEvent_serviceId_fkey':
       return {
+        messageCode: ERROR_MESSAGE_CODE.FK_EVENT_SERVICE,
         summary: 'Ce service est utilisé par des événements.',
         detail: 'Des événements utilisent ce service.',
       };
     case 'ScheduledEvent_serviceCategoryId_fkey':
       return {
+        messageCode: ERROR_MESSAGE_CODE.FK_EVENT_CATEGORY,
         summary: 'Cette catégorie est utilisée par des événements.',
         detail: 'Des événements utilisent cette catégorie.',
       };
     case 'Room_locationId_fkey':
       return {
+        messageCode: ERROR_MESSAGE_CODE.FK_ROOM_LOCATION,
         summary: 'Cet établissement contient des salles.',
         detail: 'Des salles dépendent de cet établissement.',
       };
