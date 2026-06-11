@@ -7,6 +7,7 @@ import { auditLog } from './audit/audit.service';
 import { snapshotScheduledEvent } from './audit/snapshots';
 import * as bus from './events/bus';
 import { syncAllocationsForPayment } from './invoice/invoiceSplit.service';
+import { notifyOrgUsers } from './notifications/inApp.service';
 
 /** System actor for webhook-driven mutations. See AUDIT_LOG_DESIGN.md. */
 function webhookActor(eventType: string) {
@@ -309,10 +310,21 @@ export class WebhookService {
     }
 
     // Mark the payment SUCCEEDED in all cases.
-    await prisma.payment.update({
+    const paid = await prisma.payment.update({
       where: { id: paymentId },
       data: { status: 'SUCCEEDED' },
     });
+
+    // N — bell notification: an online payment landed (no admin is the
+    // actor here, so notify everyone; never blocks the webhook).
+    void notifyOrgUsers({
+      organizationId: paid.organizationId,
+      type: 'PAYMENT',
+      title: `Paiement en ligne reçu — ${(paid.amountCents / 100).toFixed(2)} €`,
+      linkUrl: '/admin/payments',
+    }).catch((err) =>
+      console.error('[notifications] payment emit failed', err),
+    );
 
     // Route by purpose:
     //   ENROLLMENT_BALANCE → activate enrollment (handles event/invite state)

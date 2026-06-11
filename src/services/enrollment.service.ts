@@ -3,6 +3,7 @@ import { getContext, getOrganizationId } from '../auth/context';
 import { auditLog } from './audit/audit.service';
 import { snapshotEnrollment, snapshotScheduledEvent } from './audit/snapshots';
 import { softDelete } from './trash/softDelete';
+import { notifyOrgUsers } from './notifications/inApp.service';
 
 const ENROLLMENT_INCLUDE = {
   client: true,
@@ -30,6 +31,24 @@ export class EnrollmentService {
       entityId: created.id,
       after: snapshotEnrollment(created),
     });
+    // N — bell notification for the org (never blocks the create).
+    if (created.organizationId) {
+      const clientName = created.client
+        ? `${created.client.firstname} ${created.client.lastname}`
+        : 'Un client';
+      void notifyOrgUsers({
+        organizationId: created.organizationId,
+        type: 'ENROLLMENT',
+        title: `Nouvelle inscription — ${clientName}`,
+        body: created.service?.name
+          ? `${clientName} est inscrit(e) à « ${created.service.name} ».`
+          : undefined,
+        linkUrl: `/admin/enrollments/${created.id}`,
+        excludeUserId: getContext()?.userId ?? null,
+      }).catch((err) =>
+        console.error('[notifications] enrollment emit failed', err),
+      );
+    }
     return created;
   }
 
