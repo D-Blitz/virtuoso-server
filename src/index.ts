@@ -48,6 +48,7 @@ import userRoutes from './routes/user.routes';
 import organizationRoutes from './routes/organization.routes';
 import chatRoutes from './routes/chat.routes';
 import notificationRoutes from './routes/notification.routes';
+import assistantRoutes from './routes/assistant.routes';
 import widgetFlowRoutes from './routes/widgetFlow.routes';
 import importRoutes from './routes/import.routes';
 
@@ -153,6 +154,7 @@ app.use('/api/users', userRoutes);
 app.use('/api/organizations', organizationRoutes);
 app.use('/api/chat', chatRoutes);
 app.use('/api/notifications', notificationRoutes);
+app.use('/api/assistant', assistantRoutes);
 
 // Background jobs
 startSlotHoldSweep();
