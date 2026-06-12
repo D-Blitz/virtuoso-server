@@ -82,10 +82,17 @@ export class AssistantService {
     const ctx = getContext();
     if (!ctx) throw new Error('No context');
 
+    // A.1b — free demo mode: without an API key, answer with the live
+    // snapshot itself. Tests the whole pipeline (auth, org scoping,
+    // data fetch, drawer) at zero cost; the key only unlocks reasoning.
     if (!process.env.ANTHROPIC_API_KEY) {
+      const demo = await buildOrgSnapshot();
       return (
-        "L'assistant n'est pas encore configuré : ajoutez la variable " +
-        'ANTHROPIC_API_KEY au serveur pour l\'activer.'
+        'Mode démo — aucune clé API configurée, mais je lis déjà vos ' +
+        'données en direct :\n\n' +
+        demo +
+        '\n\nAjoutez ANTHROPIC_API_KEY au serveur pour des réponses ' +
+        'intelligentes.'
       );
     }
 
