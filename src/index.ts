@@ -14,6 +14,7 @@ import publicWidgetRoutes from './routes/publicWidget.routes';
 import publicWidgetFlowRoutes from './routes/publicWidgetFlow.routes';
 import publicInviteRoutes from './routes/publicInvite.routes';
 import publicRescheduleRoutes from './routes/publicReschedule.routes';
+import publicMarketplaceRoutes from './routes/publicMarketplace.routes';
 import webhookRoutes from './routes/webhook.routes';
 
 // routes
@@ -109,6 +110,10 @@ app.use('/api/public/invites', publicInviteRoutes);
 
 // Public trial-reschedule endpoints — token-scoped, ≤1, ≥48h enforced.
 app.use('/api/public/reschedule', publicRescheduleRoutes);
+
+// Public marketplace endpoints — no auth, read-only. Cross-org venue +
+// facilitator listings for the consumer marketplace (apps/marketplace).
+app.use('/api/public/marketplace', publicMarketplaceRoutes);
 
 // All /api routes below require an authenticated session (dev bypass available).
 // Authorization is permission-based per-route (Phase 0.3) — each router
