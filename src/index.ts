@@ -52,6 +52,7 @@ import notificationRoutes from './routes/notification.routes';
 import assistantRoutes from './routes/assistant.routes';
 import widgetFlowRoutes from './routes/widgetFlow.routes';
 import importRoutes from './routes/import.routes';
+import cloudinaryRoutes from './routes/cloudinary.routes';
 
 // jobs
 import { startSlotHoldSweep } from './jobs/sweepSlotHolds';
@@ -119,6 +120,10 @@ app.use('/api/public/marketplace', publicMarketplaceRoutes);
 // Authorization is permission-based per-route (Phase 0.3) — each router
 // declares the Permission it needs via requirePermission(...).
 app.use('/api', requireUser);
+
+// Cloudinary signed-upload signature (admin only). Returns a short-lived
+// signature so the browser uploads directly; the API secret stays server-side.
+app.use('/api/cloudinary', cloudinaryRoutes);
 
 app.use('/api/facilitators', facilitatorRoutes);
 app.use('/api/rooms', roomRoutes);
