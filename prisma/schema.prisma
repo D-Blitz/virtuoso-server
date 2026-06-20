@@ -232,6 +232,13 @@ model Location {
   latitude         Float?           // from address geocoding (BAN)
   longitude        Float?
 
+  // Contact + virtual-venue fields (surfaced on the admin UID detail panel).
+  phone            String?
+  email            String?
+  isVirtual        Boolean          @default(false)
+  virtualLink      String?
+  notes            String?
+
   rooms            Room[]
   facilitators     Facilitator[]    @relation("FacilitatorLocations")
   events           ScheduledEvent[]
