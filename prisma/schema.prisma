@@ -14,6 +14,7 @@ model Organization {
   locale    String   @default("fr-FR")
   timezone  String   @default("Europe/Paris")
   currency  String   @default("EUR")
+  logoUrl   String?  // org logo / global picture (Cloudinary URL)
   createdAt DateTime @default(now())
 
   // Phase 0.7 — truly universal settings only. Surfaced as a single
@@ -272,6 +273,7 @@ model Facilitator {
   bio               String?
   address           String?
   profilePictureUrl String?
+  gallery           String[]         @default([]) // additional photos
   color             String
   availability      Json
   notes             String?
@@ -336,6 +338,8 @@ model Room {
   id           String           @id @default(cuid())
   name         String
   color        String
+  photoUrl     String?          // cover image (Cloudinary URL)
+  gallery      String[]         @default([]) // additional photos
   locationId   String
   availability Json
   notes        String?
