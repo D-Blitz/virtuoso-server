@@ -42,7 +42,9 @@ export async function getPublicVenues() {
       name: loc.name,
       address: loc.address,
       description: loc.description ?? undefined,
-      photoUrl: null as string | null, // Location has no photo field yet
+      photoUrl: loc.photoUrl ?? null,
+      latitude: loc.latitude ?? null,
+      longitude: loc.longitude ?? null,
       categories: uniq(services.map((s) => s.serviceCategory?.name)),
       teacherCount: loc.facilitators.length,
       fromPrice: minOrUndefined(services.map((s) => s.defaultPrice)),
@@ -60,16 +62,23 @@ export async function getPublicFacilitators() {
     orderBy: [{ lastname: 'asc' }, { firstname: 'asc' }],
   });
 
-  return facilitators.map((f) => ({
-    id: f.id,
-    name: `${f.firstname} ${f.lastname}`.trim(),
-    bio: f.isBioDisplayed ? f.bio ?? undefined : undefined,
-    photoUrl: f.profilePictureUrl ?? null,
-    languages: f.languages ?? [],
-    disciplines: uniq(f.services.map((s) => s.serviceCategory?.name)),
-    venueNames: f.locations.map((l) => l.name),
-    independent: f.locations.length === 0,
-    fromPrice: minOrUndefined(f.services.map((s) => s.defaultPrice)),
-    modes: [] as string[], // no lesson-mode field on Facilitator yet
-  }));
+  return facilitators.map((f) => {
+    // A facilitator's location for distance = their first venue with coords
+    // (independent teachers without a geocoded venue have none).
+    const geo = f.locations.find((l) => l.latitude != null && l.longitude != null);
+    return {
+      id: f.id,
+      name: `${f.firstname} ${f.lastname}`.trim(),
+      bio: f.isBioDisplayed ? f.bio ?? undefined : undefined,
+      photoUrl: f.profilePictureUrl ?? null,
+      latitude: geo?.latitude ?? null,
+      longitude: geo?.longitude ?? null,
+      languages: f.languages ?? [],
+      disciplines: uniq(f.services.map((s) => s.serviceCategory?.name)),
+      venueNames: f.locations.map((l) => l.name),
+      independent: f.locations.length === 0,
+      fromPrice: minOrUndefined(f.services.map((s) => s.defaultPrice)),
+      modes: [] as string[], // no lesson-mode field on Facilitator yet
+    };
+  });
 }
