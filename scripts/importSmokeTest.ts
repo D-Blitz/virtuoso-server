@@ -23,6 +23,7 @@
  */
 import express from 'express';
 import 'dotenv/config';
+import Papa from 'papaparse';
 
 import { PrismaClient } from '@prisma/client';
 
@@ -252,6 +253,126 @@ async function main() {
       where: { organizationId, name: { startsWith: '[csv-smoke]' } },
     });
     assertEq(locsInDb.length, 2, 'exactly 2 smoke locations in DB after re-run');
+
+    // ── 3b. Semicolon-delimited CSV (European Excel export) ──
+    console.log('\n3b. Semicolon-delimited CSV is accepted');
+    const semiCsv = [
+      'name;address;description',
+      // The unquoted comma inside `address` is the real assertion here:
+      // it only survives if the delimiter actually switched to ';'.
+      // Parsed as ',' this row would split into 4 fields and land the
+      // wrong value in `description`.
+      '[csv-smoke] Studio A;1 rue Test, Bâtiment B;Petite salle',
+      '[csv-smoke] Studio B;2 rue Test;',
+    ].join('\n');
+    {
+      const r = await postCsv('/api/import/preview/location', semiCsv);
+      assertEq(r.json.totalRows, 2, 'semicolon preview: 2 rows');
+      assertEq(r.json.validRows, 2, 'semicolon preview: 2 valid');
+      assertEq(r.json.errorRows, 0, 'semicolon preview: 0 errors');
+    }
+    {
+      const r = await postCsv('/api/import/commit/location', semiCsv);
+      assertEq(r.json.created, 0, 'semicolon commit: 0 created (upserts)');
+      assertEq(r.json.updated, 2, 'semicolon commit: 2 updated');
+    }
+    const semiLoc = await prisma.location.findFirst({
+      where: { organizationId, name: '[csv-smoke] Studio A' },
+      select: { address: true, description: true },
+    });
+    assertEq(
+      semiLoc?.address,
+      '1 rue Test, Bâtiment B',
+      'comma inside a semicolon-delimited cell survives intact',
+    );
+    assertEq(
+      semiLoc?.description,
+      'Petite salle',
+      'following column not shifted by the embedded comma',
+    );
+
+    // Single-column files have no delimiter to find — must still fall
+    // back to ',' rather than erroring (the original reason auto-detect
+    // was rejected).
+    {
+      const r = await postCsv(
+        '/api/import/preview/tag',
+        ['label', '[csv-smoke] piano'].join('\n'),
+      );
+      assertEq(r.json.totalRows, 1, 'single-column CSV: 1 row');
+      assertEq(r.json.errorRows, 0, 'single-column CSV: still parses');
+    }
+
+    // ── 3c. Explicit ?delimiter= overrides detection ─────────
+    console.log('\n3c. Explicit separator overrides detection');
+    // Pipe-delimited. Detection only knows ',' and ';', so it falls
+    // back to ',' and sees one giant column — this row can only import
+    // if the explicit override is actually honoured.
+    const pipeCsv = [
+      'name|address|description',
+      '[csv-smoke] Studio A|1 rue Test|Salle pipe',
+    ].join('\n');
+    {
+      const auto = await postCsv('/api/import/preview/location', pipeCsv);
+      assertEq(auto.json.errorRows, 1, 'pipe file, no override: row errors');
+    }
+    {
+      const r = await postCsv(
+        `/api/import/preview/location?delimiter=${encodeURIComponent('|')}`,
+        pipeCsv,
+      );
+      assertEq(r.json.validRows, 1, 'pipe file, override: 1 valid');
+      assertEq(r.json.errorRows, 0, 'pipe file, override: 0 errors');
+    }
+
+    // Invalid separators are refused rather than silently coerced.
+    {
+      const r = await postCsv(
+        `/api/import/preview/location?delimiter=${encodeURIComponent('"')}`,
+        locCsv,
+      );
+      assertEq(r.status, 400, 'double-quote separator rejected');
+    }
+    {
+      const r = await postCsv(
+        '/api/import/preview/location?delimiter=ab',
+        locCsv,
+      );
+      assertEq(r.status, 400, 'multi-character separator rejected');
+    }
+
+    // ── 3d. Download honours the chosen separator ────────────
+    console.log('\n3d. Template + export honour the chosen separator');
+    {
+      const res = await fetch(
+        `${baseUrl}/api/import/template/location?delimiter=${encodeURIComponent(';')}`,
+      );
+      assertEq(res.status, 200, 'template with ";" status = 200');
+      const header = (await res.text())
+        .replace(/^﻿/, '')
+        .split('\n')[0];
+      assert(
+        header.startsWith('name;address'),
+        'template header uses the chosen separator',
+      );
+    }
+    {
+      // Full journey: export as ';', then re-upload with detection on.
+      const res = await fetch(
+        `${baseUrl}/api/import/export/location?delimiter=${encodeURIComponent(';')}`,
+      );
+      const csv = (await res.text()).replace(/^﻿/, '');
+      assert(
+        csv.split('\n')[0].startsWith('name;address'),
+        'export header uses the chosen separator',
+      );
+      const reimport = await postCsv('/api/import/commit/location', csv);
+      assertEq(reimport.json.created, 0, '";" export re-imports: 0 created');
+      assert(
+        reimport.json.updated >= 2,
+        '";" export re-imports: ≥2 updated',
+      );
+    }
 
     // ── 4. Facilitator: relation-free import ────────────────
     console.log('\n4. Facilitator preview + commit');
@@ -778,6 +899,37 @@ async function main() {
       const headerLine = text.split('\n')[0].replace(/^﻿/, '');
       assert(headerLine.includes('email'), 'template includes email column');
       assert(headerLine.includes('firstname'), 'template includes firstname');
+
+      // The availability example is the one cell admins copy verbatim,
+      // and it contains both quotes and commas — assert it survives CSV
+      // escaping and still parses into the { weekday: [{start, end}] }
+      // shape the availability service reads.
+      const templateRows = Papa.parse<Record<string, string>>(
+        text.replace(/^﻿/, ''),
+        { header: true, skipEmptyLines: 'greedy' },
+      ).data;
+      let avail: unknown = null;
+      try {
+        avail = JSON.parse(templateRows[0]?.availability ?? '');
+      } catch {
+        avail = null;
+      }
+      assert(
+        avail != null,
+        'availability example is valid JSON after CSV round-trip',
+      );
+      const firstDay =
+        avail && typeof avail === 'object'
+          ? Object.values(avail as Record<string, unknown>)[0]
+          : null;
+      const firstWindow = Array.isArray(firstDay)
+        ? (firstDay[0] as { start?: unknown; end?: unknown })
+        : null;
+      assert(
+        typeof firstWindow?.start === 'string' &&
+          typeof firstWindow?.end === 'string',
+        'availability example uses { start, end } windows',
+      );
     }
 
     // ── 6. Registry endpoint lists all entities ──────────────

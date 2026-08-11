@@ -142,8 +142,9 @@ export const facilitatorSpec: ImportEntitySpec = {
       required: false,
       type: 'json',
       description:
-        'Objet JSON. Laisser vide pour conserver la valeur actuelle ou {}.',
-      example: '{}',
+        'Objet JSON : une clé par jour de la semaine (0 = dimanche, 1 = lundi, … 6 = samedi), et pour chaque jour la liste de ses créneaux { "start": "HH:MM", "end": "HH:MM" } en 24h. Plusieurs créneaux par jour sont possibles (matin et après-midi). Les jours absents sont considérés comme non disponibles. Laisser vide pour conserver la valeur actuelle, ou {} pour aucune disponibilité.',
+      example:
+        '{"1":[{"start":"09:00","end":"12:00"},{"start":"14:00","end":"18:00"}],"3":[{"start":"10:00","end":"13:00"}]}',
     },
     {
       key: 'ageScores',

@@ -14,6 +14,7 @@ import publicWidgetRoutes from './routes/publicWidget.routes';
 import publicWidgetFlowRoutes from './routes/publicWidgetFlow.routes';
 import publicInviteRoutes from './routes/publicInvite.routes';
 import publicRescheduleRoutes from './routes/publicReschedule.routes';
+import publicMarketplaceRoutes from './routes/publicMarketplace.routes';
 import webhookRoutes from './routes/webhook.routes';
 
 // routes
@@ -48,8 +49,10 @@ import userRoutes from './routes/user.routes';
 import organizationRoutes from './routes/organization.routes';
 import chatRoutes from './routes/chat.routes';
 import notificationRoutes from './routes/notification.routes';
+import assistantRoutes from './routes/assistant.routes';
 import widgetFlowRoutes from './routes/widgetFlow.routes';
 import importRoutes from './routes/import.routes';
+import cloudinaryRoutes from './routes/cloudinary.routes';
 
 // jobs
 import { startSlotHoldSweep } from './jobs/sweepSlotHolds';
@@ -109,10 +112,18 @@ app.use('/api/public/invites', publicInviteRoutes);
 // Public trial-reschedule endpoints — token-scoped, ≤1, ≥48h enforced.
 app.use('/api/public/reschedule', publicRescheduleRoutes);
 
+// Public marketplace endpoints — no auth, read-only. Cross-org venue +
+// facilitator listings for the consumer marketplace (apps/marketplace).
+app.use('/api/public/marketplace', publicMarketplaceRoutes);
+
 // All /api routes below require an authenticated session (dev bypass available).
 // Authorization is permission-based per-route (Phase 0.3) — each router
 // declares the Permission it needs via requirePermission(...).
 app.use('/api', requireUser);
+
+// Cloudinary signed-upload signature (admin only). Returns a short-lived
+// signature so the browser uploads directly; the API secret stays server-side.
+app.use('/api/cloudinary', cloudinaryRoutes);
 
 app.use('/api/facilitators', facilitatorRoutes);
 app.use('/api/rooms', roomRoutes);
@@ -153,6 +164,7 @@ app.use('/api/users', userRoutes);
 app.use('/api/organizations', organizationRoutes);
 app.use('/api/chat', chatRoutes);
 app.use('/api/notifications', notificationRoutes);
+app.use('/api/assistant', assistantRoutes);
 
 // Background jobs
 startSlotHoldSweep();

@@ -29,6 +29,7 @@ export type OrganizationSettingsDto = {
   timezone: string;
   currency: string;
   vatRate: number;
+  logoUrl: string | null;
 };
 
 export type OrganizationSettingsInput = {
@@ -37,6 +38,7 @@ export type OrganizationSettingsInput = {
   timezone?: string;
   currency?: string;
   vatRate?: number;
+  logoUrl?: string | null;
 };
 
 function rowToDto(row: any): OrganizationSettingsDto {
@@ -48,6 +50,7 @@ function rowToDto(row: any): OrganizationSettingsDto {
     timezone: row.timezone,
     currency: row.currency,
     vatRate: row.vatRate,
+    logoUrl: row.logoUrl ?? null,
   };
 }
 
@@ -112,6 +115,7 @@ export class OrganizationService {
     if (input.locale !== undefined) data.locale = input.locale.trim();
     if (input.timezone !== undefined) data.timezone = input.timezone.trim();
     if (input.currency !== undefined) data.currency = input.currency.trim();
+    if (input.logoUrl !== undefined) data.logoUrl = input.logoUrl || null;
 
     if (input.vatRate !== undefined) {
       const n =
@@ -152,5 +156,6 @@ function snapshotOrg(row: any): object {
     timezone: row.timezone,
     currency: row.currency,
     vatRate: row.vatRate,
+    logoUrl: row.logoUrl ?? null,
   };
 }

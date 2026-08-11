@@ -36,16 +36,86 @@ type ParseCsvResult =
   | { rows: Record<string, string>[]; error?: undefined }
   | { rows?: undefined; error: string };
 
-function parseCsv(csvText: string): ParseCsvResult {
+/**
+ * Field delimiters we accept, in preference order. ',' is both the
+ * default and the tie-breaker.
+ *
+ * ';' is here because European spreadsheets export it: in locales
+ * where ',' is the decimal separator (fr, de, es, it…), Excel and
+ * LibreOffice write ';'-delimited CSVs. Clients were having to
+ * re-save their exports before importing.
+ */
+const SUPPORTED_DELIMITERS = [',', ';'] as const;
+
+/** Used when writing (template / export) and as the detection fallback. */
+export const DEFAULT_DELIMITER = ',';
+
+/**
+ * A delimiter must be exactly one character and must not collide with
+ * CSV's own syntax: '"' would make quoting unparseable, and CR / LF
+ * would turn every field into a new record.
+ *
+ * Anything else is allowed — admins occasionally have pipe- or
+ * tab-separated exports, and there's no reason to second-guess them.
+ */
+export function isValidDelimiter(d: string): boolean {
+  return d.length === 1 && d !== '"' && d !== '\r' && d !== '\n';
+}
+
+/**
+ * Pick the field delimiter by counting candidates in the header line.
+ *
+ * We still don't hand this to papaparse's own auto-detect: it fails on
+ * single-column CSVs (no delimiter to find) and surfaces a confusing
+ * parse error to admins importing tags or other single-field entities.
+ * Counting ourselves lets "found nothing" fall back to ',' silently,
+ * which is what keeps those single-column files working.
+ *
+ * Characters inside double quotes are skipped, so a quoted header like
+ * `"Nom, complet"` can't tip the count toward ','. Ties also fall back
+ * to ',' — order in SUPPORTED_DELIMITERS decides nothing on its own.
+ */
+function detectDelimiter(csvText: string): string {
+  const headerLine =
+    csvText.split(/\r?\n/).find((l) => l.trim().length > 0) ?? '';
+
+  const counts = new Map<string, number>(
+    SUPPORTED_DELIMITERS.map((d) => [d as string, 0]),
+  );
+  let inQuotes = false;
+  for (const ch of headerLine) {
+    if (ch === '"') {
+      inQuotes = !inQuotes;
+      continue;
+    }
+    if (inQuotes) continue;
+    const seen = counts.get(ch);
+    if (seen !== undefined) counts.set(ch, seen + 1);
+  }
+
+  let best = ',';
+  let bestCount = 0;
+  for (const d of SUPPORTED_DELIMITERS) {
+    const c = counts.get(d) ?? 0;
+    if (c > bestCount) {
+      best = d;
+      bestCount = c;
+    }
+  }
+  return best;
+}
+
+/**
+ * @param delimiter explicit delimiter chosen by the admin. Omit to
+ *   auto-detect from the header line — the default, so the common case
+ *   stays a zero-decision upload.
+ */
+function parseCsv(csvText: string, delimiter?: string): ParseCsvResult {
   const trimmed = csvText.replace(/^﻿/, ''); // strip UTF-8 BOM
   const parsed = Papa.parse<Record<string, string>>(trimmed, {
     header: true,
     skipEmptyLines: 'greedy',
-    // Explicitly set the delimiter rather than relying on auto-detect.
-    // Auto-detect fails on single-column CSVs (no delimiter to find)
-    // and surfaces a confusing parse error to admins importing tags
-    // or single-field entities.
-    delimiter: ',',
+    delimiter: delimiter ?? detectDelimiter(trimmed),
     transformHeader: (h) => h.trim(),
   });
   if (parsed.errors.length > 0) {
@@ -74,6 +144,8 @@ export async function previewImport(params: {
   organizationId: string;
   entityType: string;
   csvText: string;
+  /** Omit to auto-detect from the header line. */
+  delimiter?: string;
 }): Promise<ImportPreviewResult> {
   const spec = getImportSpec(params.entityType);
   if (!spec) {
@@ -87,7 +159,7 @@ export async function previewImport(params: {
       globalError: `Type d’import inconnu : ${params.entityType}`,
     };
   }
-  const parsed = parseCsv(params.csvText);
+  const parsed = parseCsv(params.csvText, params.delimiter);
   if (parsed.error) {
     return {
       entityType: spec.type,
@@ -142,6 +214,8 @@ export async function commitImport(params: {
   organizationId: string;
   entityType: string;
   csvText: string;
+  /** Omit to auto-detect from the header line. */
+  delimiter?: string;
 }): Promise<ImportCommitResult> {
   const spec = getImportSpec(params.entityType);
   if (!spec) {
@@ -157,7 +231,7 @@ export async function commitImport(params: {
       warnings: [],
     };
   }
-  const parsed = parseCsv(params.csvText);
+  const parsed = parseCsv(params.csvText, params.delimiter);
   if (parsed.error) {
     return {
       entityType: spec.type,
@@ -245,12 +319,15 @@ export async function commitImport(params: {
  * one example row. Admins download it, fill in their data, and
  * upload back through the same endpoint.
  */
-export function buildCsvTemplate(entityType: string): string | null {
+export function buildCsvTemplate(
+  entityType: string,
+  delimiter: string = DEFAULT_DELIMITER,
+): string | null {
   const spec = getImportSpec(entityType);
   if (!spec) return null;
   const headers = spec.columns.map((c) => c.key);
   const exampleRow = spec.columns.map((c) => c.example ?? '');
-  return Papa.unparse([headers, exampleRow]);
+  return Papa.unparse([headers, exampleRow], { delimiter });
 }
 
 /**
@@ -262,6 +339,8 @@ export function buildCsvTemplate(entityType: string): string | null {
 export async function exportEntityCsv(params: {
   organizationId: string;
   entityType: string;
+  /** Defaults to ','. Same picker as the template download. */
+  delimiter?: string;
 }): Promise<string | null> {
   const spec = getImportSpec(params.entityType);
   if (!spec) return null;
@@ -273,6 +352,8 @@ export async function exportEntityCsv(params: {
     headers,
     ...rows.map((r) => headers.map((h) => r[h] ?? '')),
   ];
-  return Papa.unparse(matrix);
+  return Papa.unparse(matrix, {
+    delimiter: params.delimiter ?? DEFAULT_DELIMITER,
+  });
 }
 
