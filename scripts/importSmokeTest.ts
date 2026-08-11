@@ -167,6 +167,21 @@ async function purgeSmokeData(organizationId: string) {
       },
     },
   });
+  // Series created by the recurrence rows. Their occurrences are gone
+  // by now (deleted above), so nothing references them. RecurrenceSeries
+  // has no relation field for defaultRoomId, so resolve the ids first.
+  const smokeRooms = await prisma.room.findMany({
+    where: { organizationId, name: { startsWith: '[csv-smoke]' } },
+    select: { id: true },
+  });
+  if (smokeRooms.length > 0) {
+    await prisma.recurrenceSeries.deleteMany({
+      where: {
+        organizationId,
+        defaultRoomId: { in: smokeRooms.map((r) => r.id) },
+      },
+    });
+  }
   await prisma.room.deleteMany({
     where: { organizationId, name: { startsWith: '[csv-smoke]' } },
   });
@@ -688,6 +703,124 @@ async function main() {
     });
     assertEq(freeEvt?.price, 0, 'explicit 0 price is kept, not replaced');
 
+    // ── 4d.ii — Optional recurrence ─────────────────────────
+    console.log('\n4d.ii Event recurrence (frequency + recurrenceEndDate)');
+    const RECUR_HEADER =
+      'date,startTime,endTime,service,room,facilitators,clients,color,price,notes,tags,frequency,recurrenceEndDate';
+    // Nov 3 → Dec 1 weekly = 3, 10, 17, 24, 1 = 5 occurrences.
+    // endTime left empty so this also rides the service-duration path.
+    const seriesRow = [
+      '2026-11-03',
+      '09:00',
+      '',
+      '[csv-smoke] Piano 30min',
+      '[csv-smoke] Salle A',
+      'smoke-evt-fac@test.io',
+      '',
+      '',
+      '',
+      '',
+      '',
+      'WEEKLY',
+      '2026-12-01',
+    ].join(',');
+    const seriesCsv = [RECUR_HEADER, seriesRow].join('\n');
+    {
+      const preview = await postCsv(
+        '/api/import/preview/scheduledEvent',
+        seriesCsv,
+      );
+      assertEq(preview.json.totalRows, 1, 'series preview: 1 CSV row');
+      assertEq(preview.json.errorRows, 0, 'series preview: 0 errors');
+      const commit = await postCsv(
+        '/api/import/commit/scheduledEvent',
+        seriesCsv,
+      );
+      assertEq(commit.json.created, 1, 'series commit: 1 row created');
+      assertEq(commit.json.errored, 0, 'series commit: 0 errored');
+    }
+    const seriesEvents = await prisma.scheduledEvent.findMany({
+      where: {
+        organizationId,
+        room: { name: '[csv-smoke] Salle A' },
+        startTime: { gte: new Date('2026-11-01T00:00:00') },
+      },
+      select: { seriesId: true, startTime: true, endTime: true },
+      orderBy: { startTime: 'asc' },
+    });
+    assertEq(seriesEvents.length, 5, 'series expanded to 5 occurrences');
+    assert(
+      seriesEvents.every((e) => e.seriesId && e.seriesId === seriesEvents[0].seriesId),
+      'all occurrences share one seriesId',
+    );
+    assertEq(
+      seriesEvents[4]?.startTime.toISOString(),
+      new Date('2026-12-01T09:00:00').toISOString(),
+      'last occurrence lands on the inclusive end date',
+    );
+    assertEq(
+      seriesEvents[0]?.endTime.toISOString(),
+      new Date('2026-11-03T09:30:00').toISOString(),
+      'occurrence duration inherited from the service (30min)',
+    );
+    const seriesRowDb = await prisma.recurrenceSeries.findFirst({
+      where: { organizationId, id: seriesEvents[0]?.seriesId ?? undefined },
+      select: { frequency: true, defaultPrice: true },
+    });
+    assertEq(seriesRowDb?.frequency, 'WEEKLY', 'series row stores the rule');
+    assertEq(seriesRowDb?.defaultPrice, 35, 'series captured the service price');
+
+    // Re-import must reuse the series, not spawn a parallel one.
+    {
+      const recommit = await postCsv(
+        '/api/import/commit/scheduledEvent',
+        seriesCsv,
+      );
+      assertEq(recommit.json.updated, 1, 'series re-import: 1 updated');
+      assertEq(recommit.json.created, 0, 'series re-import: 0 created');
+    }
+    const afterRerun = await prisma.scheduledEvent.findMany({
+      where: {
+        organizationId,
+        room: { name: '[csv-smoke] Salle A' },
+        startTime: { gte: new Date('2026-11-01T00:00:00') },
+      },
+      select: { seriesId: true },
+    });
+    assertEq(afterRerun.length, 5, 're-import: still 5 occurrences');
+    assertEq(
+      new Set(afterRerun.map((e) => e.seriesId)).size,
+      1,
+      're-import: still a single series',
+    );
+
+    // The two columns must travel together.
+    {
+      const noEnd = [
+        RECUR_HEADER,
+        seriesRow.replace(',WEEKLY,2026-12-01', ',WEEKLY,'),
+      ].join('\n');
+      const r = await postCsv('/api/import/preview/scheduledEvent', noEnd);
+      assertEq(r.json.errorRows, 1, 'frequency without end date errors');
+    }
+    {
+      const noFreq = [
+        RECUR_HEADER,
+        seriesRow.replace(',WEEKLY,2026-12-01', ',,2026-12-01'),
+      ].join('\n');
+      const r = await postCsv('/api/import/preview/scheduledEvent', noFreq);
+      assertEq(r.json.errorRows, 1, 'end date without frequency errors');
+    }
+    // The 500-occurrence cap must fail in the PREVIEW, not mid-write.
+    {
+      const runaway = [
+        RECUR_HEADER,
+        seriesRow.replace(',2026-12-01', ',2060-01-01'),
+      ].join('\n');
+      const r = await postCsv('/api/import/preview/scheduledEvent', runaway);
+      assertEq(r.json.errorRows, 1, 'runaway series caught in preview');
+    }
+
     // ── 4e. Enrollment import + auto-event-generation ───────
     console.log('\n4e. Enrollment import + auto-event-generation');
     {
@@ -1025,6 +1158,47 @@ async function main() {
           typeof firstWindow?.end === 'string',
         'availability example uses { start, end } windows',
       );
+    }
+
+    // ── 5b. Event export never re-expands a series ───────────
+    // Occurrences are materialized rows. If the export echoed the
+    // series' rule on each of them, re-importing would treat every
+    // occurrence as the head of a new series and multiply the calendar.
+    console.log('\n5b. Event export leaves the recurrence columns blank');
+    {
+      const res = await fetch(`${baseUrl}/api/import/export/scheduledEvent`);
+      assertEq(res.status, 200, 'event export status = 200');
+      const text = (await res.text()).replace(/^﻿/, '');
+      const rows = Papa.parse<Record<string, string>>(text, {
+        header: true,
+        skipEmptyLines: 'greedy',
+      }).data;
+      assert(rows.length > 0, 'event export returned rows');
+      assert(
+        rows.every((r) => (r.frequency ?? '') === ''),
+        'no exported row carries a frequency',
+      );
+      assert(
+        rows.every((r) => (r.recurrenceEndDate ?? '') === ''),
+        'no exported row carries a recurrenceEndDate',
+      );
+      // And the round trip is still a no-op on the series.
+      const before = await prisma.scheduledEvent.count({
+        where: {
+          organizationId,
+          room: { name: '[csv-smoke] Salle A' },
+          startTime: { gte: new Date('2026-11-01T00:00:00') },
+        },
+      });
+      await postCsv('/api/import/commit/scheduledEvent', text);
+      const after = await prisma.scheduledEvent.count({
+        where: {
+          organizationId,
+          room: { name: '[csv-smoke] Salle A' },
+          startTime: { gte: new Date('2026-11-01T00:00:00') },
+        },
+      });
+      assertEq(after, before, 're-importing the export does not re-expand');
     }
 
     // ── 6. Registry endpoint lists all entities ──────────────

@@ -1,9 +1,15 @@
 // ScheduledEvent import spec.
 //
-// One CSV row = one concrete event. No recurrence — admins use the
-// calendar form for recurring series; the import is for bulk-loading
+// One CSV row = one concrete event, OR one whole recurring series when
+// the optional `frequency` + `recurrenceEndDate` pair is filled in.
+// Leaving them empty keeps the original behaviour: bulk-loading
 // pre-materialized occurrences (e.g. a term schedule exported from
 // another tool, or an export from this app that's been edited).
+//
+// Recurrence reuses the same generator as the calendar form
+// (services/recurrence) and produces the same shape: one
+// RecurrenceSeries row plus N ScheduledEvent occurrences carrying its
+// seriesId. Nothing about a series created here is special-cased.
 //
 // Schema requires 4 FKs: room, location, service, serviceCategory.
 // We derive `location` from the Room and `serviceCategory` from the
@@ -23,12 +29,19 @@
 
 import {
   parseDate,
+  parseEnum,
   parseFloatNumber,
   parseHexColor,
   parseMultiReference,
   parseString,
   parseTime,
 } from '../parsers';
+import {
+  FREQUENCIES,
+  generateOccurrences,
+  type Frequency,
+  type Occurrence,
+} from '../../recurrence/recurrence';
 import type { ImportContext, ImportEntitySpec } from '../types';
 
 /**
@@ -456,6 +469,25 @@ export const scheduledEventSpec: ImportEntitySpec = {
       description: 'Libellés d’étiquettes séparés par des virgules.',
     },
     {
+      key: 'frequency',
+      label: 'Récurrence',
+      required: false,
+      type: 'enum',
+      enumValues: FREQUENCIES.slice(),
+      description:
+        'Laissez vide pour un événement unique. Renseigné, la ligne décrit toute une série : les occurrences sont générées de la date de début jusqu’à recurrenceEndDate. Exige recurrenceEndDate.',
+      example: 'WEEKLY',
+    },
+    {
+      key: 'recurrenceEndDate',
+      label: 'Fin de récurrence',
+      required: false,
+      type: 'date',
+      description:
+        'Format ISO yyyy-mm-dd, incluse. Dernière date à laquelle une occurrence peut tomber. Obligatoire si frequency est renseigné, ignorée sinon.',
+      example: '2026-12-19',
+    },
+    {
       key: 'enrollment',
       label: 'Inscription liée',
       required: false,
@@ -577,6 +609,59 @@ export const scheduledEventSpec: ImportEntitySpec = {
         );
       }
     }
+
+    // ── Optional recurrence ──────────────────────────────────────
+    // The two columns travel together: a frequency with no end date is
+    // unbounded, and an end date with no frequency has nothing to
+    // repeat. Either one alone is a mistake worth surfacing rather than
+    // quietly ignoring.
+    const frequency = parseEnum(row.frequency, FREQUENCIES, {
+      label: 'Récurrence',
+    });
+    if (frequency.error) errors.push(frequency.error);
+    const recurrenceEnd = parseDate(row.recurrenceEndDate, {
+      label: 'Fin de récurrence',
+    });
+    if (recurrenceEnd.error) errors.push(recurrenceEnd.error);
+
+    if (frequency.value && !recurrenceEnd.value) {
+      errors.push(
+        'recurrenceEndDate est requis lorsque frequency est renseigné.',
+      );
+    }
+    if (!frequency.value && recurrenceEnd.value) {
+      errors.push(
+        'frequency est requis lorsque recurrenceEndDate est renseigné.',
+      );
+    }
+
+    // Generate at parse time, not at commit time, so a rule that blows
+    // the 500-occurrence cap fails during the preview — where the admin
+    // can see and fix it — instead of part-way through writing.
+    let occurrences: Occurrence[] | null = null;
+    let recurrenceBoundary: Date | null = null;
+    if (frequency.value && recurrenceEnd.value && start && end) {
+      // The column names a day; treat it as end-of-day so an occurrence
+      // landing on that date is included, matching "incluse" in the doc.
+      recurrenceBoundary = new Date(recurrenceEnd.value);
+      recurrenceBoundary.setHours(23, 59, 59, 999);
+      if (recurrenceBoundary.getTime() < start.getTime()) {
+        errors.push('recurrenceEndDate doit être à la date de début ou après.');
+      } else {
+        try {
+          occurrences = generateOccurrences({
+            frequency: frequency.value as Frequency,
+            startDate: start,
+            endDate: recurrenceBoundary,
+            durationMs: end.getTime() - start.getTime(),
+          });
+        } catch (err) {
+          errors.push(
+            err instanceof Error ? err.message : 'Récurrence invalide.',
+          );
+        }
+      }
+    }
     if (roomName.value) {
       const rm = await resolveRoomForEvent(roomName.value, ctx);
       if (!rm) {
@@ -671,6 +756,10 @@ export const scheduledEventSpec: ImportEntitySpec = {
         facilitatorIds: facResolved.ids,
         clientIds: clientResolved.ids,
         tagIds: tagResolved.ids,
+        // null on both = standalone event, the default path.
+        frequency: frequency.value ?? null,
+        recurrenceEndDate: recurrenceBoundary,
+        recurrenceOccurrences: occurrences,
       },
     };
   },
@@ -687,7 +776,7 @@ export const scheduledEventSpec: ImportEntitySpec = {
         roomId: data.roomId as string,
         deletedAt: null,
       },
-      select: { id: true },
+      select: { id: true, seriesId: true },
     });
 
     const facIds = data.facilitatorIds as string[];
@@ -726,22 +815,104 @@ export const scheduledEventSpec: ImportEntitySpec = {
       enrollmentId: (data.enrollmentId as string | null) ?? null,
     };
 
-    if (existing) {
-      await ctx.prisma.scheduledEvent.update({
-        where: { id: existing.id },
-        data: { ...scalars, ...m2mUpdate },
+    const occurrences = data.recurrenceOccurrences as Occurrence[] | null;
+
+    // ── Standalone event (no recurrence columns) ────────────────
+    if (!occurrences) {
+      if (existing) {
+        await ctx.prisma.scheduledEvent.update({
+          where: { id: existing.id },
+          data: { ...scalars, ...m2mUpdate },
+        });
+        return { id: existing.id, action: 'updated' };
+      }
+      const created = await ctx.prisma.scheduledEvent.create({
+        data: {
+          organizationId: ctx.organizationId,
+          ...scalars,
+          ...m2mCreate,
+        },
+        select: { id: true },
       });
-      return { id: existing.id, action: 'updated' };
+      return { id: created.id, action: 'created' };
     }
-    const created = await ctx.prisma.scheduledEvent.create({
-      data: {
-        organizationId: ctx.organizationId,
+
+    // ── Recurring series ────────────────────────────────────────
+    // The row's natural key (startTime, room) is by construction the
+    // series' FIRST occurrence, so it identifies the series on
+    // re-import too: find the event at that slot, read its seriesId,
+    // and reuse it. That's what stops a second run from creating a
+    // parallel series alongside the first.
+    const seriesDefaults = {
+      frequency: data.frequency as string,
+      startDate: data.startTime as Date,
+      endDate: data.recurrenceEndDate as Date,
+      defaultColor: scalars.color,
+      defaultPrice: scalars.price,
+      defaultNotes: scalars.notes,
+      defaultRoomId: scalars.roomId,
+      defaultLocationId: scalars.locationId,
+      defaultServiceId: scalars.serviceId,
+    };
+
+    let seriesId = existing?.seriesId ?? null;
+    if (seriesId) {
+      await ctx.prisma.recurrenceSeries.update({
+        where: { id: seriesId },
+        data: seriesDefaults,
+      });
+    } else {
+      const series = await ctx.prisma.recurrenceSeries.create({
+        data: { organizationId: ctx.organizationId, ...seriesDefaults },
+        select: { id: true },
+      });
+      seriesId = series.id;
+    }
+
+    // Each occurrence upserts on the same (startTime, room) key the
+    // standalone path uses, so re-running lands on the existing rows.
+    //
+    // Occurrences of a PREVIOUS run that fall outside the new range are
+    // left alone rather than deleted — the import is additive
+    // everywhere else, and silently destroying calendar rows the admin
+    // can't see in the preview would be the wrong trade. Shortening a
+    // series is a calendar-side operation.
+    for (const occ of occurrences) {
+      const occExisting = await ctx.prisma.scheduledEvent.findFirst({
+        where: {
+          organizationId: ctx.organizationId,
+          startTime: occ.startTime,
+          roomId: scalars.roomId,
+          deletedAt: null,
+        },
+        select: { id: true },
+      });
+      const occScalars = {
         ...scalars,
-        ...m2mCreate,
-      },
-      select: { id: true },
-    });
-    return { id: created.id, action: 'created' };
+        startTime: occ.startTime,
+        endTime: occ.endTime,
+        seriesId,
+      };
+      if (occExisting) {
+        await ctx.prisma.scheduledEvent.update({
+          where: { id: occExisting.id },
+          data: { ...occScalars, ...m2mUpdate },
+        });
+      } else {
+        await ctx.prisma.scheduledEvent.create({
+          data: {
+            organizationId: ctx.organizationId,
+            ...occScalars,
+            ...m2mCreate,
+          },
+          select: { id: true },
+        });
+      }
+    }
+
+    // One CSV row = one series, so the import counters report a single
+    // created/updated regardless of how many occurrences it expanded to.
+    return { id: seriesId, action: existing ? 'updated' : 'created' };
   },
 
   async exportRows(ctx) {
@@ -830,6 +1001,17 @@ export const scheduledEventSpec: ImportEntitySpec = {
           notes: r.notes ?? '',
           tags: r.tags.map((t) => t.label).join(', '),
           enrollment: enrollmentComposite,
+          // Deliberately blank, even for rows that belong to a series.
+          // The export lists MATERIALIZED occurrences — one line per
+          // event that already exists. Emitting the series' rule on
+          // each of them would make a re-import treat every occurrence
+          // as the head of its own new series and re-expand it, turning
+          // a 20-event series into 400 events. Blank keeps the existing
+          // round-trip contract: each line updates its own row in place
+          // and the series linkage (seriesId, not written here) is left
+          // untouched.
+          frequency: '',
+          recurrenceEndDate: '',
         };
       },
     );
