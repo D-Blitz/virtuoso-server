@@ -163,6 +163,7 @@ async function purgeSmokeData(organizationId: string) {
           'smoke-evt-cli-bi@test.io',
           'smoke-evt-cli-cu@test.io',
           'smoke-evt-cli-ps@test.io',
+          'smoke-evt-cli-te@test.io',
         ],
       },
     },
@@ -1053,6 +1054,87 @@ async function main() {
       'PERIOD_FIXED',
       'new pricing strategy value stored',
     );
+
+    // ── 4e.iii — endDate falls back to the term's end ────────
+    // '[csv-smoke] Trimestre' runs 2026-09-01 → 2026-12-19.
+    console.log('\n4e.iii Enrollment endDate inherits the term end');
+    await ensureClient(organizationId, {
+      email: 'smoke-evt-cli-te@test.io',
+      firstname: 'Term',
+      lastname: 'End',
+      phone: '5559990004',
+    });
+    const ENR_HEADER =
+      'client,service,term,room,facilitator,weekday,startTime,durationMinutes,startDate,endDate,priceCharged,pricingStrategy,status';
+    const enrNoEndRow = [
+      'smoke-evt-cli-te@test.io',
+      '[csv-smoke] Piano 30min',
+      '[csv-smoke] Trimestre',
+      '[csv-smoke] Salle A',
+      'smoke-evt-fac@test.io',
+      'jeudi',
+      '16:00',
+      '60',
+      '2026-09-17',
+      '', // empty → term end
+      '',
+      'PERIOD_PRORATED',
+      'ACTIVE',
+    ].join(',');
+    {
+      const preview = await postCsv(
+        '/api/import/preview/enrollment',
+        [ENR_HEADER, enrNoEndRow].join('\n'),
+      );
+      assertEq(preview.json.errorRows, 0, 'term-end fallback: 0 errors');
+      const c = await postCsv(
+        '/api/import/commit/enrollment',
+        [ENR_HEADER, enrNoEndRow].join('\n'),
+      );
+      assertEq(c.json.created, 1, 'term-end fallback: 1 created');
+    }
+    // Compare in local time — the import anchors the date at the row's
+    // start time using local setHours, so an ISO/UTC comparison would
+    // be reading a different clock than the code under test.
+    const localStamp = (d: Date | null | undefined) =>
+      d
+        ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(
+            d.getDate(),
+          ).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(
+            d.getMinutes(),
+          ).padStart(2, '0')}`
+        : null;
+    const termEnr = await prisma.enrollment.findFirst({
+      where: { organizationId, client: { email: 'smoke-evt-cli-te@test.io' } },
+      select: { endDate: true },
+    });
+    assertEq(
+      localStamp(termEnr?.endDate),
+      '2026-12-19 16:00',
+      'endDate inherited from the term end, anchored at the start time',
+    );
+
+    // An explicit date still wins — that's the "stops early" case.
+    {
+      const early = [
+        ENR_HEADER,
+        enrNoEndRow.replace(',2026-09-17,,', ',2026-09-17,2026-11-30,'),
+      ].join('\n');
+      const c = await postCsv('/api/import/commit/enrollment', early);
+      assertEq(c.json.updated, 1, 'explicit endDate: 1 updated');
+      const row = await prisma.enrollment.findFirst({
+        where: {
+          organizationId,
+          client: { email: 'smoke-evt-cli-te@test.io' },
+        },
+        select: { endDate: true },
+      });
+      assertEq(
+        localStamp(row?.endDate),
+        '2026-11-30 16:00',
+        'explicit endDate overrides the term end',
+      );
+    }
 
     // ── 4f. Event ↔ enrollment linkage ───────────────────────
     console.log('\n4f. Event with enrollment-column linkage');

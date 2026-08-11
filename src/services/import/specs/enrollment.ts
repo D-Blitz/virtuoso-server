@@ -179,20 +179,38 @@ async function resolveRoom(
   return row;
 }
 
+type ResolvedTerm = { id: string; endDate: Date };
+
+/**
+ * Resolve a Term by name. Returns its endDate alongside the id — that
+ * backs the optional `endDate` column, where an empty cell means "runs
+ * to the end of the term".
+ */
 async function resolveTerm(
   name: string,
   ctx: ImportContext,
-): Promise<string | null> {
+): Promise<ResolvedTerm | null> {
   const key = `term:${name.toLowerCase()}`;
   const cached = ctx.referenceCache.get(key);
-  if (cached !== undefined) return cached;
+  if (cached === null) return null;
+  if (cached !== undefined) {
+    // referenceCache is Map<string, string|null>, so the date rides
+    // along as an ISO string under a sibling key.
+    const endRaw = ctx.referenceCache.get(`termEndDate:${cached}`);
+    if (endRaw) return { id: cached, endDate: new Date(endRaw) };
+    // Sibling key missing (cached by an older code path) — refetch.
+  }
   const row = await ctx.prisma.term.findFirst({
     where: { organizationId: ctx.organizationId, name },
-    select: { id: true },
+    select: { id: true, endDate: true },
   });
-  const id = row?.id ?? null;
-  ctx.referenceCache.set(key, id);
-  return id;
+  if (!row) {
+    ctx.referenceCache.set(key, null);
+    return null;
+  }
+  ctx.referenceCache.set(key, row.id);
+  ctx.referenceCache.set(`termEndDate:${row.id}`, row.endDate.toISOString());
+  return { id: row.id, endDate: row.endDate };
 }
 
 async function resolveFacilitator(
@@ -425,8 +443,10 @@ export const enrollmentSpec: ImportEntitySpec = {
     {
       key: 'endDate',
       label: 'Date de fin',
-      required: true,
+      required: false,
       type: 'date',
+      description:
+        'Dernière occurrence possible (ISO yyyy-mm-dd). Laissez vide pour aller jusqu’à la fin de la période — le cas courant. Renseignez-la seulement pour une inscription qui s’arrête plus tôt.',
       example: '2026-12-19',
     },
     {
@@ -562,18 +582,11 @@ export const enrollmentSpec: ImportEntitySpec = {
       label: 'Date de début',
     });
     if (startDate.error) errors.push(startDate.error);
-    const endDate = parseDate(row.endDate, {
-      required: true,
-      label: 'Date de fin',
-    });
+    // Optional: an empty cell runs the enrollment to the end of its
+    // term. Validated against the effective end further down, once the
+    // term has been resolved.
+    const endDate = parseDate(row.endDate, { label: 'Date de fin' });
     if (endDate.error) errors.push(endDate.error);
-    if (
-      startDate.value &&
-      endDate.value &&
-      startDate.value.getTime() > endDate.value.getTime()
-    ) {
-      errors.push('La date de début doit être avant la date de fin');
-    }
     const price = parseFloatNumber(row.priceCharged, {
       required: false,
       label: 'Tarif',
@@ -595,6 +608,9 @@ export const enrollmentSpec: ImportEntitySpec = {
     let clientId: string | null = null;
     let serviceId: string | null = null;
     let termId: string | null = null;
+    // Backs the optional endDate column. Stays null until the term
+    // resolves.
+    let termEndDate: Date | null = null;
     let roomId: string | null = null;
     let locationId: string | null = null;
     let facilitatorId: string | null = null;
@@ -618,8 +634,13 @@ export const enrollmentSpec: ImportEntitySpec = {
       }
     }
     if (termName.value) {
-      termId = await resolveTerm(termName.value, ctx);
-      if (!termId) errors.push(`Période "${termName.value}" introuvable.`);
+      const term = await resolveTerm(termName.value, ctx);
+      if (!term) {
+        errors.push(`Période "${termName.value}" introuvable.`);
+      } else {
+        termId = term.id;
+        termEndDate = term.endDate;
+      }
     }
     if (roomName.value) {
       const rm = await resolveRoom(roomName.value, ctx);
@@ -640,14 +661,38 @@ export const enrollmentSpec: ImportEntitySpec = {
       }
     }
 
+    // An empty endDate cell inherits the term's end — the usual case,
+    // since an enrollment normally runs the whole term. An explicit
+    // date is for the exception: someone stopping early.
+    const effectiveEndDate = endDate.value ?? termEndDate;
+    if (
+      startDate.value &&
+      effectiveEndDate &&
+      startDate.value.getTime() > effectiveEndDate.getTime()
+    ) {
+      errors.push(
+        endDate.value
+          ? 'La date de début doit être avant la date de fin'
+          : 'La date de début est postérieure à la fin de la période — renseignez une date de fin explicite.',
+      );
+    }
+
     if (errors.length > 0) return { errors, warnings };
 
     // Compute the active window. startDate / endDate from the CSV
     // are date-only; the recurrence rule wants Datetimes. We anchor
     // both at the start time so the weekly generator's [start, end]
     // window covers the correct calendar range.
+    //
+    // effectiveEndDate is non-null here: it's either the CSV cell or
+    // the resolved term's end, and an unresolvable term is a hard error
+    // that already returned above. The `?? startDate.value!` only keeps
+    // the types honest.
     const startAt = combineDateAndTime(startDate.value!, startTime.value!);
-    const endAt = combineDateAndTime(endDate.value!, startTime.value!);
+    const endAt = combineDateAndTime(
+      effectiveEndDate ?? startDate.value!,
+      startTime.value!,
+    );
     const startTimeHHmm = `${String(startTime.value!.hours).padStart(2, '0')}:${String(startTime.value!.minutes).padStart(2, '0')}`;
 
     // Apply the service-default fallback. If the CSV cell was empty
