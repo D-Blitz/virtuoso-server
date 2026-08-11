@@ -1,52 +1,77 @@
-// @ts-nocheck
-//
-// STALE — pre-Phase-0.3 auth model. Uses `User.role` freeform string;
-// the live schema has `User.roleId` → Role table since the
-// granular_permissions migration. Manage users via the admin UI's
-// /admin/utilisateurs page or rewrite this script to look up Role
-// rows by name (Propriétaire / Administrateur / Intervenant).
-//
-// Kept here for reference + future rewrite. @ts-nocheck so the
-// engine's `tsc --noEmit` (which now covers scripts/) doesn't trip
-// on the stale schema references.
-
 /**
  * Create or update a user in the default organization.
  *
  * Usage:
- *   npx ts-node scripts/createUser.ts <role> <email> <password> [facilitatorId]
+ *   npx ts-node -r tsconfig-paths/register scripts/createUser.ts <role> <email> <password> [facilitatorId]
  *
- * <role>          OWNER | ADMIN | STAFF | FACILITATOR
- * [facilitatorId] Optional. Link this user to an existing Facilitator row
- *                 (only meaningful for role=FACILITATOR).
+ * <role>          owner | admin | intervenant — case-insensitive shorthand for
+ *                 the seeded roles (Propriétaire / Administrateur / Intervenant),
+ *                 so you don't have to type accents. An exact role name also
+ *                 works, including custom roles the org has created.
+ * [facilitatorId] Optional. Link this user to an existing Facilitator row.
  *
- * Idempotent: re-running with the same email updates the password and role.
+ * Idempotent: re-running with the same email updates password + role, and
+ * reactivates the account if it had been disabled. Seeds the org's starter
+ * roles first, so this works on a fresh database.
  */
-import { PrismaClient } from '@prisma/client';
-import bcrypt from 'bcryptjs';
 import 'dotenv/config';
+import prisma from '../src/prisma';
+import { hashPassword } from '../src/auth/password';
+import { seedOrgRoles } from '../src/services/role/seedOrgRoles';
 
-const prisma = new PrismaClient();
-
-const VALID_ROLES = new Set(['OWNER', 'ADMIN', 'STAFF', 'FACILITATOR']);
+const ROLE_ALIASES: Record<string, string> = {
+  owner: 'Propriétaire',
+  proprietaire: 'Propriétaire',
+  admin: 'Administrateur',
+  administrateur: 'Administrateur',
+  intervenant: 'Intervenant',
+};
 
 async function main() {
-  const [, , role, email, password, facilitatorId] = process.argv;
-  if (!role || !email || !password) {
-    console.error('Usage: ts-node scripts/createUser.ts <role> <email> <password> [facilitatorId]');
+  const [, , roleArg, emailArg, password, facilitatorId] = process.argv;
+  if (!roleArg || !emailArg || !password) {
+    console.error(
+      'Usage: ts-node scripts/createUser.ts <role> <email> <password> [facilitatorId]',
+    );
     process.exit(1);
   }
-  if (!VALID_ROLES.has(role)) {
-    console.error(`Invalid role "${role}". Must be one of: ${[...VALID_ROLES].join(', ')}`);
+  if (password.length < 8) {
+    console.error('Password must be at least 8 characters (matches UserService.create).');
     process.exit(1);
   }
+
+  // AuthService.login matches the email verbatim and UserService lowercases on
+  // write — normalise here too, or the credentials silently fail at sign-in.
+  const email = emailArg.trim().toLowerCase();
 
   const organizationId = process.env.DEV_DEFAULT_ORG_ID ?? 'clxorg000000000000000001';
 
   const org = await prisma.organization.findUnique({ where: { id: organizationId } });
   if (!org) {
     console.error(
-      `Organization ${organizationId} not found. Run the migration first (npx prisma migrate deploy).`,
+      `Organization ${organizationId} not found. Run npx prisma migrate deploy, then npm run seed.`,
+    );
+    process.exit(1);
+  }
+
+  // A fresh org has no Role rows — seed.ts only creates the Organization.
+  // Idempotent, so re-running is free and never touches custom roles.
+  await seedOrgRoles(organizationId);
+
+  const roleName = ROLE_ALIASES[roleArg.toLowerCase()] ?? roleArg;
+  const role = await prisma.role.findFirst({
+    where: { organizationId, name: roleName },
+    select: { id: true, name: true },
+  });
+  if (!role) {
+    const available = await prisma.role.findMany({
+      where: { organizationId },
+      select: { name: true },
+    });
+    console.error(
+      `Role "${roleName}" not found in org ${org.slug}. Available: ${available
+        .map((r) => r.name)
+        .join(', ')}`,
     );
     process.exit(1);
   }
@@ -54,6 +79,7 @@ async function main() {
   if (facilitatorId) {
     const fac = await prisma.facilitator.findFirst({
       where: { id: facilitatorId, organizationId },
+      select: { id: true },
     });
     if (!fac) {
       console.error(`Facilitator ${facilitatorId} not found in org ${org.slug}.`);
@@ -61,22 +87,28 @@ async function main() {
     }
   }
 
-  const passwordHash = await bcrypt.hash(password, 10);
+  const passwordHash = await hashPassword(password);
 
   const user = await prisma.user.upsert({
     where: { organizationId_email: { organizationId, email } },
-    update: { passwordHash, role, facilitatorId: facilitatorId ?? null },
+    update: {
+      passwordHash,
+      roleId: role.id,
+      facilitatorId: facilitatorId ?? null,
+      disabledAt: null,
+      disabledById: null,
+    },
     create: {
       email,
       passwordHash,
-      role,
+      roleId: role.id,
       organizationId,
       facilitatorId: facilitatorId ?? null,
     },
   });
 
   console.log(
-    `✅ User ready: ${user.email} (id=${user.id}, role=${user.role})` +
+    `✅ User ready: ${user.email} (id=${user.id}, role=${role.name})` +
       (user.facilitatorId ? ` linked to facilitator ${user.facilitatorId}` : '') +
       ` in org ${org.slug}`,
   );
