@@ -1,15 +1,26 @@
 // ScheduledEvent import spec.
 //
-// One CSV row = one concrete event. No recurrence — admins use the
-// calendar form for recurring series; the import is for bulk-loading
+// One CSV row = one concrete event, OR one whole recurring series when
+// the optional `frequency` + `recurrenceEndDate` pair is filled in.
+// Leaving them empty keeps the original behaviour: bulk-loading
 // pre-materialized occurrences (e.g. a term schedule exported from
 // another tool, or an export from this app that's been edited).
+//
+// Recurrence reuses the same generator as the calendar form
+// (services/recurrence) and produces the same shape: one
+// RecurrenceSeries row plus N ScheduledEvent occurrences carrying its
+// seriesId. Nothing about a series created here is special-cased.
 //
 // Schema requires 4 FKs: room, location, service, serviceCategory.
 // We derive `location` from the Room and `serviceCategory` from the
 // Service — admins only supply room + service in the CSV. This
 // matches what ScheduledEventService.create() does for the calendar
 // form and prevents inconsistencies between hand-typed FKs.
+//
+// endTime and price are optional: an empty cell inherits the Service's
+// defaultDurationMinutes / defaultPrice. Mirrors the enrollment spec,
+// which has always worked this way — requiring them per row duplicated
+// data the Service already owns, and let the two drift apart.
 //
 // Natural key for upsert: (organizationId, date, startTime, roomId)
 // — there's no @@unique in the schema, but this composite is what
@@ -18,47 +29,93 @@
 
 import {
   parseDate,
+  parseEnum,
   parseFloatNumber,
   parseHexColor,
   parseMultiReference,
   parseString,
   parseTime,
 } from '../parsers';
+import {
+  FREQUENCIES,
+  generateOccurrences,
+  type Frequency,
+  type Occurrence,
+} from '../../recurrence/recurrence';
 import type { ImportContext, ImportEntitySpec } from '../types';
 
 /**
- * Resolve a Service by name → returns { id, serviceCategoryId } so
- * we can pre-fill the derived serviceCategoryId without a second
- * query. Cached so a CSV with 1000 events on 5 services only hits
- * the DB 5 times.
+ * Fallback for an empty `color` cell. Neutral grey rather than a brand
+ * colour: an imported event with no colour of its own shouldn't look
+ * deliberately categorised on the planning board.
+ *
+ * Same value ScheduledEventService already falls back to when creating
+ * a recurrence series without a colour (`rest.color ?? '#999999'`), so
+ * the calendar form and the import agree.
+ */
+const DEFAULT_EVENT_COLOR = '#999999';
+
+type ResolvedEventService = {
+  id: string;
+  serviceCategoryId: string;
+  defaultDurationMinutes: number;
+  defaultPrice: number;
+};
+
+/**
+ * Resolve a Service by name → returns the derived serviceCategoryId
+ * plus the defaults that back the optional endTime / price columns,
+ * all in one query. Cached so a CSV with 1000 events on 5 services
+ * only hits the DB 5 times.
+ *
+ * The sibling cache keys (`serviceCategoryFor:` / `serviceDuration:` /
+ * `servicePrice:`) are deliberately the same ones the enrollment spec
+ * writes, so an import touching both entity types warms them once.
  */
 async function resolveServiceForEvent(
   name: string,
   ctx: ImportContext,
-): Promise<{ id: string; serviceCategoryId: string } | null> {
-  const key = `serviceForEvent:${name.toLowerCase()}`;
-  const cached = ctx.referenceCache.get(key);
-  if (cached !== undefined) {
-    if (cached === null) return null;
-    // Lookup the cached id's category. We re-store as a JSON-ish
-    // string in the cache to keep ImportContext.referenceCache typed
-    // as Map<string, string|null>. Simpler: cache id and category
-    // separately under two keys.
-    const catKey = `serviceCategoryFor:${cached}`;
-    const cachedCat = ctx.referenceCache.get(catKey);
-    if (cachedCat) return { id: cached, serviceCategoryId: cachedCat };
-    // Cache hit on id but miss on category — fall through to refetch.
+): Promise<ResolvedEventService | null> {
+  const idKey = `serviceForEvent:${name.toLowerCase()}`;
+  const cachedId = ctx.referenceCache.get(idKey);
+  if (cachedId === null) return null;
+  if (cachedId !== undefined) {
+    // referenceCache is Map<string, string|null>, so the numbers are
+    // stored stringified and rehydrated here.
+    const catId = ctx.referenceCache.get(`serviceCategoryFor:${cachedId}`);
+    const durRaw = ctx.referenceCache.get(`serviceDuration:${cachedId}`);
+    const priceRaw = ctx.referenceCache.get(`servicePrice:${cachedId}`);
+    if (catId && durRaw && priceRaw) {
+      return {
+        id: cachedId,
+        serviceCategoryId: catId,
+        defaultDurationMinutes: Number(durRaw),
+        defaultPrice: Number(priceRaw),
+      };
+    }
+    // A sibling key is missing (another spec cached only the id) —
+    // fall through and refetch.
   }
   const row = await ctx.prisma.service.findFirst({
     where: { organizationId: ctx.organizationId, name },
-    select: { id: true, serviceCategoryId: true },
+    select: {
+      id: true,
+      serviceCategoryId: true,
+      defaultDurationMinutes: true,
+      defaultPrice: true,
+    },
   });
   if (!row) {
-    ctx.referenceCache.set(key, null);
+    ctx.referenceCache.set(idKey, null);
     return null;
   }
-  ctx.referenceCache.set(key, row.id);
+  ctx.referenceCache.set(idKey, row.id);
   ctx.referenceCache.set(`serviceCategoryFor:${row.id}`, row.serviceCategoryId);
+  ctx.referenceCache.set(
+    `serviceDuration:${row.id}`,
+    String(row.defaultDurationMinutes),
+  );
+  ctx.referenceCache.set(`servicePrice:${row.id}`, String(row.defaultPrice));
   return row;
 }
 
@@ -330,9 +387,10 @@ export const scheduledEventSpec: ImportEntitySpec = {
     {
       key: 'endTime',
       label: 'Heure de fin',
-      required: true,
+      required: false,
       type: 'string',
-      description: 'Format HH:MM (24h). Doit être après startTime.',
+      description:
+        'Format HH:MM (24h), après startTime. Laissez vide pour appliquer la durée par défaut de la prestation.',
       example: '15:00',
     },
     {
@@ -380,17 +438,19 @@ export const scheduledEventSpec: ImportEntitySpec = {
     {
       key: 'color',
       label: 'Couleur',
-      required: true,
+      required: false,
       type: 'string',
-      description: 'Couleur hex (#abc ou #aabbcc) — affichage sur le planning.',
+      description:
+        'Couleur hex (#abc ou #aabbcc) — affichage sur le planning. Laissez vide pour un gris neutre (#999999).',
       example: '#5b5bff',
     },
     {
       key: 'price',
       label: 'Tarif (€)',
-      required: true,
+      required: false,
       type: 'number',
-      description: 'Décimales avec . ou ,',
+      description:
+        'Décimales avec . ou ,. Laissez vide pour appliquer le tarif par défaut de la prestation — 0 reste une valeur valide (événement offert).',
       example: '35.00',
     },
     {
@@ -407,6 +467,25 @@ export const scheduledEventSpec: ImportEntitySpec = {
       referenceEntity: 'tag',
       referenceColumn: 'label',
       description: 'Libellés d’étiquettes séparés par des virgules.',
+    },
+    {
+      key: 'frequency',
+      label: 'Récurrence',
+      required: false,
+      type: 'enum',
+      enumValues: FREQUENCIES.slice(),
+      description:
+        'Laissez vide pour un événement unique. Renseigné, la ligne décrit toute une série : les occurrences sont générées de la date de début jusqu’à recurrenceEndDate. Exige recurrenceEndDate.',
+      example: 'WEEKLY',
+    },
+    {
+      key: 'recurrenceEndDate',
+      label: 'Fin de récurrence',
+      required: false,
+      type: 'date',
+      description:
+        'Format ISO yyyy-mm-dd, incluse. Dernière date à laquelle une occurrence peut tomber. Obligatoire si frequency est renseigné, ignorée sinon.',
+      example: '2026-12-19',
     },
     {
       key: 'enrollment',
@@ -434,20 +513,15 @@ export const scheduledEventSpec: ImportEntitySpec = {
       label: 'Heure de début',
     });
     if (startTime.error) errors.push(startTime.error);
-    const endTime = parseTime(row.endTime, {
-      required: true,
-      label: 'Heure de fin',
-    });
+    // Optional: an empty cell means "use the service's default
+    // duration". `end` can't be computed until the service resolves,
+    // so it's derived further down.
+    const endTime = parseTime(row.endTime, { label: 'Heure de fin' });
     if (endTime.error) errors.push(endTime.error);
 
     let start: Date | null = null;
-    let end: Date | null = null;
-    if (date.value && startTime.value && endTime.value) {
+    if (date.value && startTime.value) {
       start = combineDateAndTime(date.value, startTime.value);
-      end = combineDateAndTime(date.value, endTime.value);
-      if (end.getTime() <= start.getTime()) {
-        errors.push("L'heure de fin doit être strictement après l'heure de début");
-      }
     }
 
     const serviceName = parseString(row.service, {
@@ -458,16 +532,16 @@ export const scheduledEventSpec: ImportEntitySpec = {
     const roomName = parseString(row.room, { required: true, label: 'Salle' });
     if (roomName.error) errors.push(roomName.error);
 
+    // Optional: an empty cell takes the neutral grey. A malformed one
+    // is still an error — silently recolouring a typo would hide it.
     const color = parseHexColor(row.color, {
-      required: true,
       label: 'Couleur',
+      default: DEFAULT_EVENT_COLOR,
     });
     if (color.error) errors.push(color.error);
-    const price = parseFloatNumber(row.price, {
-      required: true,
-      label: 'Tarif',
-      min: 0,
-    });
+    // Optional: an empty cell means "use the service's default price".
+    // An explicit 0 is preserved — `??` only falls back on null.
+    const price = parseFloatNumber(row.price, { label: 'Tarif', min: 0 });
     if (price.error) errors.push(price.error);
     const notes = parseString(row.notes);
 
@@ -491,6 +565,10 @@ export const scheduledEventSpec: ImportEntitySpec = {
     let serviceCategoryId: string | null = null;
     let roomId: string | null = null;
     let locationId: string | null = null;
+    // Back the optional endTime / price columns. Stay null until the
+    // service resolves.
+    let serviceDefaultDuration: number | null = null;
+    let serviceDefaultPrice: number | null = null;
     if (serviceName.value) {
       const svc = await resolveServiceForEvent(serviceName.value, ctx);
       if (!svc) {
@@ -498,6 +576,90 @@ export const scheduledEventSpec: ImportEntitySpec = {
       } else {
         serviceId = svc.id;
         serviceCategoryId = svc.serviceCategoryId;
+        serviceDefaultDuration = svc.defaultDurationMinutes;
+        serviceDefaultPrice = svc.defaultPrice;
+      }
+    }
+
+    // Derive the end. An explicit endTime is combined with the row's
+    // date and must be strictly after the start. An empty cell falls
+    // back to the service's default duration — Service
+    // .defaultDurationMinutes is non-nullable, so once the service
+    // resolved the fallback is always available. The trailing `?? 60`
+    // only applies when the service did NOT resolve, and that row is
+    // already failing on the "Prestation introuvable" error above; it
+    // just keeps the payload well-formed until the errors are returned.
+    //
+    // Adding minutes to the start also handles an event that runs past
+    // midnight, which the explicit-endTime path cannot express (an
+    // endTime of 00:30 combines with the same date and lands before
+    // the start).
+    let end: Date | null = null;
+    if (start) {
+      if (endTime.value) {
+        end = combineDateAndTime(date.value!, endTime.value);
+        if (end.getTime() <= start.getTime()) {
+          errors.push(
+            "L'heure de fin doit être strictement après l'heure de début",
+          );
+        }
+      } else {
+        end = new Date(
+          start.getTime() + (serviceDefaultDuration ?? 60) * 60_000,
+        );
+      }
+    }
+
+    // ── Optional recurrence ──────────────────────────────────────
+    // The two columns travel together: a frequency with no end date is
+    // unbounded, and an end date with no frequency has nothing to
+    // repeat. Either one alone is a mistake worth surfacing rather than
+    // quietly ignoring.
+    const frequency = parseEnum(row.frequency, FREQUENCIES, {
+      label: 'Récurrence',
+    });
+    if (frequency.error) errors.push(frequency.error);
+    const recurrenceEnd = parseDate(row.recurrenceEndDate, {
+      label: 'Fin de récurrence',
+    });
+    if (recurrenceEnd.error) errors.push(recurrenceEnd.error);
+
+    if (frequency.value && !recurrenceEnd.value) {
+      errors.push(
+        'recurrenceEndDate est requis lorsque frequency est renseigné.',
+      );
+    }
+    if (!frequency.value && recurrenceEnd.value) {
+      errors.push(
+        'frequency est requis lorsque recurrenceEndDate est renseigné.',
+      );
+    }
+
+    // Generate at parse time, not at commit time, so a rule that blows
+    // the 500-occurrence cap fails during the preview — where the admin
+    // can see and fix it — instead of part-way through writing.
+    let occurrences: Occurrence[] | null = null;
+    let recurrenceBoundary: Date | null = null;
+    if (frequency.value && recurrenceEnd.value && start && end) {
+      // The column names a day; treat it as end-of-day so an occurrence
+      // landing on that date is included, matching "incluse" in the doc.
+      recurrenceBoundary = new Date(recurrenceEnd.value);
+      recurrenceBoundary.setHours(23, 59, 59, 999);
+      if (recurrenceBoundary.getTime() < start.getTime()) {
+        errors.push('recurrenceEndDate doit être à la date de début ou après.');
+      } else {
+        try {
+          occurrences = generateOccurrences({
+            frequency: frequency.value as Frequency,
+            startDate: start,
+            endDate: recurrenceBoundary,
+            durationMs: end.getTime() - start.getTime(),
+          });
+        } catch (err) {
+          errors.push(
+            err instanceof Error ? err.message : 'Récurrence invalide.',
+          );
+        }
       }
     }
     if (roomName.value) {
@@ -583,8 +745,8 @@ export const scheduledEventSpec: ImportEntitySpec = {
       data: {
         startTime: start!,
         endTime: end!,
-        color: color.value!,
-        price: price.value!,
+        color: color.value ?? DEFAULT_EVENT_COLOR,
+        price: price.value ?? serviceDefaultPrice ?? 0,
         notes: notes.value,
         serviceId,
         serviceCategoryId,
@@ -594,6 +756,10 @@ export const scheduledEventSpec: ImportEntitySpec = {
         facilitatorIds: facResolved.ids,
         clientIds: clientResolved.ids,
         tagIds: tagResolved.ids,
+        // null on both = standalone event, the default path.
+        frequency: frequency.value ?? null,
+        recurrenceEndDate: recurrenceBoundary,
+        recurrenceOccurrences: occurrences,
       },
     };
   },
@@ -610,7 +776,7 @@ export const scheduledEventSpec: ImportEntitySpec = {
         roomId: data.roomId as string,
         deletedAt: null,
       },
-      select: { id: true },
+      select: { id: true, seriesId: true },
     });
 
     const facIds = data.facilitatorIds as string[];
@@ -649,22 +815,104 @@ export const scheduledEventSpec: ImportEntitySpec = {
       enrollmentId: (data.enrollmentId as string | null) ?? null,
     };
 
-    if (existing) {
-      await ctx.prisma.scheduledEvent.update({
-        where: { id: existing.id },
-        data: { ...scalars, ...m2mUpdate },
+    const occurrences = data.recurrenceOccurrences as Occurrence[] | null;
+
+    // ── Standalone event (no recurrence columns) ────────────────
+    if (!occurrences) {
+      if (existing) {
+        await ctx.prisma.scheduledEvent.update({
+          where: { id: existing.id },
+          data: { ...scalars, ...m2mUpdate },
+        });
+        return { id: existing.id, action: 'updated' };
+      }
+      const created = await ctx.prisma.scheduledEvent.create({
+        data: {
+          organizationId: ctx.organizationId,
+          ...scalars,
+          ...m2mCreate,
+        },
+        select: { id: true },
       });
-      return { id: existing.id, action: 'updated' };
+      return { id: created.id, action: 'created' };
     }
-    const created = await ctx.prisma.scheduledEvent.create({
-      data: {
-        organizationId: ctx.organizationId,
+
+    // ── Recurring series ────────────────────────────────────────
+    // The row's natural key (startTime, room) is by construction the
+    // series' FIRST occurrence, so it identifies the series on
+    // re-import too: find the event at that slot, read its seriesId,
+    // and reuse it. That's what stops a second run from creating a
+    // parallel series alongside the first.
+    const seriesDefaults = {
+      frequency: data.frequency as string,
+      startDate: data.startTime as Date,
+      endDate: data.recurrenceEndDate as Date,
+      defaultColor: scalars.color,
+      defaultPrice: scalars.price,
+      defaultNotes: scalars.notes,
+      defaultRoomId: scalars.roomId,
+      defaultLocationId: scalars.locationId,
+      defaultServiceId: scalars.serviceId,
+    };
+
+    let seriesId = existing?.seriesId ?? null;
+    if (seriesId) {
+      await ctx.prisma.recurrenceSeries.update({
+        where: { id: seriesId },
+        data: seriesDefaults,
+      });
+    } else {
+      const series = await ctx.prisma.recurrenceSeries.create({
+        data: { organizationId: ctx.organizationId, ...seriesDefaults },
+        select: { id: true },
+      });
+      seriesId = series.id;
+    }
+
+    // Each occurrence upserts on the same (startTime, room) key the
+    // standalone path uses, so re-running lands on the existing rows.
+    //
+    // Occurrences of a PREVIOUS run that fall outside the new range are
+    // left alone rather than deleted — the import is additive
+    // everywhere else, and silently destroying calendar rows the admin
+    // can't see in the preview would be the wrong trade. Shortening a
+    // series is a calendar-side operation.
+    for (const occ of occurrences) {
+      const occExisting = await ctx.prisma.scheduledEvent.findFirst({
+        where: {
+          organizationId: ctx.organizationId,
+          startTime: occ.startTime,
+          roomId: scalars.roomId,
+          deletedAt: null,
+        },
+        select: { id: true },
+      });
+      const occScalars = {
         ...scalars,
-        ...m2mCreate,
-      },
-      select: { id: true },
-    });
-    return { id: created.id, action: 'created' };
+        startTime: occ.startTime,
+        endTime: occ.endTime,
+        seriesId,
+      };
+      if (occExisting) {
+        await ctx.prisma.scheduledEvent.update({
+          where: { id: occExisting.id },
+          data: { ...occScalars, ...m2mUpdate },
+        });
+      } else {
+        await ctx.prisma.scheduledEvent.create({
+          data: {
+            organizationId: ctx.organizationId,
+            ...occScalars,
+            ...m2mCreate,
+          },
+          select: { id: true },
+        });
+      }
+    }
+
+    // One CSV row = one series, so the import counters report a single
+    // created/updated regardless of how many occurrences it expanded to.
+    return { id: seriesId, action: existing ? 'updated' : 'created' };
   },
 
   async exportRows(ctx) {
@@ -753,6 +1001,17 @@ export const scheduledEventSpec: ImportEntitySpec = {
           notes: r.notes ?? '',
           tags: r.tags.map((t) => t.label).join(', '),
           enrollment: enrollmentComposite,
+          // Deliberately blank, even for rows that belong to a series.
+          // The export lists MATERIALIZED occurrences — one line per
+          // event that already exists. Emitting the series' rule on
+          // each of them would make a re-import treat every occurrence
+          // as the head of its own new series and re-expand it, turning
+          // a 20-event series into 400 events. Blank keeps the existing
+          // round-trip contract: each line updates its own row in place
+          // and the series linkage (seriesId, not written here) is left
+          // untouched.
+          frequency: '',
+          recurrenceEndDate: '',
         };
       },
     );
