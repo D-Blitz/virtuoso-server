@@ -11,6 +11,11 @@
 // matches what ScheduledEventService.create() does for the calendar
 // form and prevents inconsistencies between hand-typed FKs.
 //
+// endTime and price are optional: an empty cell inherits the Service's
+// defaultDurationMinutes / defaultPrice. Mirrors the enrollment spec,
+// which has always worked this way — requiring them per row duplicated
+// data the Service already owns, and let the two drift apart.
+//
 // Natural key for upsert: (organizationId, date, startTime, roomId)
 // — there's no @@unique in the schema, but this composite is what
 // "the same calendar slot" means functionally. Re-running the same
@@ -26,39 +31,67 @@ import {
 } from '../parsers';
 import type { ImportContext, ImportEntitySpec } from '../types';
 
+type ResolvedEventService = {
+  id: string;
+  serviceCategoryId: string;
+  defaultDurationMinutes: number;
+  defaultPrice: number;
+};
+
 /**
- * Resolve a Service by name → returns { id, serviceCategoryId } so
- * we can pre-fill the derived serviceCategoryId without a second
- * query. Cached so a CSV with 1000 events on 5 services only hits
- * the DB 5 times.
+ * Resolve a Service by name → returns the derived serviceCategoryId
+ * plus the defaults that back the optional endTime / price columns,
+ * all in one query. Cached so a CSV with 1000 events on 5 services
+ * only hits the DB 5 times.
+ *
+ * The sibling cache keys (`serviceCategoryFor:` / `serviceDuration:` /
+ * `servicePrice:`) are deliberately the same ones the enrollment spec
+ * writes, so an import touching both entity types warms them once.
  */
 async function resolveServiceForEvent(
   name: string,
   ctx: ImportContext,
-): Promise<{ id: string; serviceCategoryId: string } | null> {
-  const key = `serviceForEvent:${name.toLowerCase()}`;
-  const cached = ctx.referenceCache.get(key);
-  if (cached !== undefined) {
-    if (cached === null) return null;
-    // Lookup the cached id's category. We re-store as a JSON-ish
-    // string in the cache to keep ImportContext.referenceCache typed
-    // as Map<string, string|null>. Simpler: cache id and category
-    // separately under two keys.
-    const catKey = `serviceCategoryFor:${cached}`;
-    const cachedCat = ctx.referenceCache.get(catKey);
-    if (cachedCat) return { id: cached, serviceCategoryId: cachedCat };
-    // Cache hit on id but miss on category — fall through to refetch.
+): Promise<ResolvedEventService | null> {
+  const idKey = `serviceForEvent:${name.toLowerCase()}`;
+  const cachedId = ctx.referenceCache.get(idKey);
+  if (cachedId === null) return null;
+  if (cachedId !== undefined) {
+    // referenceCache is Map<string, string|null>, so the numbers are
+    // stored stringified and rehydrated here.
+    const catId = ctx.referenceCache.get(`serviceCategoryFor:${cachedId}`);
+    const durRaw = ctx.referenceCache.get(`serviceDuration:${cachedId}`);
+    const priceRaw = ctx.referenceCache.get(`servicePrice:${cachedId}`);
+    if (catId && durRaw && priceRaw) {
+      return {
+        id: cachedId,
+        serviceCategoryId: catId,
+        defaultDurationMinutes: Number(durRaw),
+        defaultPrice: Number(priceRaw),
+      };
+    }
+    // A sibling key is missing (another spec cached only the id) —
+    // fall through and refetch.
   }
   const row = await ctx.prisma.service.findFirst({
     where: { organizationId: ctx.organizationId, name },
-    select: { id: true, serviceCategoryId: true },
+    select: {
+      id: true,
+      serviceCategoryId: true,
+      defaultDurationMinutes: true,
+      defaultPrice: true,
+    },
   });
   if (!row) {
-    ctx.referenceCache.set(key, null);
+    ctx.referenceCache.set(idKey, null);
     return null;
   }
-  ctx.referenceCache.set(key, row.id);
+  ctx.referenceCache.set(idKey, row.id);
   ctx.referenceCache.set(`serviceCategoryFor:${row.id}`, row.serviceCategoryId);
+  ctx.referenceCache.set(
+    `serviceDuration:${row.id}`,
+    String(row.defaultDurationMinutes),
+  );
+  ctx.referenceCache.set(`servicePrice:${row.id}`, String(row.defaultPrice));
   return row;
 }
 
@@ -330,9 +363,10 @@ export const scheduledEventSpec: ImportEntitySpec = {
     {
       key: 'endTime',
       label: 'Heure de fin',
-      required: true,
+      required: false,
       type: 'string',
-      description: 'Format HH:MM (24h). Doit être après startTime.',
+      description:
+        'Format HH:MM (24h), après startTime. Laissez vide pour appliquer la durée par défaut de la prestation.',
       example: '15:00',
     },
     {
@@ -388,9 +422,10 @@ export const scheduledEventSpec: ImportEntitySpec = {
     {
       key: 'price',
       label: 'Tarif (€)',
-      required: true,
+      required: false,
       type: 'number',
-      description: 'Décimales avec . ou ,',
+      description:
+        'Décimales avec . ou ,. Laissez vide pour appliquer le tarif par défaut de la prestation — 0 reste une valeur valide (événement offert).',
       example: '35.00',
     },
     {
@@ -434,20 +469,15 @@ export const scheduledEventSpec: ImportEntitySpec = {
       label: 'Heure de début',
     });
     if (startTime.error) errors.push(startTime.error);
-    const endTime = parseTime(row.endTime, {
-      required: true,
-      label: 'Heure de fin',
-    });
+    // Optional: an empty cell means "use the service's default
+    // duration". `end` can't be computed until the service resolves,
+    // so it's derived further down.
+    const endTime = parseTime(row.endTime, { label: 'Heure de fin' });
     if (endTime.error) errors.push(endTime.error);
 
     let start: Date | null = null;
-    let end: Date | null = null;
-    if (date.value && startTime.value && endTime.value) {
+    if (date.value && startTime.value) {
       start = combineDateAndTime(date.value, startTime.value);
-      end = combineDateAndTime(date.value, endTime.value);
-      if (end.getTime() <= start.getTime()) {
-        errors.push("L'heure de fin doit être strictement après l'heure de début");
-      }
     }
 
     const serviceName = parseString(row.service, {
@@ -463,11 +493,9 @@ export const scheduledEventSpec: ImportEntitySpec = {
       label: 'Couleur',
     });
     if (color.error) errors.push(color.error);
-    const price = parseFloatNumber(row.price, {
-      required: true,
-      label: 'Tarif',
-      min: 0,
-    });
+    // Optional: an empty cell means "use the service's default price".
+    // An explicit 0 is preserved — `??` only falls back on null.
+    const price = parseFloatNumber(row.price, { label: 'Tarif', min: 0 });
     if (price.error) errors.push(price.error);
     const notes = parseString(row.notes);
 
@@ -491,6 +519,10 @@ export const scheduledEventSpec: ImportEntitySpec = {
     let serviceCategoryId: string | null = null;
     let roomId: string | null = null;
     let locationId: string | null = null;
+    // Back the optional endTime / price columns. Stay null until the
+    // service resolves.
+    let serviceDefaultDuration: number | null = null;
+    let serviceDefaultPrice: number | null = null;
     if (serviceName.value) {
       const svc = await resolveServiceForEvent(serviceName.value, ctx);
       if (!svc) {
@@ -498,6 +530,37 @@ export const scheduledEventSpec: ImportEntitySpec = {
       } else {
         serviceId = svc.id;
         serviceCategoryId = svc.serviceCategoryId;
+        serviceDefaultDuration = svc.defaultDurationMinutes;
+        serviceDefaultPrice = svc.defaultPrice;
+      }
+    }
+
+    // Derive the end. An explicit endTime is combined with the row's
+    // date and must be strictly after the start. An empty cell falls
+    // back to the service's default duration — Service
+    // .defaultDurationMinutes is non-nullable, so once the service
+    // resolved the fallback is always available. The trailing `?? 60`
+    // only applies when the service did NOT resolve, and that row is
+    // already failing on the "Prestation introuvable" error above; it
+    // just keeps the payload well-formed until the errors are returned.
+    //
+    // Adding minutes to the start also handles an event that runs past
+    // midnight, which the explicit-endTime path cannot express (an
+    // endTime of 00:30 combines with the same date and lands before
+    // the start).
+    let end: Date | null = null;
+    if (start) {
+      if (endTime.value) {
+        end = combineDateAndTime(date.value!, endTime.value);
+        if (end.getTime() <= start.getTime()) {
+          errors.push(
+            "L'heure de fin doit être strictement après l'heure de début",
+          );
+        }
+      } else {
+        end = new Date(
+          start.getTime() + (serviceDefaultDuration ?? 60) * 60_000,
+        );
       }
     }
     if (roomName.value) {
@@ -584,7 +647,7 @@ export const scheduledEventSpec: ImportEntitySpec = {
         startTime: start!,
         endTime: end!,
         color: color.value!,
-        price: price.value!,
+        price: price.value ?? serviceDefaultPrice ?? 0,
         notes: notes.value,
         serviceId,
         serviceCategoryId,

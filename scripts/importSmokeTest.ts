@@ -593,6 +593,77 @@ async function main() {
       assertEq(recommit.json.created, 0, 'event re-import: 0 created');
     }
 
+    // ── 4d.i — endTime / price inherit the service defaults ──
+    // '[csv-smoke] Piano 30min' is seeded at 30 min / 35 €.
+    console.log('\n4d.i Event endTime + price fall back to the service');
+    const inheritEvtCsv = [
+      'date,startTime,endTime,service,room,facilitators,clients,color,price,notes,tags',
+      [
+        '2026-09-30',
+        '11:00',
+        '', // empty → start + 30min
+        '[csv-smoke] Piano 30min',
+        '[csv-smoke] Salle A',
+        'smoke-evt-fac@test.io',
+        '',
+        '#5b5bff',
+        '', // empty → 35
+        '',
+        '',
+      ].join(','),
+      [
+        // An explicit 0 must survive: it means "free", not "unset".
+        '2026-09-30',
+        '15:00',
+        '',
+        '[csv-smoke] Piano 30min',
+        '[csv-smoke] Salle A',
+        'smoke-evt-fac@test.io',
+        '',
+        '#5b5bff',
+        '0',
+        '',
+        '',
+      ].join(','),
+    ].join('\n');
+    {
+      const preview = await postCsv(
+        '/api/import/preview/scheduledEvent',
+        inheritEvtCsv,
+      );
+      assertEq(preview.json.errorRows, 0, 'inherited event: 0 errors');
+      assertEq(preview.json.totalRows, 2, 'inherited event: 2 rows');
+      const commit = await postCsv(
+        '/api/import/commit/scheduledEvent',
+        inheritEvtCsv,
+      );
+      assertEq(commit.json.created, 2, 'inherited event: 2 created');
+    }
+    const inherited = await prisma.scheduledEvent.findFirst({
+      where: {
+        organizationId,
+        startTime: new Date('2026-09-30T11:00:00'),
+        room: { name: '[csv-smoke] Salle A' },
+      },
+      select: { endTime: true, price: true },
+    });
+    assertEq(
+      inherited?.endTime.toISOString(),
+      new Date('2026-09-30T11:30:00').toISOString(),
+      'endTime = start + service duration (30min)',
+    );
+    assertEq(inherited?.price, 35, 'price inherited from the service (35)');
+
+    const freeEvt = await prisma.scheduledEvent.findFirst({
+      where: {
+        organizationId,
+        startTime: new Date('2026-09-30T15:00:00'),
+        room: { name: '[csv-smoke] Salle A' },
+      },
+      select: { price: true },
+    });
+    assertEq(freeEvt?.price, 0, 'explicit 0 price is kept, not replaced');
+
     // ── 4e. Enrollment import + auto-event-generation ───────
     console.log('\n4e. Enrollment import + auto-event-generation');
     {
