@@ -23,6 +23,7 @@
  */
 import express from 'express';
 import 'dotenv/config';
+import Papa from 'papaparse';
 
 import { PrismaClient } from '@prisma/client';
 
@@ -827,6 +828,37 @@ async function main() {
       const headerLine = text.split('\n')[0].replace(/^﻿/, '');
       assert(headerLine.includes('email'), 'template includes email column');
       assert(headerLine.includes('firstname'), 'template includes firstname');
+
+      // The availability example is the one cell admins copy verbatim,
+      // and it contains both quotes and commas — assert it survives CSV
+      // escaping and still parses into the { weekday: [{start, end}] }
+      // shape the availability service reads.
+      const templateRows = Papa.parse<Record<string, string>>(
+        text.replace(/^﻿/, ''),
+        { header: true, skipEmptyLines: 'greedy' },
+      ).data;
+      let avail: unknown = null;
+      try {
+        avail = JSON.parse(templateRows[0]?.availability ?? '');
+      } catch {
+        avail = null;
+      }
+      assert(
+        avail != null,
+        'availability example is valid JSON after CSV round-trip',
+      );
+      const firstDay =
+        avail && typeof avail === 'object'
+          ? Object.values(avail as Record<string, unknown>)[0]
+          : null;
+      const firstWindow = Array.isArray(firstDay)
+        ? (firstDay[0] as { start?: unknown; end?: unknown })
+        : null;
+      assert(
+        typeof firstWindow?.start === 'string' &&
+          typeof firstWindow?.end === 'string',
+        'availability example uses { start, end } windows',
+      );
     }
 
     // ── 6. Registry endpoint lists all entities ──────────────
