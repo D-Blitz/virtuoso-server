@@ -253,6 +253,55 @@ async function main() {
     });
     assertEq(locsInDb.length, 2, 'exactly 2 smoke locations in DB after re-run');
 
+    // ── 3b. Semicolon-delimited CSV (European Excel export) ──
+    console.log('\n3b. Semicolon-delimited CSV is accepted');
+    const semiCsv = [
+      'name;address;description',
+      // The unquoted comma inside `address` is the real assertion here:
+      // it only survives if the delimiter actually switched to ';'.
+      // Parsed as ',' this row would split into 4 fields and land the
+      // wrong value in `description`.
+      '[csv-smoke] Studio A;1 rue Test, Bâtiment B;Petite salle',
+      '[csv-smoke] Studio B;2 rue Test;',
+    ].join('\n');
+    {
+      const r = await postCsv('/api/import/preview/location', semiCsv);
+      assertEq(r.json.totalRows, 2, 'semicolon preview: 2 rows');
+      assertEq(r.json.validRows, 2, 'semicolon preview: 2 valid');
+      assertEq(r.json.errorRows, 0, 'semicolon preview: 0 errors');
+    }
+    {
+      const r = await postCsv('/api/import/commit/location', semiCsv);
+      assertEq(r.json.created, 0, 'semicolon commit: 0 created (upserts)');
+      assertEq(r.json.updated, 2, 'semicolon commit: 2 updated');
+    }
+    const semiLoc = await prisma.location.findFirst({
+      where: { organizationId, name: '[csv-smoke] Studio A' },
+      select: { address: true, description: true },
+    });
+    assertEq(
+      semiLoc?.address,
+      '1 rue Test, Bâtiment B',
+      'comma inside a semicolon-delimited cell survives intact',
+    );
+    assertEq(
+      semiLoc?.description,
+      'Petite salle',
+      'following column not shifted by the embedded comma',
+    );
+
+    // Single-column files have no delimiter to find — must still fall
+    // back to ',' rather than erroring (the original reason auto-detect
+    // was rejected).
+    {
+      const r = await postCsv(
+        '/api/import/preview/tag',
+        ['label', '[csv-smoke] piano'].join('\n'),
+      );
+      assertEq(r.json.totalRows, 1, 'single-column CSV: 1 row');
+      assertEq(r.json.errorRows, 0, 'single-column CSV: still parses');
+    }
+
     // ── 4. Facilitator: relation-free import ────────────────
     console.log('\n4. Facilitator preview + commit');
     const facCsv = [

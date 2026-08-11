@@ -36,16 +36,66 @@ type ParseCsvResult =
   | { rows: Record<string, string>[]; error?: undefined }
   | { rows?: undefined; error: string };
 
+/**
+ * Field delimiters we accept, in preference order. ',' is both the
+ * default and the tie-breaker.
+ *
+ * ';' is here because European spreadsheets export it: in locales
+ * where ',' is the decimal separator (fr, de, es, it…), Excel and
+ * LibreOffice write ';'-delimited CSVs. Clients were having to
+ * re-save their exports before importing.
+ */
+const SUPPORTED_DELIMITERS = [',', ';'] as const;
+
+/**
+ * Pick the field delimiter by counting candidates in the header line.
+ *
+ * We still don't hand this to papaparse's own auto-detect: it fails on
+ * single-column CSVs (no delimiter to find) and surfaces a confusing
+ * parse error to admins importing tags or other single-field entities.
+ * Counting ourselves lets "found nothing" fall back to ',' silently,
+ * which is what keeps those single-column files working.
+ *
+ * Characters inside double quotes are skipped, so a quoted header like
+ * `"Nom, complet"` can't tip the count toward ','. Ties also fall back
+ * to ',' — order in SUPPORTED_DELIMITERS decides nothing on its own.
+ */
+function detectDelimiter(csvText: string): string {
+  const headerLine =
+    csvText.split(/\r?\n/).find((l) => l.trim().length > 0) ?? '';
+
+  const counts = new Map<string, number>(
+    SUPPORTED_DELIMITERS.map((d) => [d as string, 0]),
+  );
+  let inQuotes = false;
+  for (const ch of headerLine) {
+    if (ch === '"') {
+      inQuotes = !inQuotes;
+      continue;
+    }
+    if (inQuotes) continue;
+    const seen = counts.get(ch);
+    if (seen !== undefined) counts.set(ch, seen + 1);
+  }
+
+  let best = ',';
+  let bestCount = 0;
+  for (const d of SUPPORTED_DELIMITERS) {
+    const c = counts.get(d) ?? 0;
+    if (c > bestCount) {
+      best = d;
+      bestCount = c;
+    }
+  }
+  return best;
+}
+
 function parseCsv(csvText: string): ParseCsvResult {
   const trimmed = csvText.replace(/^﻿/, ''); // strip UTF-8 BOM
   const parsed = Papa.parse<Record<string, string>>(trimmed, {
     header: true,
     skipEmptyLines: 'greedy',
-    // Explicitly set the delimiter rather than relying on auto-detect.
-    // Auto-detect fails on single-column CSVs (no delimiter to find)
-    // and surfaces a confusing parse error to admins importing tags
-    // or single-field entities.
-    delimiter: ',',
+    delimiter: detectDelimiter(trimmed),
     transformHeader: (h) => h.trim(),
   });
   if (parsed.errors.length > 0) {
