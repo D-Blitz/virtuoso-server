@@ -31,6 +31,17 @@ import {
 } from '../parsers';
 import type { ImportContext, ImportEntitySpec } from '../types';
 
+/**
+ * Fallback for an empty `color` cell. Neutral grey rather than a brand
+ * colour: an imported event with no colour of its own shouldn't look
+ * deliberately categorised on the planning board.
+ *
+ * Same value ScheduledEventService already falls back to when creating
+ * a recurrence series without a colour (`rest.color ?? '#999999'`), so
+ * the calendar form and the import agree.
+ */
+const DEFAULT_EVENT_COLOR = '#999999';
+
 type ResolvedEventService = {
   id: string;
   serviceCategoryId: string;
@@ -414,9 +425,10 @@ export const scheduledEventSpec: ImportEntitySpec = {
     {
       key: 'color',
       label: 'Couleur',
-      required: true,
+      required: false,
       type: 'string',
-      description: 'Couleur hex (#abc ou #aabbcc) — affichage sur le planning.',
+      description:
+        'Couleur hex (#abc ou #aabbcc) — affichage sur le planning. Laissez vide pour un gris neutre (#999999).',
       example: '#5b5bff',
     },
     {
@@ -488,9 +500,11 @@ export const scheduledEventSpec: ImportEntitySpec = {
     const roomName = parseString(row.room, { required: true, label: 'Salle' });
     if (roomName.error) errors.push(roomName.error);
 
+    // Optional: an empty cell takes the neutral grey. A malformed one
+    // is still an error — silently recolouring a typo would hide it.
     const color = parseHexColor(row.color, {
-      required: true,
       label: 'Couleur',
+      default: DEFAULT_EVENT_COLOR,
     });
     if (color.error) errors.push(color.error);
     // Optional: an empty cell means "use the service's default price".
@@ -646,7 +660,7 @@ export const scheduledEventSpec: ImportEntitySpec = {
       data: {
         startTime: start!,
         endTime: end!,
-        color: color.value!,
+        color: color.value ?? DEFAULT_EVENT_COLOR,
         price: price.value ?? serviceDefaultPrice ?? 0,
         notes: notes.value,
         serviceId,

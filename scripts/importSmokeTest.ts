@@ -606,7 +606,7 @@ async function main() {
         '[csv-smoke] Salle A',
         'smoke-evt-fac@test.io',
         '',
-        '#5b5bff',
+        '', // empty → neutral grey
         '', // empty → 35
         '',
         '',
@@ -645,7 +645,7 @@ async function main() {
         startTime: new Date('2026-09-30T11:00:00'),
         room: { name: '[csv-smoke] Salle A' },
       },
-      select: { endTime: true, price: true },
+      select: { endTime: true, price: true, color: true },
     });
     assertEq(
       inherited?.endTime.toISOString(),
@@ -653,6 +653,30 @@ async function main() {
       'endTime = start + service duration (30min)',
     );
     assertEq(inherited?.price, 35, 'price inherited from the service (35)');
+    assertEq(inherited?.color, '#999999', 'empty colour → neutral grey');
+
+    // A malformed colour is still an error — defaulting it would hide
+    // the typo rather than surface it.
+    {
+      const badColour = [
+        'date,startTime,endTime,service,room,facilitators,clients,color,price,notes,tags',
+        [
+          '2026-10-01',
+          '09:00',
+          '',
+          '[csv-smoke] Piano 30min',
+          '[csv-smoke] Salle A',
+          'smoke-evt-fac@test.io',
+          '',
+          'bleu',
+          '',
+          '',
+          '',
+        ].join(','),
+      ].join('\n');
+      const r = await postCsv('/api/import/preview/scheduledEvent', badColour);
+      assertEq(r.json.errorRows, 1, 'malformed colour still errors');
+    }
 
     const freeEvt = await prisma.scheduledEvent.findFirst({
       where: {
