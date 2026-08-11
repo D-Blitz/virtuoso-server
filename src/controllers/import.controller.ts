@@ -24,7 +24,9 @@ import { sendError } from './httpErrors';
 import {
   buildCsvTemplate,
   commitImport,
+  DEFAULT_DELIMITER,
   exportEntityCsv,
+  isValidDelimiter,
   previewImport,
 } from '../services/import/csvImport';
 import { listImportSpecs } from '../services/import/registry';
@@ -36,6 +38,30 @@ function requireOrgId(res: Response): string | null {
     return null;
   }
   return orgId;
+}
+
+/**
+ * Sentinel for "the caller sent an invalid ?delimiter=" — the 400 has
+ * already been written, so the handler must return immediately.
+ * Distinct from `undefined`, which means "not supplied": on read that
+ * means auto-detect, on write it means fall back to ','.
+ */
+const BAD_DELIMITER = Symbol('bad-delimiter');
+
+function readDelimiter(
+  req: Request,
+  res: Response,
+): string | undefined | typeof BAD_DELIMITER {
+  const raw = req.query.delimiter;
+  if (raw === undefined) return undefined;
+  if (typeof raw !== 'string' || !isValidDelimiter(raw)) {
+    res.status(400).json({
+      error:
+        'Le séparateur doit être un caractère unique, différent du guillemet double et du retour à la ligne.',
+    });
+    return BAD_DELIMITER;
+  }
+  return raw;
 }
 
 export class ImportController {
@@ -52,7 +78,9 @@ export class ImportController {
   template(req: Request, res: Response) {
     try {
       const { type } = req.params;
-      const csv = buildCsvTemplate(type);
+      const delimiter = readDelimiter(req, res);
+      if (delimiter === BAD_DELIMITER) return;
+      const csv = buildCsvTemplate(type, delimiter ?? DEFAULT_DELIMITER);
       if (csv == null) {
         res.status(404).json({ error: `Unknown entity type: ${type}` });
         return;
@@ -79,10 +107,13 @@ export class ImportController {
         res.status(400).json({ error: 'CSV body is empty' });
         return;
       }
+      const delimiter = readDelimiter(req, res);
+      if (delimiter === BAD_DELIMITER) return;
       const result = await previewImport({
         organizationId: orgId,
         entityType: req.params.type,
         csvText,
+        delimiter,
       });
       res.json(result);
     } catch (err) {
@@ -100,10 +131,13 @@ export class ImportController {
         res.status(400).json({ error: 'CSV body is empty' });
         return;
       }
+      const delimiter = readDelimiter(req, res);
+      if (delimiter === BAD_DELIMITER) return;
       const result = await commitImport({
         organizationId: orgId,
         entityType: req.params.type,
         csvText,
+        delimiter,
       });
       res.json(result);
     } catch (err) {
@@ -117,9 +151,12 @@ export class ImportController {
     if (!orgId) return;
     try {
       const { type } = req.params;
+      const delimiter = readDelimiter(req, res);
+      if (delimiter === BAD_DELIMITER) return;
       const csv = await exportEntityCsv({
         organizationId: orgId,
         entityType: type,
+        delimiter,
       });
       if (csv == null) {
         res.status(404).json({ error: `Unknown entity type: ${type}` });

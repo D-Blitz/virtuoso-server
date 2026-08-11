@@ -303,6 +303,77 @@ async function main() {
       assertEq(r.json.errorRows, 0, 'single-column CSV: still parses');
     }
 
+    // ── 3c. Explicit ?delimiter= overrides detection ─────────
+    console.log('\n3c. Explicit separator overrides detection');
+    // Pipe-delimited. Detection only knows ',' and ';', so it falls
+    // back to ',' and sees one giant column — this row can only import
+    // if the explicit override is actually honoured.
+    const pipeCsv = [
+      'name|address|description',
+      '[csv-smoke] Studio A|1 rue Test|Salle pipe',
+    ].join('\n');
+    {
+      const auto = await postCsv('/api/import/preview/location', pipeCsv);
+      assertEq(auto.json.errorRows, 1, 'pipe file, no override: row errors');
+    }
+    {
+      const r = await postCsv(
+        `/api/import/preview/location?delimiter=${encodeURIComponent('|')}`,
+        pipeCsv,
+      );
+      assertEq(r.json.validRows, 1, 'pipe file, override: 1 valid');
+      assertEq(r.json.errorRows, 0, 'pipe file, override: 0 errors');
+    }
+
+    // Invalid separators are refused rather than silently coerced.
+    {
+      const r = await postCsv(
+        `/api/import/preview/location?delimiter=${encodeURIComponent('"')}`,
+        locCsv,
+      );
+      assertEq(r.status, 400, 'double-quote separator rejected');
+    }
+    {
+      const r = await postCsv(
+        '/api/import/preview/location?delimiter=ab',
+        locCsv,
+      );
+      assertEq(r.status, 400, 'multi-character separator rejected');
+    }
+
+    // ── 3d. Download honours the chosen separator ────────────
+    console.log('\n3d. Template + export honour the chosen separator');
+    {
+      const res = await fetch(
+        `${baseUrl}/api/import/template/location?delimiter=${encodeURIComponent(';')}`,
+      );
+      assertEq(res.status, 200, 'template with ";" status = 200');
+      const header = (await res.text())
+        .replace(/^﻿/, '')
+        .split('\n')[0];
+      assert(
+        header.startsWith('name;address'),
+        'template header uses the chosen separator',
+      );
+    }
+    {
+      // Full journey: export as ';', then re-upload with detection on.
+      const res = await fetch(
+        `${baseUrl}/api/import/export/location?delimiter=${encodeURIComponent(';')}`,
+      );
+      const csv = (await res.text()).replace(/^﻿/, '');
+      assert(
+        csv.split('\n')[0].startsWith('name;address'),
+        'export header uses the chosen separator',
+      );
+      const reimport = await postCsv('/api/import/commit/location', csv);
+      assertEq(reimport.json.created, 0, '";" export re-imports: 0 created');
+      assert(
+        reimport.json.updated >= 2,
+        '";" export re-imports: ≥2 updated',
+      );
+    }
+
     // ── 4. Facilitator: relation-free import ────────────────
     console.log('\n4. Facilitator preview + commit');
     const facCsv = [
