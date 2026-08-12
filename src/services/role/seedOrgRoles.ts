@@ -121,11 +121,18 @@ export type SeedResult = {
  */
 export async function seedOrgRoles(
   organizationId: string,
+  /**
+   * Prisma client to use. Pass a transaction client so creating an
+   * organization and seeding its roles succeed or fail together — an org
+   * with no roles is unusable and nobody can log into it to fix that.
+   * Defaults to the shared client, so existing callers are unaffected.
+   */
+  db: Pick<typeof prisma, 'role'> = prisma,
 ): Promise<SeedResult> {
   // Match by name (not by isSystem) since the demote_template_roles
   // migration flipped Administrateur + Intervenant to isSystem=false on
   // existing orgs — they're still present, just no longer locked.
-  const existing = await prisma.role.findMany({
+  const existing = await db.role.findMany({
     where: { organizationId, name: { in: SEEDED_ROLES.map((r) => r.name) } },
     select: { name: true },
   });
@@ -138,7 +145,7 @@ export async function seedOrgRoles(
       result.skipped.push(role.name);
       continue;
     }
-    await prisma.role.create({
+    await db.role.create({
       data: {
         organizationId,
         name: role.name,

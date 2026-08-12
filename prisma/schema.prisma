@@ -84,6 +84,18 @@ model User {
   // for facilitator-ids [x, y]". Admin-picked at user create/edit time.
   permissionScopes UserPermissionScope[]
 
+  /// Single-use links letting this person set their own password.
+  setupTokens UserSetupToken[]
+
+  /// Platform operator — can create and administer organizations across
+  /// the whole install. Deliberately a column and NOT a Permission:
+  /// permissions are granted through per-org Role rows, so a platform
+  /// permission could be self-granted by any tenant admin holding
+  /// ROLE_MANAGE. A column no tenant UI writes stays out of reach.
+  ///
+  /// Set it with scripts/grantPlatformAdmin.ts.
+  isPlatformAdmin Boolean @default(false)
+
   // Phase 0.3: soft-disable (deactivate without losing the row).
   // Login + permission middleware treat a disabled user as
   // unauthenticated. Distinct from trash: a disabled user keeps their
@@ -201,6 +213,36 @@ model Role {
 
   @@unique([organizationId, name])
   @@index([organizationId])
+}
+
+/// Single-use token backing "set your own password" links — the initial
+/// invite for a new account and, later, password resets. One model for
+/// both because they are the same operation: prove control of the
+/// mailbox, then choose a password.
+///
+/// Only the SHA-256 of the token is stored. The raw value exists solely
+/// in the emailed link, so a database read can't be turned into account
+/// takeover on every pending invite. This deliberately differs from
+/// EnrollmentInvite, which keeps its token in plaintext — acceptable for
+/// a booking link, not for credentials.
+model UserSetupToken {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// sha256(rawToken), hex. Unique so a lookup is a single indexed read.
+  tokenHash String @unique
+
+  /// INVITE — first credentials for a new account.
+  /// RESET  — forgotten password on an existing one.
+  purpose String @default("INVITE")
+
+  expiresAt  DateTime
+  consumedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
 }
 
 // Per-user resource-scoped grants. resourceType is loosely typed because

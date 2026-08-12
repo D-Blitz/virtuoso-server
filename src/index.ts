@@ -15,6 +15,7 @@ import publicWidgetFlowRoutes from './routes/publicWidgetFlow.routes';
 import publicInviteRoutes from './routes/publicInvite.routes';
 import publicRescheduleRoutes from './routes/publicReschedule.routes';
 import publicMarketplaceRoutes from './routes/publicMarketplace.routes';
+import publicAccountSetupRoutes from './routes/publicAccountSetup.routes';
 import webhookRoutes from './routes/webhook.routes';
 
 // routes
@@ -47,6 +48,7 @@ import anonymizeRoutes from './routes/anonymize.routes';
 import roleRoutes from './routes/role.routes';
 import userRoutes from './routes/user.routes';
 import organizationRoutes from './routes/organization.routes';
+import platformRoutes from './routes/platform.routes';
 import chatRoutes from './routes/chat.routes';
 import notificationRoutes from './routes/notification.routes';
 import assistantRoutes from './routes/assistant.routes';
@@ -116,6 +118,11 @@ app.use('/api/public/reschedule', publicRescheduleRoutes);
 // facilitator listings for the consumer marketplace (apps/marketplace).
 app.use('/api/public/marketplace', publicMarketplaceRoutes);
 
+// Public "set your own password" endpoints — the single-use token in the
+// URL is the proof. Must sit outside requireUser: an invited user has no
+// session and, until they finish here, no password to make one with.
+app.use('/api/public/account-setup', publicAccountSetupRoutes);
+
 // All /api routes below require an authenticated session (dev bypass available).
 // Authorization is permission-based per-route (Phase 0.3) — each router
 // declares the Permission it needs via requirePermission(...).
@@ -162,6 +169,8 @@ app.use('/api/anonymize', anonymizeRoutes);
 app.use('/api/roles', roleRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/organizations', organizationRoutes);
+// Platform operator surface — cross-tenant, gated on User.isPlatformAdmin.
+app.use('/api/platform', platformRoutes);
 app.use('/api/chat', chatRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/assistant', assistantRoutes);

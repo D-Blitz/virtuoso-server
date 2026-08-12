@@ -29,6 +29,19 @@ const TENANT_SCOPED_MODELS = new Set<string>([
   'BillingIdentity',
   // N.4 — facilitator / room blocking ranges. Always admin-created.
   'Unavailability',
+  // Accounts + roles. These were left out while there was a single
+  // organization, which made the gap invisible: UserService.list and
+  // RoleService.list have no organizationId filter of their own, so
+  // once a second org existed one tenant's admin would have listed —
+  // and been able to fetch, edit and disable — the other tenant's
+  // users by id.
+  //
+  // Safe for the queries that run OUTSIDE a request context (login,
+  // the auth middleware's role lookup, the CLI scripts): the extension
+  // only injects when `getContext()` yields an organizationId, so
+  // those keep working across orgs exactly as before.
+  'User',
+  'Role',
 ]);
 
 /**
