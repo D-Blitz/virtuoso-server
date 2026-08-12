@@ -13,6 +13,21 @@ export type AuthenticatedUser = {
   organizationId: string;
   roleId: string | null;
   roleName: string | null;
+  /**
+   * Whether this user's role carries ADMIN_ACCESS — the permission whose
+   * stated job is to gate the /admin surface.
+   *
+   * Sent so the frontend middleware can decide by CAPABILITY instead of
+   * by role NAME. It used to match against a hardcoded list
+   * (Propriétaire / Administrateur / Intervenant), which locked out any
+   * org that renamed a starter role or created a custom one — and
+   * renaming those roles is explicitly supported (see seedOrgRoles).
+   *
+   * This is a fast-path surface filter only. Real authorization is
+   * re-derived from the Role row on every API request by the auth
+   * middleware, so a stale token can at worst show an empty admin shell.
+   */
+  hasAdminAccess: boolean;
 };
 
 export class AuthService {
@@ -24,7 +39,9 @@ export class AuthService {
   async login(email: string, password: string): Promise<AuthenticatedUser | null> {
     const user = await prisma.user.findFirst({
       where: { email },
-      include: { roleRef: { select: { id: true, name: true } } },
+      include: {
+        roleRef: { select: { id: true, name: true, permissions: true } },
+      },
     });
     if (!user || !user.passwordHash) return null;
     // Phase 0.3: disabled users can't log in. Returned as bad creds
@@ -41,6 +58,7 @@ export class AuthService {
       organizationId: user.organizationId,
       roleId: user.roleRef?.id ?? null,
       roleName: user.roleRef?.name ?? null,
+      hasAdminAccess: user.roleRef?.permissions.includes('ADMIN_ACCESS') ?? false,
     };
   }
 }

@@ -202,6 +202,68 @@ async function main() {
       null,
       'wrong password still rejected',
     );
+
+    // ── hasAdminAccess is by capability, not by name ────────
+    // The frontend middleware used to match role NAMES against a
+    // hardcoded list, so renaming a starter role or inventing a custom
+    // one locked the org out of its own admin. Login now reports the
+    // ADMIN_ACCESS permission instead.
+    console.log('\n6. Admin access follows the permission, not the name');
+    const ownerRole = await prisma.role.findFirstOrThrow({
+      where: { organizationId: orgA.id, name: 'Propriétaire' },
+      select: { id: true },
+    });
+    await prisma.user.update({
+      where: { id: userA.id },
+      data: { roleId: ownerRole.id },
+    });
+    assertEq(
+      (await auth.login('iso-smoke-a@test.io', 'smoke-password'))
+        ?.hasAdminAccess,
+      true,
+      'seeded owner role grants admin access',
+    );
+
+    // A renamed starter role — the exact case that used to lock people out.
+    const adminRole = await prisma.role.findFirstOrThrow({
+      where: { organizationId: orgA.id, name: 'Administrateur' },
+      select: { id: true },
+    });
+    await prisma.role.update({
+      where: { id: adminRole.id },
+      data: { name: 'Directrice' },
+    });
+    await prisma.user.update({
+      where: { id: userA.id },
+      data: { roleId: adminRole.id },
+    });
+    const renamed = await auth.login('iso-smoke-a@test.io', 'smoke-password');
+    assertEq(renamed?.roleName, 'Directrice', 'role really was renamed');
+    assertEq(
+      renamed?.hasAdminAccess,
+      true,
+      'renamed role STILL grants admin access (the old bug)',
+    );
+
+    // A custom role with no ADMIN_ACCESS must NOT get in.
+    const custom = await prisma.role.create({
+      data: {
+        organizationId: orgA.id,
+        name: 'Comptable externe',
+        permissions: ['INVOICE_VIEW_ALL'],
+      },
+      select: { id: true },
+    });
+    await prisma.user.update({
+      where: { id: userA.id },
+      data: { roleId: custom.id },
+    });
+    assertEq(
+      (await auth.login('iso-smoke-a@test.io', 'smoke-password'))
+        ?.hasAdminAccess,
+      false,
+      'custom role without ADMIN_ACCESS is refused',
+    );
   } finally {
     await purge();
     console.log('\nCleaned up.');
