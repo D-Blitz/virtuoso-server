@@ -1,6 +1,11 @@
 import prisma from '@/prisma';
 import { isBefore } from 'date-fns';
 
+import {
+  resolveRoomAvailability,
+  roomInheritsHours,
+} from '@/domain/availability/roomAvailability';
+
 export type ValidationType = 'error' | 'warning';
 
 export type ValidationCode =
@@ -211,17 +216,29 @@ export async function validateScheduledEvent(rawInput: ScheduledEventInput): Pro
   }
 
   // ---- Room warnings ----
-  if (room && typeof room.availability === 'object' && room.availability !== null) {
-    const avail = room.availability as Record<string, Slot[]>;
+  // Hours come from the room's own override, or the venue's opening
+  // hours when the room inherits (availability === null). Resolved in
+  // one place so the two sources can't drift — see
+  // domain/availability/roomAvailability.
+  {
+    const avail = resolveRoomAvailability(room, location) as Record<
+      string,
+      Slot[]
+    >;
     const daySlots = Array.isArray(avail?.[weekday]) ? avail[weekday] : [];
 
     if (daySlots.length > 0) {
       const isRoomAvailable = isWithinAnyWindow(eventStartMin, eventEndMin, daySlots);
       if (!isRoomAvailable) {
+        // Name the venue when the constraint came from it, so the admin
+        // knows where to go and change it.
+        const source = roomInheritsHours(room)
+          ? `L’établissement "${location.name}" n'est pas ouvert à cette heure.`
+          : `La salle "${room.name}" n'est pas disponible à cette heure.`;
         issues.push({
           type: 'warning',
           code: 'ROOM_UNAVAILABLE',
-          message: `La salle "${room.name}" n'est pas disponible à cette heure.`,
+          message: source,
         });
       }
     }

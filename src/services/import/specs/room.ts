@@ -5,6 +5,8 @@
 // within the same organization. Empty cell = error (relation is
 // required).
 
+import { Prisma } from '@prisma/client';
+
 import { parseHexColor, parseJson, parseString } from '../parsers';
 import type { ImportContext, ImportEntitySpec } from '../types';
 
@@ -68,7 +70,7 @@ export const roomSpec: ImportEntitySpec = {
       required: false,
       type: 'json',
       description:
-        'Objet JSON : une clé par jour de la semaine (0 = dimanche, 1 = lundi, … 6 = samedi), et pour chaque jour la liste de ses créneaux { "start": "HH:MM", "end": "HH:MM" } en 24h. Plusieurs créneaux par jour sont possibles (matin et après-midi). Les jours absents sont considérés comme non disponibles. Laisser vide pour conserver la valeur actuelle, ou {} pour aucune disponibilité.',
+        'Objet JSON : une clé par jour de la semaine (0 = dimanche, 1 = lundi, … 6 = samedi), et pour chaque jour la liste de ses créneaux { "start": "HH:MM", "end": "HH:MM" } en 24h. Plusieurs créneaux par jour sont possibles (matin et après-midi). Laissez vide pour suivre les horaires d’ouverture du lieu — c’est le cas courant. Renseignez-le uniquement pour une salle dont les horaires diffèrent de son lieu ; {} signifie « jamais ouverte ».',
       example:
         '{"1":[{"start":"09:00","end":"12:00"},{"start":"14:00","end":"18:00"}],"3":[{"start":"10:00","end":"13:00"}]}',
     },
@@ -95,9 +97,12 @@ export const roomSpec: ImportEntitySpec = {
     if (color.error) errors.push(color.error);
     const notes = parseString(row.notes);
     if (notes.error) errors.push(notes.error);
+    // Empty cell → null, i.e. "inherit the location's opening hours".
+    // parseJson already returns null for an empty cell, so no `default`
+    // here; passing {} would make every imported room an explicit
+    // "never open" override.
     const availability = parseJson(row.availability, {
       label: 'Disponibilités',
-      default: {},
     });
     if (availability.error) errors.push(availability.error);
     const metadata = parseJson(row.metadata, { label: 'Métadonnées' });
@@ -127,7 +132,8 @@ export const roomSpec: ImportEntitySpec = {
       color: data.color as string,
       locationId: data.locationId as string,
       notes: data.notes as string | null,
-      availability: data.availability as object,
+      // null is meaningful: the room follows its location's hours.
+      availability: (data.availability as object | null) ?? Prisma.DbNull,
       ...(data.metadata != null ? { metadata: data.metadata as object } : {}),
     };
     const existing = await ctx.prisma.room.findFirst({
@@ -177,7 +183,11 @@ export const roomSpec: ImportEntitySpec = {
         location: r.location?.name ?? '',
         color: r.color,
         notes: r.notes ?? '',
-        availability: JSON.stringify(r.availability ?? {}),
+        // An inheriting room exports as an EMPTY cell, not "{}". Writing
+        // "{}" would round-trip a room that follows its venue into an
+        // explicit "never open" override on the next import.
+        availability:
+          r.availability == null ? '' : JSON.stringify(r.availability),
         metadata: r.metadata == null ? '' : JSON.stringify(r.metadata),
       }),
     );
