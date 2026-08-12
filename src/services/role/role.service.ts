@@ -76,7 +76,11 @@ function rowToDto(row: any): RoleDto {
 export class RoleService {
   /** List roles in the current org, sorted system-first then by name. */
   async list(): Promise<RoleDto[]> {
+    // Scoped by the prisma extension as well; named here for the same
+    // defence-in-depth reason as UserService.list.
+    const organizationId = getOrganizationId();
     const rows = await prisma.role.findMany({
+      where: organizationId ? { organizationId } : {},
       orderBy: [{ isSystem: 'desc' }, { name: 'asc' }],
       include: { _count: { select: { users: true } } },
     });

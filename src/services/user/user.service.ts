@@ -153,6 +153,11 @@ export class UserService {
   /** List users in the current org. Active first, then disabled. */
   async list(args: { includeDisabled?: boolean } = {}): Promise<UserDto[]> {
     const where: Record<string, any> = {};
+    // The prisma extension scopes User by org too; naming it here is
+    // defence-in-depth and makes the intent readable at the call site
+    // (same pattern as InvoiceService).
+    const organizationId = getOrganizationId();
+    if (organizationId) where.organizationId = organizationId;
     if (!args.includeDisabled) where.disabledAt = null;
 
     const rows = await prisma.user.findMany({
