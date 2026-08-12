@@ -12,6 +12,30 @@ function parseDateOr(raw: unknown, fallback: Date): Date {
 }
 
 export class LocationController {
+  /** GET /api/locations/:id/rooms-with-custom-hours */
+  async roomsWithCustomHours(req: Request, res: Response) {
+    try {
+      const rooms = await locationService.getRoomsWithCustomHours(
+        req.params.id,
+      );
+      res.json({ rooms });
+    } catch (error) {
+      sendError(res, error, 'Failed to list rooms with custom hours');
+    }
+  }
+
+  /** POST /api/locations/:id/apply-opening-hours */
+  async applyOpeningHours(req: Request, res: Response) {
+    try {
+      const result = await locationService.applyOpeningHoursToRooms(
+        req.params.id,
+      );
+      res.json(result);
+    } catch (error) {
+      sendError(res, error, 'Failed to apply opening hours to rooms');
+    }
+  }
+
   async create(req: Request, res: Response) {
     try {
       const location = await locationService.create(req.body);

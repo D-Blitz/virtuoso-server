@@ -233,6 +233,15 @@ model Location {
   latitude         Float?           // from address geocoding (BAN)
   longitude        Float?
 
+  /// Weekly opening hours for the venue, same shape as Room.availability:
+  /// { "0".."6": [{ start: "HH:MM", end: "HH:MM" }] }, keyed by
+  /// Date.getDay() (0 = Sunday).
+  ///
+  /// The baseline every room inherits unless it sets its own. Also what
+  /// the marketplace venue page shows — before this existed the public
+  /// hours were hardcoded frontend-side (MOCK_OPENING_HOURS).
+  openingHours     Json?
+
   // Contact + virtual-venue fields (surfaced on the admin UID detail panel).
   phone            String?
   email            String?
@@ -341,7 +350,21 @@ model Room {
   photoUrl     String?          // cover image (Cloudinary URL)
   gallery      String[]         @default([]) // additional photos
   locationId   String
-  availability Json
+  /// Weekly opening hours, { "0".."6": [{ start, end }] } keyed by
+  /// Date.getDay() (0 = Sunday).
+  ///
+  /// NULL means "inherit Location.openingHours" and is the default for
+  /// a new room — most rooms keep their venue's hours, and inheriting
+  /// (rather than copying the hours in) means a later change to the
+  /// venue reaches them automatically.
+  ///
+  /// A non-null value is an explicit per-room override and is never
+  /// touched by a change at the location. `{}` is a legitimate value
+  /// meaning "overridden, and open at no time".
+  ///
+  /// Read it through resolveRoomAvailability() rather than directly,
+  /// so the fallback is applied in one place.
+  availability Json?
   notes        String?
   metadata     Json?
   location     Location         @relation(fields: [locationId], references: [id])
