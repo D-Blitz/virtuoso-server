@@ -1,0 +1,22 @@
+{
+  // Production build config.
+  //
+  // Separate from tsconfig.json on purpose. That one deliberately covers
+  // src + prisma + scripts so `tsc --noEmit` type-checks the smoke tests
+  // and CLI tools too — but compiling all three means rootDir is the
+  // repo root, so the entrypoint lands at dist/src/index.js while
+  // `npm start` looks for dist/index.js. It never ran.
+  //
+  // Here rootDir is src, so the emitted tree is dist/index.js and
+  // friends. scripts/ and prisma/seed.ts stay out of the image: they're
+  // developer tools, run through ts-node, and shipping them would drag
+  // @faker-js/faker into production.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "./src",
+    "outDir": "./dist",
+    "sourceMap": true
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist", "scripts", "prisma"]
+}

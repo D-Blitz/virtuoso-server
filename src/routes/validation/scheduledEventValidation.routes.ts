@@ -1,6 +1,6 @@
 import { Router } from 'express';
-import { ScheduledEventValidationController } from '@/controllers/validation/scheduledEventValidation.controller';
-import { requirePermission } from '@/middleware/permission';
+import { ScheduledEventValidationController } from '../../controllers/validation/scheduledEventValidation.controller';
+import { requirePermission } from '../../middleware/permission';
 
 const router = Router();
 const controller = new ScheduledEventValidationController();

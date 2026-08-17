@@ -5,10 +5,10 @@
   "main": "index.js",
   "scripts": {
     "create-admin": "ts-node prisma/createAdmin.ts",
-    "dev": "nodemon --watch src --ext ts,json --exec \"ts-node -r tsconfig-paths/register src/index.ts\"",
-    "dev:once": "ts-node -r tsconfig-paths/register src/index.ts",
+    "dev": "nodemon --watch src --ext ts,json --exec \"ts-node src/index.ts\"",
+    "dev:once": "ts-node src/index.ts",
     "start": "node dist/index.js",
-    "build": "tsc",
+    "build": "tsc -p tsconfig.build.json",
     "seed": "ts-node prisma/seed.ts"
   },
   "keywords": [],
@@ -30,6 +30,7 @@
     "node": "^26.0.0",
     "papaparse": "^5.5.3",
     "pg": "^8.16.0",
+    "prisma": "^6.8.2",
     "puppeteer": "^25.1.0",
     "resend": "^6.12.3",
     "stripe": "^22.1.1",
@@ -43,7 +44,6 @@
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^22.15.23",
     "nodemon": "^3.1.10",
-    "prisma": "^6.8.2",
     "ts-node": "^10.9.2",
     "tsconfig-paths": "^4.2.0",
     "typescript": "^5.8.3"

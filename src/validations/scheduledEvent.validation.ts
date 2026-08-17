@@ -1,10 +1,10 @@
-import prisma from '@/prisma';
+import prisma from '../prisma';
 import { isBefore } from 'date-fns';
 
 import {
   resolveRoomAvailability,
   roomInheritsHours,
-} from '@/domain/availability/roomAvailability';
+} from '../domain/availability/roomAvailability';
 
 export type ValidationType = 'error' | 'warning';
 

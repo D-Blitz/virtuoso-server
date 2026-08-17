@@ -1,5 +1,5 @@
 import { Request, Response } from 'express';
-import { ScheduledEventValidationService } from '@/services/validation/scheduledEventValidation.service';
+import { ScheduledEventValidationService } from '../../services/validation/scheduledEventValidation.service';
 
 const service = new ScheduledEventValidationService();
 

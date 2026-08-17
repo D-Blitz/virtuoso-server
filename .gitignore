@@ -3,3 +3,6 @@ node_modules
 .env
 
 /src/generated/prisma
+
+# Compiled output — built in CI / the Docker image, never committed.
+dist
